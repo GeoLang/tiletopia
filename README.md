@@ -77,6 +77,27 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Web dashboard** — upload, monitor jobs, preview in CesiumJS
 - **Prometheus metrics** — `/metrics` endpoint
 
+### Premium / Enterprise Features
+- **3D Measurement Tools** — distance, area, volume, cut/fill, slope, bearing calculations
+- **Anomaly Detection** — deformation monitoring, encroachment alerts, construction deviation, statistical outlier removal
+- **Predictive Analytics** — linear regression, exponential smoothing, trend analysis, seasonal decomposition
+- **BIM Clash Detection** — hard/soft clashes, design deviation from point cloud reality capture
+- **RBAC + OIDC** — role-based access control with OpenID Connect SSO
+- **Audit Logging** — immutable event trail with query/export for compliance
+- **Raft Consensus Clustering** — high-availability multi-node deployment
+- **Priority Queue + SLA** — tenant-tiered job scheduling with deadline guarantees
+- **Webhook Delivery** — event-driven integrations with HMAC-signed payloads
+- **White-Label Branding** — custom logos, colors, domains per organization
+- **Geospatial Marketplace** — publish/discover/license 3D datasets with metered access
+- **Data Residency Geofencing** — enforce storage regions for GDPR/sovereignty compliance
+- **Retention Lifecycle** — automated tiering, archival, GDPR right-to-erasure policies
+- **Field-Level Encryption** — AES-256/ChaCha20 at rest with key rotation
+- **Custom Dashboards** — drag-and-drop widget layouts for KPIs and monitoring
+- **Cesium Stories** — narrated slide-based presentations with camera animations
+- **AR/VR Foveated Rendering** — eye-tracked LOD for XR headsets (Quest/Vision Pro/HoloLens)
+- **Cinematic Flythrough** — keyframed camera paths with easing for presentations
+- **Automated Site Reports** — scheduled HTML/PDF report generation from templates
+
 ---
 
 ## Architecture
@@ -212,12 +233,14 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 cargo test
 ```
 
-114 unit tests covering:
+213 unit tests covering:
 - Core: AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, GPU compute, diff detection, plugins (21)
 - Core: spatial queries (radius/kNN/bbox/polygon clip/volume), AI point cloud classification, change detection & time slider, implicit tiling (3D Tiles Next), colorization from imagery, glTF structural metadata (35)
+- Core: 3D measurement (distance/area/volume/cut-fill/slope/bearing), anomaly detection (deformation/encroachment/deviation/outlier), predictive analytics (linear regression/exponential smoothing/trend/seasonal), BIM clash detection (hard/soft/design deviation) (22)
 - Store: local filesystem CRUD, path traversal (6)
 - Server: health, assets, tilesets, security, annotations, temporal versioning, multi-tenancy, offline export (13)
 - Server: federated mesh networking, CRDT collaborative editing, scripting/rules engine, CI/CD pipeline validation (19)
+- Server: RBAC with OIDC, audit logging, Raft consensus clustering, priority queue with SLA, webhook delivery, white-label branding, geospatial marketplace, data residency geofencing, retention lifecycle/GDPR, field-level encryption, custom dashboards, Cesium Stories, AR/VR foveated rendering, cinematic flythrough, automated site reports (75)
 - Ingest: LAS/LAZ, GeoTIFF, BIM/IFC readers, photogrammetry (SfM) (13)
 - Terrain: quantized mesh generation, global DEM terrain (12)
 - Worker: background job processing (5)

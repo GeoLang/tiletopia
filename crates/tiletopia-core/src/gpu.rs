@@ -166,7 +166,7 @@ impl GpuContext {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups((n + 63) / 64, 1, 1);
+            pass.dispatch_workgroups(n.div_ceil(64), 1, 1);
         }
         encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, (n as u64) * 4);
         self.queue.submit([encoder.finish()]);

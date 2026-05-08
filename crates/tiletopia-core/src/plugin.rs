@@ -125,7 +125,7 @@ mod tests {
             }
         }
         fn can_handle(&self, path: &Path) -> bool {
-            path.extension().map_or(false, |e| e == "xyz")
+            path.extension().is_some_and(|e| e == "xyz")
         }
         fn read_points(&self, _path: &Path) -> Result<Vec<PluginPoint>, PluginError> {
             Ok(vec![PluginPoint {

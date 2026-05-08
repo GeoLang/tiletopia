@@ -426,7 +426,7 @@ mod tests {
         // In camera A: x_img = f * 1/10 + cx, y_img = cy
         let uv_a = [f * 1.0 / 10.0 + 2000.0, 1500.0];
         // In camera B: x_img = f * (-1)/10 + cx, y_img = cy (point is at x=-1 relative to B)
-        let uv_b = [f * (-1.0) / 10.0 + 2000.0, 1500.0];
+        let uv_b = [-f / 10.0 + 2000.0, 1500.0];
 
         let result = triangulate_point(uv_a, &cam, pos_a, uv_b, &cam, pos_b);
         assert!(result.is_some());
