@@ -4,6 +4,7 @@
 //! view-dependent LOD, and provides WebSocket for real-time data.
 
 pub mod annotations;
+pub mod api_keys;
 pub mod arvr;
 pub mod audit;
 pub mod auth;
@@ -15,17 +16,22 @@ pub mod crdt;
 pub mod dashboard;
 pub mod demo;
 pub mod encryption;
+pub mod export;
 pub mod federation;
 pub mod flythrough;
 pub mod geofence;
 pub mod marketplace;
+pub mod metering;
 pub mod metrics;
+pub mod mobile;
 pub mod offline_export;
+pub mod plugins;
 pub mod priority_queue;
 pub mod rbac;
 pub mod realtime;
 pub mod reports;
 pub mod retention;
+pub mod scheduler;
 pub mod scripting;
 pub mod stories;
 pub mod streaming;
@@ -34,7 +40,9 @@ pub mod tenant;
 pub mod terrain_api;
 pub mod upload;
 pub mod webhook;
+pub mod webhooks;
 pub mod whitelabel;
+pub mod workspaces;
 
 use axum::{
     Router,
