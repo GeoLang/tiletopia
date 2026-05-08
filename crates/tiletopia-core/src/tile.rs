@@ -91,7 +91,7 @@ pub fn write_tileset_to_dir(
     // Generate tileset.json
     let tileset = crate::lod::generate_tileset(root, "tiles/");
     let tileset_json = serde_json::to_string_pretty(&tileset)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
     std::fs::write(output_dir.join("tileset.json"), tileset_json)?;
 
     // Write all tile files

@@ -195,10 +195,12 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 cargo test
 ```
 
-29 unit tests covering:
-- Core: AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms (13)
+53 unit tests covering:
+- Core: AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, GPU compute, diff detection, plugins (21)
 - Store: local filesystem CRUD, path traversal (6)
-- Server: health, assets, tilesets, security (5)
+- Server: health, assets, tilesets, security, annotations, temporal versioning, multi-tenancy, offline export (13)
+- Ingest: LAS/LAZ, GeoTIFF, BIM/IFC readers (8)
+- Terrain: quantized mesh generation (5)
 - Terrain: quantized mesh, multi-LOD, interpolation (5)
 
 ---

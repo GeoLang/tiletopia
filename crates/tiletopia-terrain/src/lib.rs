@@ -90,6 +90,7 @@ pub struct QuantizedMeshTile {
 
 /// Quantized mesh header (Cesium terrain format).
 #[repr(C, packed)]
+#[allow(dead_code)]
 struct QuantizedMeshHeader {
     center_x: f64,
     center_y: f64,
@@ -141,7 +142,7 @@ pub fn generate_quantized_mesh(heightmap: &Heightmap) -> Vec<u8> {
     }
 
     // Build output buffer
-    let vertex_count = (w * h) as u32;
+    let vertex_count = w * h;
     let mut buf = Vec::new();
 
     // Header (simplified — real implementation needs ECEF coords)

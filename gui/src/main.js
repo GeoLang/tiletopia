@@ -6,7 +6,6 @@ import './style.css';
 const API = '/api/v1';
 
 // Initialize Cesium viewer
-Cesium.Ion.defaultAccessToken = ''; // No Ion needed — self-hosted tiles
 const viewer = new Cesium.Viewer('cesium-container', {
   terrain: undefined,
   baseLayerPicker: false,
@@ -18,6 +17,7 @@ const viewer = new Cesium.Viewer('cesium-container', {
   navigationHelpButton: false,
   infoBox: true,
   selectionIndicator: true,
+  creditContainer: document.createElement('div'),
   baseLayer: new Cesium.ImageryLayer(
     new Cesium.OpenStreetMapImageryProvider({
       url: 'https://tile.openstreetmap.org/',

@@ -103,26 +103,24 @@ pub fn read_ifc(path: &Path) -> Result<BimModel, BimError> {
 
 fn extract_schema(content: &str) -> Option<String> {
     for line in content.lines() {
-        if line.starts_with("FILE_SCHEMA") {
-            if let Some(start) = line.find('\'') {
-                if let Some(end) = line[start + 1..].find('\'') {
-                    return Some(line[start + 1..start + 1 + end].to_string());
-                }
-            }
+        if !line.starts_with("FILE_SCHEMA") {
+            continue;
         }
+        let start = line.find('\'')?;
+        let end = line[start + 1..].find('\'')?;
+        return Some(line[start + 1..start + 1 + end].to_string());
     }
     None
 }
 
 fn extract_entity_name(content: &str, entity_type: &str) -> Option<String> {
     for line in content.lines() {
-        if line.contains(entity_type) {
-            if let Some(start) = line.find('\'') {
-                if let Some(end) = line[start + 1..].find('\'') {
-                    return Some(line[start + 1..start + 1 + end].to_string());
-                }
-            }
+        if !line.contains(entity_type) {
+            continue;
         }
+        let start = line.find('\'')?;
+        let end = line[start + 1..].find('\'')?;
+        return Some(line[start + 1..start + 1 + end].to_string());
     }
     None
 }
@@ -130,11 +128,13 @@ fn extract_entity_name(content: &str, entity_type: &str) -> Option<String> {
 fn extract_storeys(content: &str) -> Vec<String> {
     let mut storeys = Vec::new();
     for line in content.lines() {
-        if line.contains("IFCBUILDINGSTOREY") {
-            if let Some(start) = line.find('\'') {
-                if let Some(end) = line[start + 1..].find('\'') {
-                    storeys.push(line[start + 1..start + 1 + end].to_string());
-                }
+        if !line.contains("IFCBUILDINGSTOREY") {
+            continue;
+        }
+        if let Some(start) = line.find('\'') {
+            let end = line[start + 1..].find('\'').unwrap_or(0);
+            if end > 0 {
+                storeys.push(line[start + 1..start + 1 + end].to_string());
             }
         }
     }

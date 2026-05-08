@@ -47,7 +47,7 @@ pub async fn init_streaming_upload(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("upload.bin")
         .to_string();
-    let total_size: u64 = headers
+    let _total_size: u64 = headers
         .get("x-total-size")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok())

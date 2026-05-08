@@ -48,6 +48,12 @@ impl RealtimeState {
     }
 }
 
+impl Default for RealtimeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// WebSocket upgrade handler.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
