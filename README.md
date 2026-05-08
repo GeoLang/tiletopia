@@ -6,16 +6,6 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 
 **Website:** https://tiletopia-hq.github.io/tiletopia
 
-## Screenshots
-
-| Hero | Features |
-|------|----------|
-| ![Hero](docs/screenshots/hero.png) | ![Features](docs/screenshots/features.png) |
-
-| Comparison Table |
-|-----------------|
-| ![Comparison](docs/screenshots/comparison.png) |
-
 ---
 
 ## Features
