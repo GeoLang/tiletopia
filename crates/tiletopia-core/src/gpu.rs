@@ -222,7 +222,9 @@ pub fn gpu_available() -> bool {
 
 /// GPU-accelerated point decimation.
 ///
-/// Uses voxel grid filtering on GPU when available, otherwise CPU stride decimation.
+/// Strategy: compute Morton codes (GPU), sort points by spatial locality,
+/// then take uniformly-spaced samples. This gives spatially-uniform decimation
+/// unlike naive stride sampling on unsorted data.
 pub fn decimate_points_gpu(
     positions: &[[f32; 3]],
     target_count: usize,
@@ -230,9 +232,36 @@ pub fn decimate_points_gpu(
     if positions.len() <= target_count {
         return positions.to_vec();
     }
-    // CPU path: stride-based decimation (used when GPU unavailable or feature disabled)
+
+    // Compute spatial hash (uses GPU when available)
+    let cell_size = estimate_cell_size(positions, target_count);
+    let morton_codes = spatial_hash_gpu(positions, cell_size);
+
+    // Sort indices by Morton code for spatial locality
+    let mut indices: Vec<usize> = (0..positions.len()).collect();
+    indices.sort_unstable_by_key(|&i| morton_codes[i]);
+
+    // Stride sample from spatially-sorted points → uniform spatial distribution
     let stride = std::cmp::max(1, positions.len() / target_count);
-    positions.iter().step_by(stride).copied().collect()
+    indices.iter().step_by(stride).map(|&i| positions[i]).collect()
+}
+
+/// Estimate a good cell size for the given decimation ratio.
+fn estimate_cell_size(positions: &[[f32; 3]], target_count: usize) -> f32 {
+    if positions.is_empty() { return 1.0; }
+    // Compute bounding box extent
+    let mut min = [f32::MAX; 3];
+    let mut max = [f32::MIN; 3];
+    for p in positions {
+        for i in 0..3 {
+            min[i] = min[i].min(p[i]);
+            max[i] = max[i].max(p[i]);
+        }
+    }
+    let extent = ((max[0] - min[0]) * (max[1] - min[1]) * (max[2] - min[2])).cbrt();
+    // Cell size such that ~target_count cells cover the volume
+    let cells_per_dim = (target_count as f32).cbrt();
+    (extent / cells_per_dim).max(0.001)
 }
 
 /// Compute spatial hash (Morton codes) for point cloud.
