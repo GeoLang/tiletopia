@@ -19,18 +19,27 @@ pub mod collaboration;
 pub mod crdt;
 pub mod dashboard;
 pub mod demo;
+pub mod elevation;
 pub mod encryption;
 pub mod export;
+pub mod feature_service;
 pub mod federation;
+pub mod flight_planning;
 pub mod flythrough;
 pub mod geocoding;
 pub mod geofence;
+pub mod geoprocessing;
+pub mod geostatistics;
 pub mod indoor;
+pub mod isochrone;
+pub mod issue_tracking;
+pub mod map_matching;
 pub mod map_tiles;
 pub mod marketplace;
 pub mod metering;
 pub mod metrics;
 pub mod mobile;
+pub mod multispectral;
 pub mod offline_export;
 pub mod photogrammetry;
 pub mod plugins;
@@ -41,13 +50,16 @@ pub mod realtime;
 pub mod reports;
 pub mod retention;
 pub mod routing;
+pub mod scan_registration;
 pub mod scheduler;
 pub mod scripting;
 pub mod stac;
+pub mod static_map;
 pub mod stories;
 pub mod streaming;
 pub mod temporal;
 pub mod tenant;
+pub mod terrain_analysis;
 pub mod terrain_api;
 pub mod upload;
 pub mod versioning;
@@ -159,6 +171,19 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::cog_routes())
         .merge(premium_routes::routing_routes())
         .merge(premium_routes::map_tile_routes())
+        // Batch 2: competitive gap-closing
+        .merge(premium_routes::isochrone_routes())
+        .merge(premium_routes::geoprocessing_routes())
+        .merge(premium_routes::feature_service_routes())
+        .merge(premium_routes::elevation_routes())
+        .merge(premium_routes::map_matching_routes())
+        .merge(premium_routes::static_map_routes())
+        .merge(premium_routes::flight_planning_routes())
+        .merge(premium_routes::scan_registration_routes())
+        .merge(premium_routes::issue_tracking_routes())
+        .merge(premium_routes::terrain_analysis_routes())
+        .merge(premium_routes::geostatistics_routes())
+        .merge(premium_routes::multispectral_routes())
         .layer(middleware::from_fn(auth::auth_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)

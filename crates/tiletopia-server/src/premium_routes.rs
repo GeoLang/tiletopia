@@ -7,8 +7,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{
-    AppState, api_keys, bim4d, classification, cog, collaboration, export, geocoding, indoor,
-    map_tiles, metering, mobile, photogrammetry, plugins, routing, scheduler, stac, versioning,
+    AppState, api_keys, bim4d, classification, cog, collaboration, elevation, export,
+    feature_service, flight_planning, geocoding, geoprocessing, geostatistics, indoor, isochrone,
+    issue_tracking, map_matching, map_tiles, metering, mobile, multispectral, photogrammetry,
+    plugins, routing, scan_registration, scheduler, stac, static_map, terrain_analysis, versioning,
     webhooks, workspaces,
 };
 
@@ -463,4 +465,343 @@ async fn list_vector_layers() -> Json<serde_json::Value> {
         }
         None => Json(serde_json::json!({ "layers": [] })),
     }
+}
+
+// ─── Batch 2: Competitive gap-closing routes ────────────────────────────────
+
+/// Routes for isochrone/travel-time analysis.
+pub fn isochrone_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/isochrone/compute", get(compute_isochrone_demo))
+        .route("/api/v1/isochrone/profiles", get(isochrone_profiles))
+}
+
+async fn compute_isochrone_demo() -> Json<serde_json::Value> {
+    let request = isochrone::IsochroneRequest {
+        origin: [-122.4194, 37.7749],
+        profile: isochrone::TravelProfile::Driving,
+        contours_minutes: vec![5, 10, 15],
+        denoise: 0.5,
+    };
+    let result = isochrone::compute_isochrone(&request);
+    Json(serde_json::json!(result))
+}
+
+async fn isochrone_profiles() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "profiles": ["Walking", "Cycling", "Driving", "PublicTransit"]
+    }))
+}
+
+/// Routes for geoprocessing operations.
+pub fn geoprocessing_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/geoprocessing/operations", get(list_geo_operations))
+        .route("/api/v1/geoprocessing/demo", get(geoprocessing_demo))
+}
+
+async fn list_geo_operations() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "operations": ["Buffer", "ConvexHull", "Centroid", "Simplify", "Intersection", "Union", "Difference"]
+    }))
+}
+
+async fn geoprocessing_demo() -> Json<serde_json::Value> {
+    let polygon = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]];
+    let geom = geoprocessing::Geometry {
+        geom_type: geoprocessing::GeomType::Polygon,
+        coordinates: polygon.clone(),
+    };
+    let buffered = geoprocessing::buffer(&geom, 100.0);
+    let centroid = geoprocessing::centroid(&polygon);
+    let hull = geoprocessing::convex_hull(&polygon);
+    Json(serde_json::json!({
+        "original_vertices": polygon.len(),
+        "buffered_vertices": buffered.buffered.coordinates.len(),
+        "buffer_area_m2": buffered.area_m2,
+        "centroid": centroid,
+        "hull_vertices": hull.len()
+    }))
+}
+
+/// Routes for feature service (WFS-like).
+pub fn feature_service_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/features/layers", get(list_feature_layers))
+        .route("/api/v1/features/query", get(query_features_demo))
+}
+
+async fn list_feature_layers() -> Json<serde_json::Value> {
+    let engine = feature_service::FeatureServiceEngine::new();
+    let layers = engine.list_layers();
+    Json(serde_json::json!({ "layers": layers }))
+}
+
+async fn query_features_demo() -> Json<serde_json::Value> {
+    let engine = feature_service::FeatureServiceEngine::new();
+    let layers = engine.list_layers();
+    if let Some(layer) = layers.first() {
+        let query = feature_service::SpatialQuery {
+            bbox: None,
+            intersects: None,
+            within_distance_m: None,
+            where_clause: None,
+            limit: 100,
+            offset: 0,
+            order_by: None,
+        };
+        let features = engine.query_features(layer.id, &query);
+        Json(serde_json::json!({ "type": "FeatureCollection", "features": features }))
+    } else {
+        Json(serde_json::json!({ "type": "FeatureCollection", "features": [] }))
+    }
+}
+
+/// Routes for elevation service.
+pub fn elevation_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/elevation/point", get(elevation_point))
+        .route("/api/v1/elevation/profile", get(elevation_profile_demo))
+}
+
+async fn elevation_point() -> Json<serde_json::Value> {
+    let elev = elevation::get_elevation(37.7749, -122.4194);
+    Json(serde_json::json!(elev))
+}
+
+async fn elevation_profile_demo() -> Json<serde_json::Value> {
+    let path = vec![[-122.42, 37.77], [-122.41, 37.78], [-122.40, 37.79]];
+    let profile = elevation::get_profile(&path);
+    Json(serde_json::json!(profile))
+}
+
+/// Routes for map matching.
+pub fn map_matching_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/map-matching/match", get(map_match_demo))
+}
+
+async fn map_match_demo() -> Json<serde_json::Value> {
+    let request = map_matching::MapMatchRequest {
+        trace: vec![
+            map_matching::GpsPoint { latitude: 37.7749, longitude: -122.4194, timestamp: None, accuracy_m: Some(5.0), speed_mps: None, bearing_deg: None },
+            map_matching::GpsPoint { latitude: 37.7755, longitude: -122.4180, timestamp: None, accuracy_m: Some(5.0), speed_mps: None, bearing_deg: None },
+            map_matching::GpsPoint { latitude: 37.7760, longitude: -122.4165, timestamp: None, accuracy_m: Some(5.0), speed_mps: None, bearing_deg: None },
+            map_matching::GpsPoint { latitude: 37.7768, longitude: -122.4150, timestamp: None, accuracy_m: Some(5.0), speed_mps: None, bearing_deg: None },
+        ],
+        profile: map_matching::MatchProfile::Driving,
+        search_radius_m: 50.0,
+    };
+    let result = map_matching::match_trace(&request);
+    Json(serde_json::json!(result))
+}
+
+/// Routes for static map rendering.
+pub fn static_map_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/static-map/render", get(static_map_info))
+        .route("/api/v1/static-map/formats", get(static_map_formats))
+}
+
+async fn static_map_info() -> Json<serde_json::Value> {
+    let req = static_map::StaticMapRequest {
+        center: Some([-122.4194, 37.7749]),
+        zoom: Some(14.0),
+        bbox: None,
+        width: 800,
+        height: 600,
+        format: static_map::ImageFormat::Png,
+        style_id: None,
+        markers: vec![],
+        overlays: vec![],
+        dpi: 72,
+    };
+    let result = static_map::render_static_map(&req);
+    Json(serde_json::json!({
+        "width": result.width,
+        "height": result.height,
+        "format": format!("{:?}", result.format),
+        "size_bytes": result.size_bytes,
+        "bbox": result.bbox,
+        "render_time_ms": result.render_time_ms
+    }))
+}
+
+async fn static_map_formats() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "formats": ["PNG", "JPEG", "WebP", "SVG", "PDF"],
+        "max_width": 4096,
+        "max_height": 4096
+    }))
+}
+
+/// Routes for drone flight planning.
+pub fn flight_planning_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/flight-planning/generate", get(generate_flight_demo))
+        .route("/api/v1/flight-planning/patterns", get(flight_patterns))
+}
+
+async fn generate_flight_demo() -> Json<serde_json::Value> {
+    let area = vec![
+        [-122.42, 37.77], [-122.41, 37.77],
+        [-122.41, 37.78], [-122.42, 37.78], [-122.42, 37.77],
+    ];
+    let plan = flight_planning::generate_grid_plan(&area, 80.0, 0.8, 0.7);
+    Json(serde_json::json!({
+        "waypoints": plan.waypoints.len(),
+        "total_distance_m": plan.statistics.total_distance_m,
+        "estimated_duration_min": plan.statistics.estimated_flight_time_min,
+        "gsd_cm": plan.parameters.gsd_cm_per_px,
+        "coverage_area_m2": plan.statistics.coverage_area_m2
+    }))
+}
+
+async fn flight_patterns() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "patterns": ["Grid/Lawnmower", "Double Grid/Crosshatch", "Orbit/POI", "Corridor", "Free Flight"]
+    }))
+}
+
+/// Routes for scan registration (ICP).
+pub fn scan_registration_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/scan-registration/demo", get(scan_registration_demo))
+        .route("/api/v1/scan-registration/methods", get(registration_methods))
+}
+
+async fn scan_registration_demo() -> Json<serde_json::Value> {
+    let reg = scan_registration::demo_registration();
+    Json(serde_json::json!({
+        "id": reg.id,
+        "scans": reg.scans.len(),
+        "method": format!("{:?}", reg.method),
+        "status": format!("{:?}", reg.status),
+        "result": reg.result
+    }))
+}
+
+async fn registration_methods() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "methods": ["PointToPoint", "PointToPlane", "GeneralizedIcp", "Ndt", "FeatureBased"]
+    }))
+}
+
+/// Routes for issue/defect tracking.
+pub fn issue_tracking_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/issues", get(list_issues))
+        .route("/api/v1/issues/stats", get(issue_stats))
+}
+
+async fn list_issues() -> Json<serde_json::Value> {
+    let tracker = issue_tracking::IssueTracker::new();
+    let issues = tracker.list_issues(None);
+    Json(serde_json::json!({ "issues": issues }))
+}
+
+async fn issue_stats() -> Json<serde_json::Value> {
+    let tracker = issue_tracking::IssueTracker::new();
+    let stats = tracker.stats();
+    Json(serde_json::json!(stats))
+}
+
+/// Routes for terrain analysis.
+pub fn terrain_analysis_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/terrain-analysis/operations", get(terrain_operations))
+        .route("/api/v1/terrain-analysis/demo", get(terrain_analysis_demo))
+}
+
+async fn terrain_operations() -> Json<serde_json::Value> {
+    let ops = terrain_analysis::available_analyses();
+    Json(serde_json::json!({ "operations": ops }))
+}
+
+async fn terrain_analysis_demo() -> Json<serde_json::Value> {
+    // Simple 5x5 DEM
+    let dem = vec![
+        vec![100.0, 105.0, 110.0, 108.0, 103.0],
+        vec![102.0, 108.0, 115.0, 112.0, 106.0],
+        vec![105.0, 112.0, 120.0, 118.0, 110.0],
+        vec![103.0, 110.0, 116.0, 114.0, 108.0],
+        vec![100.0, 106.0, 112.0, 110.0, 105.0],
+    ];
+    let slope_params = terrain_analysis::SlopeParams {
+        output_unit: terrain_analysis::SlopeUnit::Degrees,
+        method: terrain_analysis::SlopeMethod::Horn,
+    };
+    let result = terrain_analysis::compute_slope(&dem, 10.0, &slope_params);
+    Json(serde_json::json!({
+        "analysis": "slope",
+        "statistics": result.statistics,
+        "resolution_m": result.resolution_m
+    }))
+}
+
+/// Routes for geostatistics.
+pub fn geostatistics_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/geostatistics/methods", get(geostat_methods))
+        .route("/api/v1/geostatistics/demo", get(geostat_demo))
+}
+
+async fn geostat_methods() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "methods": ["IDW", "OrdinaryKriging", "UniversalKriging", "SimpleKriging"],
+        "variogram_models": ["Spherical", "Exponential", "Gaussian", "Linear", "Power"]
+    }))
+}
+
+async fn geostat_demo() -> Json<serde_json::Value> {
+    let samples = vec![
+        geostatistics::SamplePoint { x: 0.0, y: 0.0, value: 10.0 },
+        geostatistics::SamplePoint { x: 1.0, y: 0.0, value: 12.0 },
+        geostatistics::SamplePoint { x: 0.0, y: 1.0, value: 11.0 },
+        geostatistics::SamplePoint { x: 1.0, y: 1.0, value: 13.0 },
+        geostatistics::SamplePoint { x: 0.5, y: 0.5, value: 11.5 },
+    ];
+    let result = geostatistics::interpolate_grid(
+        &samples,
+        [0.0, 0.0, 1.0, 1.0],
+        0.25,
+        &geostatistics::InterpolationMethod::Idw { power: 2.0 },
+    );
+    Json(serde_json::json!({
+        "grid_rows": result.grid_rows,
+        "grid_cols": result.grid_cols,
+        "statistics": result.statistics,
+        "morans_i": geostatistics::morans_i(&samples, 1.5)
+    }))
+}
+
+/// Routes for multispectral imagery.
+pub fn multispectral_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/multispectral/indices", get(spectral_indices))
+        .route("/api/v1/multispectral/sensors", get(spectral_sensors))
+        .route("/api/v1/multispectral/demo", get(multispectral_demo))
+}
+
+async fn spectral_indices() -> Json<serde_json::Value> {
+    let indices = multispectral::supported_indices();
+    Json(serde_json::json!({ "indices": indices }))
+}
+
+async fn spectral_sensors() -> Json<serde_json::Value> {
+    let sensors = multispectral::supported_sensors();
+    Json(serde_json::json!({ "sensors": sensors }))
+}
+
+async fn multispectral_demo() -> Json<serde_json::Value> {
+    let red = vec![0.1, 0.2, 0.3, 0.05, 0.15, 0.25, 0.08, 0.12, 0.18];
+    let nir = vec![0.5, 0.4, 0.3, 0.8, 0.6, 0.35, 0.7, 0.55, 0.45];
+    let ndvi = multispectral::compute_ndvi(&red, &nir);
+    let classification = multispectral::classify_ndvi(&ndvi, 0.25);
+    Json(serde_json::json!({
+        "ndvi_values": ndvi,
+        "classification": classification,
+        "min": ndvi.iter().cloned().fold(f64::INFINITY, f64::min),
+        "max": ndvi.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+    }))
 }

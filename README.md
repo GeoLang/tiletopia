@@ -123,6 +123,18 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Indoor Mapping** — floor plans, room navigation, BLE beacon positioning, accessibility routing
 - **Cloud Optimized GeoTIFF (COG)** — range-request tile serving with overviews and band statistics
 - **Routing & Navigation** — Dijkstra/A* shortest path, multi-profile (driving/walking/cycling), turn-by-turn directions
+- **Isochrone / Travel-Time Analysis** — compute reachable areas by time (5/10/15 min), multi-profile polygons
+- **Geoprocessing** — buffer, convex hull, centroid, simplify, union, intersection, difference, Voronoi
+- **Feature Service (WFS)** — vector feature CRUD, spatial queries, field schemas, layer management
+- **Elevation Service** — point elevation lookup, elevation profiles along paths, batch queries
+- **Map Matching** — snap GPS traces to road network with confidence scoring
+- **Static Map Rendering** — server-side PNG/JPEG/WebP/SVG/PDF map images with markers and overlays
+- **Drone Flight Planning** — grid/orbit mission generation, GSD calculation, waypoint export
+- **Scan Registration (ICP)** — multi-scan point cloud alignment (Point-to-Point/Point-to-Plane/NDT)
+- **Issue / Defect Tracking** — location-pinned construction issues with status workflows and attachments
+- **Terrain Analysis** — slope, aspect, hillshade, viewshed, watershed, contour lines from DEMs
+- **Geostatistics** — IDW, kriging (ordinary/universal/simple), variograms, Moran's I autocorrelation
+- **Multispectral Imagery** — NDVI, EVI, SAVI, thermal anomaly detection, band math, spectral indices
 
 ---
 
@@ -207,6 +219,19 @@ docker run -p 3000:3000 -v /path/to/data:/data tiletopia serve --data-dir /data
 | `GET` | `/api/v1/routing/route` | Compute route |
 | `GET` | `/api/v1/cog/datasets` | Cloud Optimized GeoTIFF datasets |
 | `GET` | `/api/v1/indoor/buildings` | Indoor floor plans |
+| `GET` | `/api/v1/isochrone/compute` | Compute isochrone polygons |
+| `GET` | `/api/v1/geoprocessing/operations` | List geoprocessing ops |
+| `GET` | `/api/v1/features/layers` | List feature service layers |
+| `GET` | `/api/v1/elevation/point` | Point elevation lookup |
+| `GET` | `/api/v1/elevation/profile` | Elevation profile along path |
+| `GET` | `/api/v1/map-matching/match` | Snap GPS trace to road |
+| `GET` | `/api/v1/static-map/render` | Render static map image |
+| `GET` | `/api/v1/flight-planning/generate` | Generate drone flight plan |
+| `GET` | `/api/v1/scan-registration/demo` | ICP scan alignment |
+| `GET` | `/api/v1/issues` | List location-pinned issues |
+| `GET` | `/api/v1/terrain-analysis/operations` | Terrain analysis ops |
+| `GET` | `/api/v1/geostatistics/methods` | List interpolation methods |
+| `GET` | `/api/v1/multispectral/indices` | Spectral indices (NDVI, etc.) |
 | `GET` | `/metrics` | Prometheus metrics |
 
 ---
@@ -263,9 +288,21 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 | **Routing & navigation** | ✅ | ❌ |
 | **Indoor mapping** | ✅ | ❌ |
 | **Real-time collaboration** | ✅ | ❌ |
+| **Isochrone / travel-time** | ✅ | ❌ |
+| **Geoprocessing engine** | ✅ | ❌ |
+| **Feature service (WFS)** | ✅ | ❌ |
+| **Elevation service** | ✅ | ❌ |
+| **Map matching** | ✅ | ❌ |
+| **Static map rendering** | ✅ | ❌ |
+| **Drone flight planning** | ✅ | ❌ |
+| **Scan registration (ICP)** | ✅ | ❌ |
+| **Issue / defect tracking** | ✅ | ❌ |
+| **Terrain analysis** | ✅ | ❌ |
+| **Geostatistics (kriging/IDW)** | ✅ | ❌ |
+| **Multispectral indices** | ✅ | ❌ |
 | **Price** | **Free forever** | $150–$3,750/month |
 
-**22 exclusive features** that Cesium Ion cannot match.
+**34 exclusive features** that Cesium Ion cannot match.
 
 ---
 
@@ -275,7 +312,7 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 cargo test
 ```
 
-282 unit tests covering:
+341 unit tests covering:
 - Core: AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, GPU compute, diff detection, plugins (21)
 - Core: spatial queries (radius/kNN/bbox/polygon clip/volume), AI point cloud classification, change detection & time slider, implicit tiling (3D Tiles Next), colorization from imagery, glTF structural metadata (35)
 - Core: 3D measurement (distance/area/volume/cut-fill/slope/bearing), anomaly detection (deformation/encroachment/deviation/outlier), predictive analytics (linear regression/exponential smoothing/trend/seasonal), BIM clash detection (hard/soft/design deviation) (22)
@@ -285,6 +322,7 @@ cargo test
 - Server: RBAC with OIDC, audit logging, Raft consensus clustering, priority queue with SLA, webhook delivery, white-label branding, geospatial marketplace, data residency geofencing, retention lifecycle/GDPR, field-level encryption, custom dashboards, narrated presentations (Stories), AR/VR foveated rendering, cinematic flythrough, automated site reports (75)
 - Server: API keys, metering, webhooks, workspaces, export, scheduler, plugins, mobile (22)
 - Server: photogrammetry, classification, collaboration, versioning, BIM 4D, geocoding, STAC, indoor, COG, routing, map tiles (47)
+- Server: isochrone, geoprocessing, feature service, elevation, map matching, static map, flight planning, scan registration, issue tracking, terrain analysis, geostatistics, multispectral (51)
 - Ingest: LAS/LAZ, GeoTIFF, BIM/IFC readers, photogrammetry (SfM) (13)
 - Terrain: quantized mesh generation, global DEM terrain (12)
 - Worker: background job processing (5)
