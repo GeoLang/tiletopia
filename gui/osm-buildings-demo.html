@@ -107,6 +107,9 @@ const viewer = new Cesium.Viewer('cesium-container', {
   ),
 });
 
+// Enable backface culling for solid appearance
+viewer.scene.globe.backFaceCulling = true;
+
 // Start at NYC
 viewer.camera.flyTo({
   destination: Cesium.Cartesian3.fromDegrees(-73.985, 40.748, 800),
@@ -198,86 +201,96 @@ function renderBuildings(data) {
     return;
   }
 
-  // Render each building mesh as a Cesium Primitive with actual polygon geometry
+  // Render each building as a Cesium extruded polygon entity
+  // This gives proper 3D shading, outlines, and depth via CesiumJS built-in lighting
   data.meshes.forEach(mesh => {
     if (!mesh.vertices || mesh.vertices.length === 0) return;
 
-    // Reference point (first vertex lon/lat) for local coordinate system
-    const refLon = mesh.vertices[0][0];
-    const refLat = mesh.vertices[0][1];
-    const refCartographic = Cesium.Cartographic.fromDegrees(refLon, refLat, 0);
-    const refCartesian = Cesium.Cartesian3.fromRadians(refCartographic.longitude, refCartographic.latitude, 0);
+    // Extract footprint (ground-level vertices only) from the mesh
+    const minHeight = mesh.min_height || 0;
+    const height = mesh.height || 10;
 
-    // Build position array: convert each vertex from [lon, lat, z_meters] to Cartesian3
-    const positions = new Float64Array(mesh.vertices.length * 3);
-    for (let i = 0; i < mesh.vertices.length; i++) {
-      const [lon, lat, z] = mesh.vertices[i];
-      const cart = Cesium.Cartesian3.fromDegrees(lon, lat, z);
-      positions[i * 3] = cart.x;
-      positions[i * 3 + 1] = cart.y;
-      positions[i * 3 + 2] = cart.z;
-    }
-
-    // Build normal array
-    let normals;
-    if (mesh.normals && mesh.normals.length === mesh.vertices.length) {
-      normals = new Float32Array(mesh.normals.length * 3);
-      for (let i = 0; i < mesh.normals.length; i++) {
-        normals[i * 3] = mesh.normals[i][0];
-        normals[i * 3 + 1] = mesh.normals[i][1];
-        normals[i * 3 + 2] = mesh.normals[i][2];
+    // Get unique footprint coordinates from ground vertices
+    const groundVerts = mesh.vertices.filter(v => Math.abs(v[2] - minHeight) < 0.1);
+    let footprint;
+    if (groundVerts.length >= 3) {
+      // Use ground vertices as footprint
+      footprint = groundVerts.map(v => Cesium.Cartographic.fromDegrees(v[0], v[1]));
+    } else {
+      // Fallback: collect unique (lon,lat) pairs from all vertices
+      const seen = new Set();
+      footprint = [];
+      for (const v of mesh.vertices) {
+        const key = `${v[0].toFixed(7)},${v[1].toFixed(7)}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          footprint.push(Cesium.Cartographic.fromDegrees(v[0], v[1]));
+        }
       }
     }
 
-    // Build index array
-    const indices = new Uint32Array(mesh.triangles.length * 3);
-    for (let i = 0; i < mesh.triangles.length; i++) {
-      indices[i * 3] = mesh.triangles[i][0];
-      indices[i * 3 + 1] = mesh.triangles[i][1];
-      indices[i * 3 + 2] = mesh.triangles[i][2];
+    // Deduplicate and build position array
+    const seen = new Set();
+    const uniquePositions = [];
+    for (const c of footprint) {
+      const key = `${c.longitude.toFixed(10)},${c.latitude.toFixed(10)}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        uniquePositions.push(Cesium.Math.toDegrees(c.longitude), Cesium.Math.toDegrees(c.latitude));
+      }
     }
 
-    const wallColor = Cesium.Color.fromBytes(mesh.wall_color[0], mesh.wall_color[1], mesh.wall_color[2], 220);
+    if (uniquePositions.length < 6) return; // need at least 3 points (6 values)
 
-    const geometry = new Cesium.Geometry({
-      attributes: {
-        position: new Cesium.GeometryAttribute({
-          componentDatatype: Cesium.ComponentDatatype.DOUBLE,
-          componentsPerAttribute: 3,
-          values: positions,
-        }),
-        ...(normals ? {
-          normal: new Cesium.GeometryAttribute({
-            componentDatatype: Cesium.ComponentDatatype.FLOAT,
-            componentsPerAttribute: 3,
-            values: normals,
-          }),
-        } : {}),
+    const wallColor = Cesium.Color.fromBytes(mesh.wall_color[0], mesh.wall_color[1], mesh.wall_color[2], 255);
+    const roofColor = Cesium.Color.fromBytes(mesh.roof_color[0], mesh.roof_color[1], mesh.roof_color[2], 255);
+    const outlineColor = wallColor.darken(0.4, new Cesium.Color());
+
+    const entity = viewer.entities.add({
+      name: mesh.name || `Building ${mesh.osm_id}`,
+      polygon: {
+        hierarchy: Cesium.Cartesian3.fromDegreesArray(uniquePositions),
+        height: minHeight,
+        extrudedHeight: height,
+        material: wallColor,
+        outline: true,
+        outlineColor: outlineColor,
+        outlineWidth: 1,
+        closeTop: true,
+        closeBottom: true,
       },
-      indices: indices,
-      primitiveType: Cesium.PrimitiveType.TRIANGLES,
-      boundingSphere: Cesium.BoundingSphere.fromVertices(Array.from(positions)),
+      description: `<h3>${mesh.name || 'Building'}</h3>` +
+        `<p>OSM ID: ${mesh.osm_id}<br>Height: ${height}m<br>Roof: ${mesh.roof_shape}</p>`,
     });
+    entities.push(entity);
 
-    const instance = new Cesium.GeometryInstance({
-      geometry: geometry,
-      attributes: {
-        color: Cesium.ColorGeometryInstanceAttribute.fromColor(wallColor),
-      },
-    });
+    // Add spire/antenna for tall buildings with pyramidal roof
+    if (mesh.roof_shape === 'Pyramidal' && height > 100) {
+      // Compute centroid
+      let cLon = 0, cLat = 0, count = uniquePositions.length / 2;
+      for (let i = 0; i < uniquePositions.length; i += 2) {
+        cLon += uniquePositions[i];
+        cLat += uniquePositions[i + 1];
+      }
+      cLon /= count;
+      cLat /= count;
 
-    const primitive = viewer.scene.primitives.add(new Cesium.Primitive({
-      geometryInstances: instance,
-      appearance: new Cesium.PerInstanceColorAppearance({
-        flat: !normals,
-        translucent: true,
-      }),
-      asynchronous: false,
-    }));
-    primitives.push(primitive);
+      const spireHeight = height * 0.12;
+      const spire = viewer.entities.add({
+        name: (mesh.name || 'Building') + ' (spire)',
+        position: Cesium.Cartesian3.fromDegrees(cLon, cLat, height + spireHeight / 2),
+        cylinder: {
+          length: spireHeight,
+          topRadius: 1,
+          bottomRadius: 3,
+          material: Cesium.Color.fromBytes(mesh.roof_color[0], mesh.roof_color[1], mesh.roof_color[2]),
+        },
+      });
+      entities.push(spire);
+    }
   });
 
-  log(`Rendered ${primitives.length} building mesh(es) as 3D primitives`, 'success');
+  log(`Rendered ${entities.length} building entities with proper 3D shading`, 'success');
 }
 
 function renderFallbackBoxes(data) {

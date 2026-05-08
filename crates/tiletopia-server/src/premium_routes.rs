@@ -879,44 +879,237 @@ pub fn osm_buildings_routes() -> Router<Arc<AppState>> {
 }
 
 async fn extrude_osm_buildings() -> Json<serde_json::Value> {
-    // Demo: extrude a sample set of buildings
-    let buildings = vec![osm_buildings::OsmBuilding {
+    // Demo: extrude a sample set of buildings with Empire State Building tiers + neighbors
+    let c = |x: f64, y: f64| osm_buildings::Coord2D { x, y };
+
+    // Empire State Building — tiered profile (base, setback 1, setback 2, tower)
+    let esb_base = osm_buildings::OsmBuilding {
         osm_id: 1001,
         footprint: vec![
-            osm_buildings::Coord2D {
-                x: -73.985,
-                y: 40.748,
-            },
-            osm_buildings::Coord2D {
-                x: -73.984,
-                y: 40.748,
-            },
-            osm_buildings::Coord2D {
-                x: -73.984,
-                y: 40.749,
-            },
-            osm_buildings::Coord2D {
-                x: -73.985,
-                y: 40.749,
-            },
-            osm_buildings::Coord2D {
-                x: -73.985,
-                y: 40.748,
-            },
+            c(-73.9868, 40.7475),
+            c(-73.9838, 40.7475),
+            c(-73.9838, 40.7495),
+            c(-73.9868, 40.7495),
+            c(-73.9868, 40.7475),
+        ],
+        tags: osm_buildings::BuildingTags {
+            building: "commercial".to_string(),
+            height: Some(86.0),
+            min_height: None,
+            building_levels: Some(6),
+            building_min_level: None,
+            roof_shape: Some(osm_buildings::RoofShape::Flat),
+            roof_height: None,
+            name: Some("Empire State Building (base)".to_string()),
+            building_colour: Some("#d4c5a9".to_string()),
+            roof_colour: Some("#c4b599".to_string()),
+        },
+    };
+    let esb_setback1 = osm_buildings::OsmBuilding {
+        osm_id: 1002,
+        footprint: vec![
+            c(-73.9863, 40.7478),
+            c(-73.9843, 40.7478),
+            c(-73.9843, 40.7492),
+            c(-73.9863, 40.7492),
+            c(-73.9863, 40.7478),
+        ],
+        tags: osm_buildings::BuildingTags {
+            building: "commercial".to_string(),
+            height: Some(186.0),
+            min_height: Some(86.0),
+            building_levels: Some(25),
+            building_min_level: Some(6),
+            roof_shape: Some(osm_buildings::RoofShape::Flat),
+            roof_height: None,
+            name: Some("Empire State Building (setback 1)".to_string()),
+            building_colour: Some("#cbb89c".to_string()),
+            roof_colour: Some("#baa88c".to_string()),
+        },
+    };
+    let esb_mid = osm_buildings::OsmBuilding {
+        osm_id: 1003,
+        footprint: vec![
+            c(-73.9858, 40.7481),
+            c(-73.9848, 40.7481),
+            c(-73.9848, 40.7490),
+            c(-73.9858, 40.7490),
+            c(-73.9858, 40.7481),
+        ],
+        tags: osm_buildings::BuildingTags {
+            building: "commercial".to_string(),
+            height: Some(320.0),
+            min_height: Some(186.0),
+            building_levels: Some(50),
+            building_min_level: Some(31),
+            roof_shape: Some(osm_buildings::RoofShape::Flat),
+            roof_height: None,
+            name: Some("Empire State Building (mid)".to_string()),
+            building_colour: Some("#c0a880".to_string()),
+            roof_colour: Some("#b0987a".to_string()),
+        },
+    };
+    let esb_tower = osm_buildings::OsmBuilding {
+        osm_id: 1004,
+        footprint: vec![
+            c(-73.9856, 40.7483),
+            c(-73.9850, 40.7483),
+            c(-73.9850, 40.7488),
+            c(-73.9856, 40.7488),
+            c(-73.9856, 40.7483),
         ],
         tags: osm_buildings::BuildingTags {
             building: "commercial".to_string(),
             height: Some(443.0),
-            min_height: None,
-            building_levels: Some(102),
-            building_min_level: None,
+            min_height: Some(320.0),
+            building_levels: Some(22),
+            building_min_level: Some(81),
             roof_shape: Some(osm_buildings::RoofShape::Pyramidal),
             roof_height: Some(20.0),
-            name: Some("Empire State Building".to_string()),
-            building_colour: Some("#d4c5a9".to_string()),
+            name: Some("Empire State Building (tower)".to_string()),
+            building_colour: Some("#b89870".to_string()),
             roof_colour: Some("#8b7355".to_string()),
         },
-    }];
+    };
+
+    // Surrounding buildings
+    let neighbors = vec![
+        osm_buildings::OsmBuilding {
+            osm_id: 2001,
+            footprint: vec![
+                c(-73.9835, 40.7488),
+                c(-73.9825, 40.7488),
+                c(-73.9825, 40.7495),
+                c(-73.9835, 40.7495),
+                c(-73.9835, 40.7488),
+            ],
+            tags: osm_buildings::BuildingTags {
+                building: "commercial".to_string(),
+                height: Some(80.0),
+                min_height: None,
+                building_levels: Some(16),
+                building_min_level: None,
+                roof_shape: Some(osm_buildings::RoofShape::Flat),
+                roof_height: None,
+                name: Some("Office Tower A".to_string()),
+                building_colour: Some("#b8c4d0".to_string()),
+                roof_colour: None,
+            },
+        },
+        osm_buildings::OsmBuilding {
+            osm_id: 2002,
+            footprint: vec![
+                c(-73.9875, 40.7476),
+                c(-73.9865, 40.7476),
+                c(-73.9865, 40.7484),
+                c(-73.9875, 40.7484),
+                c(-73.9875, 40.7476),
+            ],
+            tags: osm_buildings::BuildingTags {
+                building: "commercial".to_string(),
+                height: Some(120.0),
+                min_height: None,
+                building_levels: Some(28),
+                building_min_level: None,
+                roof_shape: Some(osm_buildings::RoofShape::Flat),
+                roof_height: None,
+                name: Some("Office Tower B".to_string()),
+                building_colour: Some("#a0b0c0".to_string()),
+                roof_colour: None,
+            },
+        },
+        osm_buildings::OsmBuilding {
+            osm_id: 2003,
+            footprint: vec![
+                c(-73.9840, 40.7468),
+                c(-73.9830, 40.7468),
+                c(-73.9830, 40.7476),
+                c(-73.9840, 40.7476),
+                c(-73.9840, 40.7468),
+            ],
+            tags: osm_buildings::BuildingTags {
+                building: "residential".to_string(),
+                height: Some(65.0),
+                min_height: None,
+                building_levels: Some(14),
+                building_min_level: None,
+                roof_shape: Some(osm_buildings::RoofShape::Gabled),
+                roof_height: Some(3.0),
+                name: Some("Residential Block".to_string()),
+                building_colour: Some("#c8b090".to_string()),
+                roof_colour: Some("#8b4513".to_string()),
+            },
+        },
+        osm_buildings::OsmBuilding {
+            osm_id: 2004,
+            footprint: vec![
+                c(-73.9870, 40.7492),
+                c(-73.9860, 40.7492),
+                c(-73.9860, 40.7500),
+                c(-73.9870, 40.7500),
+                c(-73.9870, 40.7492),
+            ],
+            tags: osm_buildings::BuildingTags {
+                building: "commercial".to_string(),
+                height: Some(95.0),
+                min_height: None,
+                building_levels: Some(20),
+                building_min_level: None,
+                roof_shape: Some(osm_buildings::RoofShape::Hipped),
+                roof_height: Some(5.0),
+                name: Some("Hotel Plaza".to_string()),
+                building_colour: Some("#d0c8b0".to_string()),
+                roof_colour: Some("#6b5b47".to_string()),
+            },
+        },
+        osm_buildings::OsmBuilding {
+            osm_id: 2005,
+            footprint: vec![
+                c(-73.9828, 40.7478),
+                c(-73.9818, 40.7478),
+                c(-73.9818, 40.7485),
+                c(-73.9828, 40.7485),
+                c(-73.9828, 40.7478),
+            ],
+            tags: osm_buildings::BuildingTags {
+                building: "commercial".to_string(),
+                height: Some(150.0),
+                min_height: None,
+                building_levels: Some(35),
+                building_min_level: None,
+                roof_shape: Some(osm_buildings::RoofShape::Flat),
+                roof_height: None,
+                name: Some("Glass Tower".to_string()),
+                building_colour: Some("#90b8d8".to_string()),
+                roof_colour: None,
+            },
+        },
+        osm_buildings::OsmBuilding {
+            osm_id: 2006,
+            footprint: vec![
+                c(-73.9880, 40.7488),
+                c(-73.9872, 40.7488),
+                c(-73.9872, 40.7496),
+                c(-73.9880, 40.7496),
+                c(-73.9880, 40.7488),
+            ],
+            tags: osm_buildings::BuildingTags {
+                building: "office".to_string(),
+                height: Some(50.0),
+                min_height: None,
+                building_levels: Some(12),
+                building_min_level: None,
+                roof_shape: Some(osm_buildings::RoofShape::Flat),
+                roof_height: None,
+                name: Some("Low-rise Office".to_string()),
+                building_colour: Some("#c0c0c0".to_string()),
+                roof_colour: None,
+            },
+        },
+    ];
+
+    let mut buildings = vec![esb_base, esb_setback1, esb_mid, esb_tower];
+    buildings.extend(neighbors);
     let request = osm_buildings::ExtrudeBuildingsRequest {
         min_lon: -74.0,
         min_lat: 40.7,
