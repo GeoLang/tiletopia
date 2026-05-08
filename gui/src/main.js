@@ -18,6 +18,11 @@ const viewer = new Cesium.Viewer('cesium-container', {
   navigationHelpButton: false,
   infoBox: true,
   selectionIndicator: true,
+  baseLayer: new Cesium.ImageryLayer(
+    new Cesium.OpenStreetMapImageryProvider({
+      url: 'https://tile.openstreetmap.org/',
+    })
+  ),
 });
 
 // Track loaded tilesets
