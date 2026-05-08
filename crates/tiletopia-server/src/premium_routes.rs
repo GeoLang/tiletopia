@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crate::{
     AppState, api_keys, bim4d, classification, cog, collaboration, export, geocoding, indoor,
-    metering, mobile, photogrammetry, plugins, routing, scheduler, stac, versioning, webhooks,
-    workspaces,
+    map_tiles, metering, mobile, photogrammetry, plugins, routing, scheduler, stac, versioning,
+    webhooks, workspaces,
 };
 
 /// Routes for API key management.
@@ -420,5 +420,47 @@ async fn compute_demo_route() -> Json<serde_json::Value> {
     match engine.compute_route(&req) {
         Some(route) => Json(serde_json::json!(route)),
         None => Json(serde_json::json!({"error": "No route found"})),
+    }
+}
+
+/// Routes for 2D map tiles (XYZ, MVT, styles).
+pub fn map_tile_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/tiles/sources", get(list_tile_sources))
+        .route("/api/v1/tiles/styles", get(list_tile_styles))
+        .route("/api/v1/tiles/cache/stats", get(tile_cache_stats))
+        .route("/api/v1/tiles/layers", get(list_vector_layers))
+}
+
+async fn list_tile_sources() -> Json<serde_json::Value> {
+    let engine = map_tiles::MapTileEngine::new();
+    let sources = engine.list_sources().to_vec();
+    Json(serde_json::json!({ "sources": sources }))
+}
+
+async fn list_tile_styles() -> Json<serde_json::Value> {
+    let engine = map_tiles::MapTileEngine::new();
+    let styles = engine.list_styles().to_vec();
+    Json(serde_json::json!({ "styles": styles }))
+}
+
+async fn tile_cache_stats() -> Json<map_tiles::CacheStats> {
+    let engine = map_tiles::MapTileEngine::new();
+    Json(engine.cache_stats().clone())
+}
+
+async fn list_vector_layers() -> Json<serde_json::Value> {
+    let engine = map_tiles::MapTileEngine::new();
+    let vector_source = engine
+        .list_sources()
+        .iter()
+        .find(|s| s.source_type == map_tiles::TileSourceType::VectorGeoJson)
+        .map(|s| s.id);
+    match vector_source {
+        Some(id) => {
+            let layers = engine.vector_layers(id).unwrap_or_default();
+            Json(serde_json::json!({ "layers": layers }))
+        }
+        None => Json(serde_json::json!({ "layers": [] })),
     }
 }

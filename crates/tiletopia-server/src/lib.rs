@@ -26,6 +26,7 @@ pub mod flythrough;
 pub mod geocoding;
 pub mod geofence;
 pub mod indoor;
+pub mod map_tiles;
 pub mod marketplace;
 pub mod metering;
 pub mod metrics;
@@ -157,6 +158,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::indoor_routes())
         .merge(premium_routes::cog_routes())
         .merge(premium_routes::routing_routes())
+        .merge(premium_routes::map_tile_routes())
         .layer(middleware::from_fn(auth::auth_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)
