@@ -41,6 +41,7 @@ pub mod metrics;
 pub mod mobile;
 pub mod multispectral;
 pub mod offline_export;
+pub mod osm_buildings;
 pub mod photogrammetry;
 pub mod plugins;
 pub mod premium_routes;
@@ -184,6 +185,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::terrain_analysis_routes())
         .merge(premium_routes::geostatistics_routes())
         .merge(premium_routes::multispectral_routes())
+        .merge(premium_routes::osm_buildings_routes())
         .layer(middleware::from_fn(auth::auth_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)

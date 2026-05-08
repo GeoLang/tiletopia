@@ -9,9 +9,9 @@ use uuid::Uuid;
 use crate::{
     AppState, api_keys, bim4d, classification, cog, collaboration, elevation, export,
     feature_service, flight_planning, geocoding, geoprocessing, geostatistics, indoor, isochrone,
-    issue_tracking, map_matching, map_tiles, metering, mobile, multispectral, photogrammetry,
-    plugins, routing, scan_registration, scheduler, stac, static_map, terrain_analysis, versioning,
-    webhooks, workspaces,
+    issue_tracking, map_matching, map_tiles, metering, mobile, multispectral, osm_buildings,
+    photogrammetry, plugins, routing, scan_registration, scheduler, stac, static_map,
+    terrain_analysis, versioning, webhooks, workspaces,
 };
 
 /// Routes for API key management.
@@ -865,5 +865,147 @@ async fn multispectral_demo() -> Json<serde_json::Value> {
         "classification": classification,
         "min": ndvi.iter().cloned().fold(f64::INFINITY, f64::min),
         "max": ndvi.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+    }))
+}
+
+// ─── OSM Buildings Routes ────────────────────────────────────────────────────
+
+/// Routes for OSM building extrusion and 3D generation.
+pub fn osm_buildings_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/osm-buildings/extrude", get(extrude_osm_buildings))
+        .route("/api/v1/osm-buildings/parse", get(parse_osm_data))
+        .route("/api/v1/osm-buildings/info", get(osm_buildings_info))
+}
+
+async fn extrude_osm_buildings() -> Json<serde_json::Value> {
+    // Demo: extrude a sample set of buildings
+    let buildings = vec![osm_buildings::OsmBuilding {
+        osm_id: 1001,
+        footprint: vec![
+            osm_buildings::Coord2D {
+                x: -73.985,
+                y: 40.748,
+            },
+            osm_buildings::Coord2D {
+                x: -73.984,
+                y: 40.748,
+            },
+            osm_buildings::Coord2D {
+                x: -73.984,
+                y: 40.749,
+            },
+            osm_buildings::Coord2D {
+                x: -73.985,
+                y: 40.749,
+            },
+            osm_buildings::Coord2D {
+                x: -73.985,
+                y: 40.748,
+            },
+        ],
+        tags: osm_buildings::BuildingTags {
+            building: "commercial".to_string(),
+            height: Some(443.0),
+            min_height: None,
+            building_levels: Some(102),
+            building_min_level: None,
+            roof_shape: Some(osm_buildings::RoofShape::Pyramidal),
+            roof_height: Some(20.0),
+            name: Some("Empire State Building".to_string()),
+            building_colour: Some("#d4c5a9".to_string()),
+            roof_colour: Some("#8b7355".to_string()),
+        },
+    }];
+    let request = osm_buildings::ExtrudeBuildingsRequest {
+        min_lon: -74.0,
+        min_lat: 40.7,
+        max_lon: -73.9,
+        max_lat: 40.8,
+        level_height_meters: None,
+        default_height_meters: None,
+        include_roof_geometry: Some(true),
+        output_format: None,
+    };
+    let result = osm_buildings::extrude_buildings(&buildings, &request);
+    Json(serde_json::json!({
+        "buildings_extruded": result.buildings.len(),
+        "total_vertices": result.total_vertices,
+        "total_triangles": result.total_triangles,
+        "bounding_box": {
+            "min": result.bounding_box.min,
+            "max": result.bounding_box.max,
+        },
+        "sample": result.buildings.first().map(|b| serde_json::json!({
+            "osm_id": b.osm_id,
+            "name": b.name,
+            "height": b.height,
+            "wall_color": b.wall_color,
+            "roof_color": b.roof_color,
+            "vertex_count": b.vertices.len(),
+            "triangle_count": b.triangles.len(),
+        })),
+    }))
+}
+
+async fn parse_osm_data() -> Json<serde_json::Value> {
+    // Demo: parse sample Overpass response
+    let sample = serde_json::json!({
+        "elements": [
+            {
+                "type": "way",
+                "id": 2001,
+                "tags": {
+                    "building": "residential",
+                    "building:levels": "5",
+                    "roof:shape": "gabled",
+                    "name": "Sample Apartment"
+                },
+                "geometry": [
+                    {"lon": 2.349, "lat": 48.864},
+                    {"lon": 2.350, "lat": 48.864},
+                    {"lon": 2.350, "lat": 48.865},
+                    {"lon": 2.349, "lat": 48.865},
+                    {"lon": 2.349, "lat": 48.864}
+                ]
+            }
+        ]
+    });
+    let buildings = osm_buildings::parse_overpass_buildings(&sample);
+    Json(serde_json::json!({
+        "parsed_count": buildings.len(),
+        "buildings": buildings.iter().map(|b| serde_json::json!({
+            "osm_id": b.osm_id,
+            "name": b.tags.name,
+            "building_type": b.tags.building,
+            "levels": b.tags.building_levels,
+            "roof_shape": b.tags.roof_shape,
+            "footprint_vertices": b.footprint.len(),
+        })).collect::<Vec<_>>()
+    }))
+}
+
+async fn osm_buildings_info() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "feature": "OSM Building Extrusion",
+        "description": "Parse OpenStreetMap building footprints and extrude them into 3D meshes for visualization as 3D Tiles",
+        "capabilities": [
+            "Parse OSM Overpass API building data",
+            "Extrude 2D polygons to 3D meshes with walls and caps",
+            "Support building:levels, height, min_height tags",
+            "Multiple roof shapes: flat, gabled, hipped, pyramidal, skillion, dome",
+            "Custom building and roof colors from OSM tags",
+            "Output as 3D Tiles, GLB, or GeoJSON",
+            "Batch extrusion for entire city regions",
+            "Multi-view consistency for depth fusion"
+        ],
+        "supported_tags": [
+            "building", "height", "min_height", "building:levels",
+            "building:min_level", "roof:shape", "roof:height",
+            "building:colour", "roof:colour", "name"
+        ],
+        "output_formats": ["3dtiles", "glb", "geojson"],
+        "roof_shapes": ["flat", "gabled", "hipped", "pyramidal", "skillion", "dome"],
+        "competitive_note": "Equivalent to Cesium Ion OSM Buildings — fully self-hosted, no per-tile streaming fees"
     }))
 }
