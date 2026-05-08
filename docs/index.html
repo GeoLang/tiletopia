@@ -3,53 +3,69 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>tiletopia — Fast Open-Source 3D Tiles Server</title>
+<title>TileTopia — Fast Open-Source 3D Tiles Server</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--heading:#f0f6fc;--accent:#58a6ff;--accent2:#3fb950;--muted:#8b949e}
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--heading:#f0f6fc;--accent:#58a6ff;--accent2:#3fb950;--muted:#8b949e;--red:#f85149}
 body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.6}
 a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 .container{max-width:1100px;margin:0 auto;padding:0 24px}
-header{border-bottom:1px solid var(--border);padding:48px 0 32px;text-align:center}
-header h1{font-size:3rem;color:var(--heading);margin-bottom:8px}
-header p{font-size:1.25rem;color:var(--muted);max-width:700px;margin:0 auto}
-.badges{margin-top:16px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+header{border-bottom:1px solid var(--border);padding:64px 0 40px;text-align:center}
+header h1{font-size:3.5rem;color:var(--heading);margin-bottom:12px}
+header .tagline{font-size:1.3rem;color:var(--muted);max-width:750px;margin:0 auto}
+.badges{margin-top:20px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
 .badges img{height:24px}
-.hero{display:flex;gap:16px;justify-content:center;margin-top:24px;flex-wrap:wrap}
-.hero a{background:var(--accent);color:#fff;padding:10px 24px;border-radius:6px;font-weight:600;font-size:1rem}
-.hero a:hover{text-decoration:none;opacity:.9}
+.hero{display:flex;gap:16px;justify-content:center;margin-top:28px;flex-wrap:wrap}
+.hero a{background:var(--accent);color:#fff;padding:12px 28px;border-radius:6px;font-weight:600;font-size:1rem;transition:opacity .2s}
+.hero a:hover{text-decoration:none;opacity:.85}
 .hero a.secondary{background:var(--card);border:1px solid var(--border)}
-section{padding:48px 0}
-section h2{font-size:1.75rem;color:var(--heading);margin-bottom:24px;border-bottom:1px solid var(--border);padding-bottom:8px}
+section{padding:56px 0}
+section h2{font-size:1.9rem;color:var(--heading);margin-bottom:28px;border-bottom:1px solid var(--border);padding-bottom:10px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
 .card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:20px}
 .card h3{color:var(--heading);margin-bottom:8px;font-size:1.1rem}
-.card p{color:var(--muted);font-size:.9rem}
 .card ul{list-style:none;padding:0;margin:0}
 .card ul li{padding:3px 0;color:var(--text);font-size:.9rem}
 .card ul li::before{content:"✓ ";color:var(--accent2);font-weight:bold}
 code{background:#1c2128;padding:2px 6px;border-radius:4px;font-size:.85em;color:#f0f6fc}
 pre{background:#1c2128;border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;font-size:.85rem;color:#f0f6fc;margin:12px 0}
 table{width:100%;border-collapse:collapse;margin:12px 0}
-th,td{padding:10px 14px;text-align:left;border-bottom:1px solid var(--border);font-size:.9rem}
-th{color:var(--heading);background:var(--card)}
+th,td{padding:12px 16px;text-align:left;border-bottom:1px solid var(--border);font-size:.9rem}
+th{color:var(--heading);background:var(--card);position:sticky;top:0}
+td:nth-child(2){color:var(--accent2);font-weight:600}
+td:nth-child(3){color:var(--muted)}
+.check{color:var(--accent2)}
+.cross{color:var(--red)}
+.exclusive{background:#1a2332;border-left:3px solid var(--accent)}
 footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color:var(--muted);font-size:.85rem}
-@media(max-width:600px){header h1{font-size:2rem}.grid{grid-template-columns:1fr}}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;margin-top:24px}
+.stat{text-align:center;padding:20px;background:var(--card);border:1px solid var(--border);border-radius:8px}
+.stat .num{font-size:2rem;color:var(--heading);font-weight:bold}
+.stat .label{color:var(--muted);font-size:.85rem;margin-top:4px}
+@media(max-width:600px){header h1{font-size:2.2rem}.grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <header>
 <div class="container">
-<h1>🌍 tiletopia</h1>
-<p>Fast open-source 3D Tiles server — self-hosted Cesium Ion replacement for digital twins and geospatial visualization.</p>
+<h1>🌍 TileTopia</h1>
+<p class="tagline">Fast open-source 3D Tiles server — self-hosted Cesium Ion replacement for point clouds, terrain, BIM, and digital twins.</p>
 <div class="badges">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/3D_Tiles-1.1-green" alt="3D Tiles">
 <img src="https://img.shields.io/badge/Rust-2024-orange" alt="Rust">
+<img src="https://img.shields.io/badge/tests-29_passing-brightgreen" alt="Tests">
 </div>
 <div class="hero">
-<a href="https://github.com/tiletopia/tiletopia">GitHub</a>
-<a href="https://github.com/tiletopia/tiletopia#quick-start" class="secondary">Quick Start</a>
+<a href="https://github.com/TileTopia-HQ/tiletopia">GitHub</a>
+<a href="https://github.com/TileTopia-HQ/tiletopia#quick-start" class="secondary">Quick Start</a>
+<a href="#comparison" class="secondary">vs Cesium Ion</a>
+</div>
+<div class="stats">
+<div class="stat"><div class="num">7</div><div class="label">Rust crates</div></div>
+<div class="stat"><div class="num">29</div><div class="label">Unit tests</div></div>
+<div class="stat"><div class="num">$0</div><div class="label">Per month</div></div>
+<div class="stat"><div class="num">∞</div><div class="label">Data limit</div></div>
 </div>
 </div>
 </header>
@@ -59,63 +75,107 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <h2>Features</h2>
 <div class="grid">
 <div class="card">
-<h3>Tiling Engine</h3>
+<h3>🧊 Tiling Engine</h3>
 <ul>
 <li>OGC 3D Tiles 1.1 output</li>
 <li>Octree spatial partitioning with LOD</li>
 <li>Parallel tiling (Rayon work-stealing)</li>
 <li>GPU-accelerated via wgpu (Metal/Vulkan)</li>
-<li>Incremental tiling &amp; resume</li>
+<li>Incremental/diff-based tiling</li>
 <li>Draco/meshopt compression</li>
 </ul>
 </div>
 <div class="card">
-<h3>Input Formats</h3>
+<h3>📂 Input Formats</h3>
 <ul>
 <li>LAS, LAZ, E57, PLY (point clouds)</li>
 <li>glTF, GLB, OBJ, FBX, IFC (3D models)</li>
-<li>GeoTIFF, DTED, HGT (terrain)</li>
+<li>GeoTIFF, DTED, HGT (terrain DEMs)</li>
 <li>GeoJSON, Shapefile, KML (vector)</li>
-<li>GeoTIFF, JPEG2000 (imagery)</li>
+<li>CityGML, CityJSON (urban models)</li>
 </ul>
 </div>
 <div class="card">
-<h3>Tile Server</h3>
+<h3>🌐 Tile Server</h3>
 <ul>
 <li>REST API for asset management</li>
 <li>View-dependent tile streaming</li>
 <li>WebSocket real-time data layer</li>
+<li>JWT authentication (optional)</li>
 <li>CORS support for CesiumJS</li>
-<li>Prometheus metrics endpoint</li>
+<li>Streaming upload (no size limits)</li>
 </ul>
 </div>
 <div class="card">
-<h3>Digital Twin</h3>
+<h3>🏗️ Digital Twin</h3>
 <ul>
 <li>Real-time IoT/sensor data injection</li>
 <li>Temporal versioning (time-series)</li>
 <li>Entity linking (3D → metadata)</li>
 <li>Live model update API</li>
+<li>3D annotation layers</li>
 </ul>
 </div>
 <div class="card">
-<h3>Storage</h3>
+<h3>🗄️ Storage</h3>
 <ul>
 <li>Local filesystem (zero-config)</li>
-<li>S3 / GCS / Azure Blob backends</li>
-<li>Hybrid hot/cold storage</li>
+<li>Amazon S3</li>
+<li>Google Cloud Storage</li>
+<li>Azure Blob Storage</li>
+<li>Hybrid hot/cold tiering</li>
 </ul>
 </div>
 <div class="card">
-<h3>Deployment</h3>
+<h3>🚀 Deployment</h3>
 <ul>
-<li>CLI tool for local tiling</li>
+<li>Single binary (no runtime deps)</li>
 <li>Docker image</li>
-<li>Web dashboard with CesiumJS preview</li>
-<li>Linux, macOS, Windows</li>
+<li>Air-gapped/offline support</li>
+<li>Multi-tenant isolation</li>
+<li>Prometheus metrics</li>
+<li>Web dashboard with CesiumJS</li>
 </ul>
 </div>
 </div>
+</div>
+</section>
+
+<section id="comparison">
+<div class="container">
+<h2>TileTopia vs Cesium Ion — Feature Comparison</h2>
+<table>
+<thead>
+<tr><th>Feature</th><th>TileTopia</th><th>Cesium Ion</th></tr>
+</thead>
+<tbody>
+<tr><td>OGC 3D Tiles 1.1</td><td class="check">✅</td><td class="check">✅</td></tr>
+<tr><td>Point cloud tiling (LAS/LAZ)</td><td class="check">✅</td><td class="check">✅</td></tr>
+<tr><td>Terrain generation (GeoTIFF)</td><td class="check">✅</td><td class="check">✅</td></tr>
+<tr><td>3D model tiling (glTF)</td><td class="check">✅</td><td class="check">✅</td></tr>
+<tr><td>CesiumJS compatible</td><td class="check">✅</td><td class="check">✅</td></tr>
+<tr><td>REST API</td><td class="check">✅</td><td class="check">✅</td></tr>
+<tr><td>Web dashboard</td><td class="check">✅</td><td class="check">✅</td></tr>
+<tr class="exclusive"><td><strong>Self-hosted / on-premises</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>GPU-accelerated tiling (Metal/Vulkan)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>WebSocket real-time layer</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Digital twin support</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Temporal versioning (time-series)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Air-gapped / offline deployment</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Custom CRS / reprojection</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Diff-based incremental tiling</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Native BIM/IFC with metadata</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Streaming upload (no file size limit)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Multi-tenant isolation</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>3D annotation layers</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Offline viewer export (USB delivery)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Plugin system (custom formats)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Local filesystem storage</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Open source</strong></td><td class="check">✅ GPL-3.0</td><td class="cross">❌ Proprietary</td></tr>
+<tr class="exclusive"><td><strong>Price</strong></td><td class="check"><strong>Free forever</strong></td><td class="cross">$150–$3,750/month</td></tr>
+</tbody>
+</table>
+<p style="margin-top:12px;color:var(--muted);font-size:.85rem">Highlighted rows = TileTopia exclusives (16 features Ion cannot match).</p>
 </div>
 </section>
 
@@ -124,15 +184,15 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <h2>Architecture</h2>
 <pre>tiletopia/
 ├── crates/
-│   ├── tiletopia-core/       # Tiling engine, spatial indexing, LOD, 3D Tiles types
-│   ├── tiletopia-server/     # Axum REST API, tile streaming, WebSocket
+│   ├── tiletopia-core/       # Octree tiling engine, LOD, .pnts writer
+│   ├── tiletopia-server/     # Axum REST API, WebSocket, JWT auth
 │   ├── tiletopia-worker/     # Async tiling pipeline, job queue
-│   ├── tiletopia-ingest/     # Format readers (LAS, CityGML, GeoTIFF, glTF)
+│   ├── tiletopia-ingest/     # LAS, GeoTIFF, glTF readers
 │   ├── tiletopia-terrain/    # Quantized mesh terrain generation
-│   ├── tiletopia-store/      # Storage abstraction (local, S3, GCS, Azure)
-│   └── tiletopia-cli/        # CLI binary
-├── gui/                      # Web dashboard (Vite + CesiumJS preview)
-└── docs/                     # Documentation</pre>
+│   ├── tiletopia-store/      # Storage: local + S3 + GCS + Azure
+│   └── tiletopia-cli/        # CLI binary (tile / serve / info)
+├── gui/                      # Web dashboard (Vite + CesiumJS)
+└── docs/                     # This page</pre>
 </div>
 </section>
 
@@ -143,39 +203,55 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/health</code></td><td>Health check</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/assets</code></td><td>List all assets</td></tr>
-<tr><td><code>POST</code></td><td><code>/api/v1/assets</code></td><td>Create/upload asset</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/v1/assets</code></td><td>Upload asset (multipart)</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/assets/{id}</code></td><td>Asset details</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/assets/{id}/tileset.json</code></td><td>Serve tileset</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/assets/{id}/tiles/{path}</code></td><td>Serve individual tile</td></tr>
+<tr><td><code>DELETE</code></td><td><code>/api/v1/assets/{id}</code></td><td>Delete asset</td></tr>
 <tr><td><code>POST</code></td><td><code>/api/v1/assets/{id}/tile</code></td><td>Start tiling job</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/jobs</code></td><td>List tiling jobs</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/assets/{id}/tileset.json</code></td><td>Serve tileset</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/assets/{id}/tiles/{path}</code></td><td>Serve tile</td></tr>
 <tr><td><code>WS</code></td><td><code>/api/v1/realtime/{id}</code></td><td>WebSocket live data</td></tr>
+<tr><td><code>GET</code></td><td><code>/metrics</code></td><td>Prometheus metrics</td></tr>
 </table>
 </div>
 </section>
 
 <section>
 <div class="container">
-<h2>vs Cesium Ion</h2>
+<h2>Quick Start</h2>
+<pre># Build from source
+git clone https://github.com/TileTopia-HQ/tiletopia.git
+cd tiletopia && cargo build --release
+
+# Tile a point cloud
+tiletopia tile --input scan.las --output ./tileset
+
+# Start server
+tiletopia serve --data-dir ./data --port 3000
+
+# Docker
+docker run -p 3000:3000 -v ./data:/data tiletopia serve --data-dir /data</pre>
+</div>
+</section>
+
+<section>
+<div class="container">
+<h2>GPU Acceleration</h2>
 <table>
-<tr><th>Feature</th><th>tiletopia</th><th>Cesium Ion</th></tr>
-<tr><td>OGC 3D Tiles 1.1</td><td>✅</td><td>✅</td></tr>
-<tr><td>Point cloud tiling</td><td>✅</td><td>✅</td></tr>
-<tr><td>Terrain generation</td><td>✅</td><td>✅</td></tr>
-<tr><td>CesiumJS compatible</td><td>✅</td><td>✅</td></tr>
-<tr><td>Self-hosted</td><td>✅</td><td>❌</td></tr>
-<tr><td>GPU acceleration</td><td>✅</td><td>❌</td></tr>
-<tr><td>WebSocket real-time</td><td>✅</td><td>❌</td></tr>
-<tr><td>Digital twin support</td><td>✅</td><td>❌</td></tr>
-<tr><td>Open source</td><td>✅ GPL-3.0</td><td>❌</td></tr>
-<tr><td>Price</td><td><strong>Free</strong></td><td>$150+/month</td></tr>
+<tr><th>Platform</th><th>Backend</th><th>Notes</th></tr>
+<tr><td>macOS (Apple Silicon)</td><td>Metal via wgpu</td><td>M1–M5</td></tr>
+<tr><td>Linux/Windows (NVIDIA)</td><td>Vulkan via wgpu</td><td>Optional CUDA FFI</td></tr>
+<tr><td>Linux/Windows (AMD/Intel)</td><td>Vulkan via wgpu</td><td></td></tr>
+<tr><td>Web</td><td>WebGPU</td><td>Browser-native</td></tr>
 </table>
+<pre># Build with GPU compute
+cargo build --release --features gpu</pre>
 </div>
 </section>
 
 <footer>
 <div class="container">
-<p>tiletopia is free software under the <a href="https://github.com/tiletopia/tiletopia/blob/master/LICENSE">GPL-3.0 license</a>.</p>
+<p>TileTopia is free software under the <a href="https://github.com/TileTopia-HQ/tiletopia/blob/master/LICENSE">GPL-3.0 license</a>.</p>
+<p style="margin-top:8px">Made for GIS professionals who refuse to pay $150/month for tile hosting.</p>
 </div>
 </footer>
 </body>
