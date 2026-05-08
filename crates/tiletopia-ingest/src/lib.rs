@@ -4,6 +4,8 @@
 //! terrain (GeoTIFF/DTED), and vector data (Shapefile/GeoJSON/KML).
 
 pub mod las_reader;
+pub mod tiff_reader;
+pub mod gltf_reader;
 
 use thiserror::Error;
 
@@ -35,13 +37,54 @@ pub struct Point3D {
 #[derive(Debug, Clone)]
 pub enum SourceData {
     PointCloud(Vec<Point3D>),
-    // Future: Mesh, Terrain, Vector
+    Heightmap(Heightmap),
+    Mesh(MeshData),
+}
+
+/// A 2D grid of elevation values.
+#[derive(Debug, Clone)]
+pub struct Heightmap {
+    pub width: usize,
+    pub height: usize,
+    /// Row-major elevation values in meters.
+    pub elevations: Vec<f64>,
+    /// Geographic bounds [west, south, east, north] in degrees.
+    pub bounds: [f64; 4],
+    /// No-data value.
+    pub nodata: Option<f64>,
+}
+
+/// Mesh data from glTF/OBJ/etc.
+#[derive(Debug, Clone)]
+pub struct MeshData {
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub indices: Vec<u32>,
+    pub name: String,
 }
 
 /// Read a point cloud file (LAS/LAZ).
 pub fn read_point_cloud(path: &std::path::Path) -> Result<Vec<Point3D>, IngestError> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("las" | "laz") => las_reader::read(path),
+        Some(ext) => Err(IngestError::UnsupportedFormat(ext.to_string())),
+        None => Err(IngestError::UnsupportedFormat("unknown".to_string())),
+    }
+}
+
+/// Read a heightmap from a GeoTIFF file.
+pub fn read_heightmap(path: &std::path::Path) -> Result<Heightmap, IngestError> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("tif" | "tiff") => tiff_reader::read(path),
+        Some(ext) => Err(IngestError::UnsupportedFormat(ext.to_string())),
+        None => Err(IngestError::UnsupportedFormat("unknown".to_string())),
+    }
+}
+
+/// Read a 3D mesh from a glTF/GLB file.
+pub fn read_mesh(path: &std::path::Path) -> Result<Vec<MeshData>, IngestError> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("gltf" | "glb") => gltf_reader::read(path),
         Some(ext) => Err(IngestError::UnsupportedFormat(ext.to_string())),
         None => Err(IngestError::UnsupportedFormat("unknown".to_string())),
     }

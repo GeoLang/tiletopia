@@ -7,6 +7,7 @@ description = "Quantized mesh terrain generation from DEM/DTM heightmaps"
 
 [dependencies]
 tiletopia-core = { path = "../tiletopia-core" }
+tiletopia-ingest = { path = "../tiletopia-ingest" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

@@ -13,3 +13,5 @@ tracing = { workspace = true }
 rayon = { workspace = true }
 memmap2 = { workspace = true }
 las = { workspace = true }
+tiff = { workspace = true }
+gltf = { workspace = true }
