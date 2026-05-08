@@ -67,8 +67,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <div class="hero">
 <a href="https://github.com/TileTopia-HQ/tiletopia">GitHub</a>
 <a href="https://github.com/TileTopia-HQ/tiletopia#quick-start" class="secondary">Quick Start</a>
-<a href="#comparison" class="secondary">vs Cesium Ion</a>
-<a href="#competitors" class="secondary">vs Industry</a>
+<a href="#comparison" class="secondary">vs Competitors</a>
 </div>
 <div class="stats">
 <div class="stat"><div class="num">7</div><div class="label">Rust crates</div></div>
@@ -229,82 +228,6 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 
 <section id="comparison">
 <div class="container">
-<h2>TileTopia vs Cesium Ion — Feature Comparison</h2>
-<table>
-<thead>
-<tr><th>Feature</th><th>TileTopia</th><th>Cesium Ion</th></tr>
-</thead>
-<tbody>
-<tr><td>OGC 3D Tiles 1.1</td><td class="check">✅</td><td class="check">✅</td></tr>
-<tr><td>Point cloud tiling (LAS/LAZ)</td><td class="check">✅</td><td class="check">✅</td></tr>
-<tr><td>Terrain generation (GeoTIFF)</td><td class="check">✅</td><td class="check">✅</td></tr>
-<tr><td>3D model tiling (glTF)</td><td class="check">✅</td><td class="check">✅</td></tr>
-<tr><td>CesiumJS compatible</td><td class="check">✅</td><td class="check">✅</td></tr>
-<tr><td>REST API</td><td class="check">✅</td><td class="check">✅</td></tr>
-<tr><td>Web dashboard</td><td class="check">✅</td><td class="check">✅</td></tr>
-<tr><td>Narrated presentations (Stories)</td><td class="check">✅</td><td class="check">✅</td></tr>
-<tr class="exclusive"><td><strong>Self-hosted / on-premises</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>GPU-accelerated tiling (Metal/Vulkan)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>WebSocket real-time layer</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Digital twin support</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Temporal versioning (time-series)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Air-gapped / offline deployment</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Custom CRS / reprojection</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Diff-based incremental tiling</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Native BIM/IFC with metadata</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Streaming upload (no file size limit)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Multi-tenant isolation</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>3D annotation layers</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Offline viewer export (USB delivery)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Plugin system (custom formats)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Local filesystem storage</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Open source</strong></td><td class="check">✅ GPL-3.0</td><td class="cross">❌ Proprietary</td></tr>
-<tr class="exclusive"><td><strong>3D Measurement (distance/area/volume)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Anomaly & deformation detection</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Predictive analytics / trend analysis</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>BIM clash detection</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>RBAC + OIDC SSO</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Audit logging & compliance</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Raft consensus HA clustering</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Priority queue + SLA scheduling</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Webhook integrations (HMAC-signed)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>White-label branding</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Geospatial data marketplace</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Data residency geofencing (GDPR)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Retention lifecycle / right-to-erasure</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Field-level encryption + key rotation</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Custom dashboards & widgets</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>AR/VR foveated rendering</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Cinematic flythrough (keyframed)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Automated site reports</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>2D Map Tiles (XYZ + MVT)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>STAC Catalog (OGC)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Geocoding (forward/reverse)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Routing & navigation</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Indoor mapping & floor plans</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Real-time collaboration (multi-user)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Cloud Optimized GeoTIFF (COG)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Isochrone / travel-time analysis</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Geoprocessing engine</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Feature service (WFS)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Elevation service</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Map matching (GPS snap-to-road)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Static map rendering</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Drone flight planning</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Scan registration (ICP)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Issue / defect tracking</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Terrain analysis (slope/viewshed)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Geostatistics (kriging/IDW)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Multispectral imagery (NDVI)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr class="exclusive"><td><strong>Price</strong></td><td class="check"><strong>Free forever</strong></td><td class="cross">$150–$3,750/month</td></tr>
-</tbody>
-</table>
-<p style="margin-top:12px;color:var(--muted);font-size:.85rem">Highlighted rows = TileTopia exclusives (54 features Ion cannot match).</p>
-</div>
-</section>
-
-<section id="competitors">
-<div class="container">
 <h2>TileTopia vs The Industry</h2>
 <p style="color:var(--muted);margin-bottom:20px">How we compare across the entire 3D geospatial platform landscape.</p>
 <div style="overflow-x:auto">
@@ -367,6 +290,17 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <p style="margin-top:16px;color:var(--muted);font-size:.85rem">TileTopia scores <strong>49/49</strong> — the only platform with full coverage across tiling, real-time, analytics, enterprise, and deployment flexibility.</p>
 
 <div class="grid" style="margin-top:28px">
+<div class="card">
+<h3>vs Cesium Ion</h3>
+<ul>
+<li>Cesium Ion = cloud-only 3D Tiles hosting</li>
+<li>No self-hosting, no offline deployment</li>
+<li>No real-time layer, no digital twin, no analytics</li>
+<li>No BIM clash detection, no collaboration</li>
+<li>No geoprocessing, kriging, flight planning</li>
+<li>$150–$3,750/month — TileTopia has <strong>50+ exclusive features</strong> at $0</li>
+</ul>
+</div>
 <div class="card">
 <h3>vs Mapbox</h3>
 <ul>
