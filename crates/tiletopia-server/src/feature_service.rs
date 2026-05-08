@@ -121,7 +121,10 @@ impl FeatureServiceEngine {
 
     /// Get feature count for a layer.
     pub fn feature_count(&self, layer_id: Uuid) -> usize {
-        self.features.iter().filter(|f| f.layer_id == layer_id).count()
+        self.features
+            .iter()
+            .filter(|f| f.layer_id == layer_id)
+            .count()
     }
 
     /// Get a single feature by ID.
@@ -149,10 +152,30 @@ fn demo_data() -> (Vec<FeatureLayer>, Vec<Feature>) {
             geometry_type: GeometryType::Polygon,
             crs: "EPSG:4326".into(),
             fields: vec![
-                FieldSchema { name: "name".into(), field_type: FieldType::String, nullable: true, default_value: None },
-                FieldSchema { name: "height_m".into(), field_type: FieldType::Float, nullable: false, default_value: Some(serde_json::json!(10.0)) },
-                FieldSchema { name: "floors".into(), field_type: FieldType::Integer, nullable: false, default_value: Some(serde_json::json!(1)) },
-                FieldSchema { name: "year_built".into(), field_type: FieldType::Integer, nullable: true, default_value: None },
+                FieldSchema {
+                    name: "name".into(),
+                    field_type: FieldType::String,
+                    nullable: true,
+                    default_value: None,
+                },
+                FieldSchema {
+                    name: "height_m".into(),
+                    field_type: FieldType::Float,
+                    nullable: false,
+                    default_value: Some(serde_json::json!(10.0)),
+                },
+                FieldSchema {
+                    name: "floors".into(),
+                    field_type: FieldType::Integer,
+                    nullable: false,
+                    default_value: Some(serde_json::json!(1)),
+                },
+                FieldSchema {
+                    name: "year_built".into(),
+                    field_type: FieldType::Integer,
+                    nullable: true,
+                    default_value: None,
+                },
             ],
             feature_count: 3,
             extent: [-122.42, 37.77, -122.40, 37.79],
@@ -166,10 +189,30 @@ fn demo_data() -> (Vec<FeatureLayer>, Vec<Feature>) {
             geometry_type: GeometryType::LineString,
             crs: "EPSG:4326".into(),
             fields: vec![
-                FieldSchema { name: "name".into(), field_type: FieldType::String, nullable: false, default_value: None },
-                FieldSchema { name: "road_class".into(), field_type: FieldType::String, nullable: false, default_value: None },
-                FieldSchema { name: "lanes".into(), field_type: FieldType::Integer, nullable: false, default_value: Some(serde_json::json!(2)) },
-                FieldSchema { name: "speed_limit".into(), field_type: FieldType::Integer, nullable: true, default_value: None },
+                FieldSchema {
+                    name: "name".into(),
+                    field_type: FieldType::String,
+                    nullable: false,
+                    default_value: None,
+                },
+                FieldSchema {
+                    name: "road_class".into(),
+                    field_type: FieldType::String,
+                    nullable: false,
+                    default_value: None,
+                },
+                FieldSchema {
+                    name: "lanes".into(),
+                    field_type: FieldType::Integer,
+                    nullable: false,
+                    default_value: Some(serde_json::json!(2)),
+                },
+                FieldSchema {
+                    name: "speed_limit".into(),
+                    field_type: FieldType::Integer,
+                    nullable: true,
+                    default_value: None,
+                },
             ],
             feature_count: 2,
             extent: [-122.42, 37.77, -122.40, 37.80],
@@ -184,7 +227,13 @@ fn demo_data() -> (Vec<FeatureLayer>, Vec<Feature>) {
             layer_id: buildings_layer_id,
             geometry: FeatureGeometry {
                 geom_type: "Polygon".into(),
-                coordinates: serde_json::json!([[[-122.41, 37.78], [-122.409, 37.78], [-122.409, 37.781], [-122.41, 37.781], [-122.41, 37.78]]]),
+                coordinates: serde_json::json!([[
+                    [-122.41, 37.78],
+                    [-122.409, 37.78],
+                    [-122.409, 37.781],
+                    [-122.41, 37.781],
+                    [-122.41, 37.78]
+                ]]),
             },
             properties: HashMap::from([
                 ("name".into(), serde_json::json!("City Hall")),
@@ -200,7 +249,13 @@ fn demo_data() -> (Vec<FeatureLayer>, Vec<Feature>) {
             layer_id: buildings_layer_id,
             geometry: FeatureGeometry {
                 geom_type: "Polygon".into(),
-                coordinates: serde_json::json!([[[-122.405, 37.785], [-122.404, 37.785], [-122.404, 37.786], [-122.405, 37.786], [-122.405, 37.785]]]),
+                coordinates: serde_json::json!([[
+                    [-122.405, 37.785],
+                    [-122.404, 37.785],
+                    [-122.404, 37.786],
+                    [-122.405, 37.786],
+                    [-122.405, 37.785]
+                ]]),
             },
             properties: HashMap::from([
                 ("name".into(), serde_json::json!("Office Tower A")),
@@ -216,7 +271,11 @@ fn demo_data() -> (Vec<FeatureLayer>, Vec<Feature>) {
             layer_id: roads_layer_id,
             geometry: FeatureGeometry {
                 geom_type: "LineString".into(),
-                coordinates: serde_json::json!([[-122.42, 37.78], [-122.41, 37.78], [-122.40, 37.78]]),
+                coordinates: serde_json::json!([
+                    [-122.42, 37.78],
+                    [-122.41, 37.78],
+                    [-122.40, 37.78]
+                ]),
             },
             properties: HashMap::from([
                 ("name".into(), serde_json::json!("Market Street")),
@@ -262,7 +321,11 @@ mod tests {
     #[test]
     fn test_feature_count() {
         let engine = FeatureServiceEngine::new();
-        let roads_layer = engine.list_layers().iter().find(|l| l.name == "Roads").unwrap();
+        let roads_layer = engine
+            .list_layers()
+            .iter()
+            .find(|l| l.name == "Roads")
+            .unwrap();
         assert_eq!(engine.feature_count(roads_layer.id), 1);
     }
 
@@ -271,8 +334,13 @@ mod tests {
         let engine = FeatureServiceEngine::new();
         let layer = &engine.list_layers()[0];
         let query = SpatialQuery {
-            bbox: None, intersects: None, within_distance_m: None,
-            where_clause: None, limit: 1, offset: 0, order_by: None,
+            bbox: None,
+            intersects: None,
+            within_distance_m: None,
+            where_clause: None,
+            limit: 1,
+            offset: 0,
+            order_by: None,
         };
         let page1 = engine.query_features(layer.id, &query);
         assert_eq!(page1.len(), 1);

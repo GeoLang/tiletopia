@@ -127,13 +127,27 @@ impl IssueTracker {
         let mut by_severity: HashMap<String, u32> = HashMap::new();
         for issue in &self.issues {
             *by_status.entry(format!("{:?}", issue.status)).or_default() += 1;
-            *by_severity.entry(format!("{:?}", issue.severity)).or_default() += 1;
+            *by_severity
+                .entry(format!("{:?}", issue.severity))
+                .or_default() += 1;
         }
         IssueStats {
             total: self.issues.len() as u32,
-            open: self.issues.iter().filter(|i| i.status == IssueStatus::Open).count() as u32,
-            in_progress: self.issues.iter().filter(|i| i.status == IssueStatus::InProgress).count() as u32,
-            resolved: self.issues.iter().filter(|i| i.status == IssueStatus::Resolved || i.status == IssueStatus::Closed).count() as u32,
+            open: self
+                .issues
+                .iter()
+                .filter(|i| i.status == IssueStatus::Open)
+                .count() as u32,
+            in_progress: self
+                .issues
+                .iter()
+                .filter(|i| i.status == IssueStatus::InProgress)
+                .count() as u32,
+            resolved: self
+                .issues
+                .iter()
+                .filter(|i| i.status == IssueStatus::Resolved || i.status == IssueStatus::Closed)
+                .count() as u32,
             by_status,
             by_severity,
             overdue: 0,

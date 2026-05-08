@@ -105,7 +105,7 @@ pub fn render_static_map(request: &StaticMapRequest) -> StaticMapResult {
         ImageFormat::Png => pixels * 3, // ~3 bytes/pixel compressed
         ImageFormat::Jpeg | ImageFormat::Webp => pixels, // ~1 byte/pixel
         ImageFormat::Pdf => pixels * 4 + 10000, // overhead
-        ImageFormat::Svg => pixels / 10,         // vector is smaller
+        ImageFormat::Svg => pixels / 10, // vector is smaller
     };
 
     StaticMapResult {
@@ -124,11 +124,31 @@ pub fn render_static_map(request: &StaticMapRequest) -> StaticMapResult {
 /// Available basemap styles for rendering.
 pub fn available_styles() -> Vec<StyleInfo> {
     vec![
-        StyleInfo { id: Uuid::new_v4(), name: "Streets".into(), preview: "light map with road labels".into() },
-        StyleInfo { id: Uuid::new_v4(), name: "Satellite".into(), preview: "aerial imagery".into() },
-        StyleInfo { id: Uuid::new_v4(), name: "Terrain".into(), preview: "hillshade with contours".into() },
-        StyleInfo { id: Uuid::new_v4(), name: "Dark".into(), preview: "dark theme for overlays".into() },
-        StyleInfo { id: Uuid::new_v4(), name: "Blueprint".into(), preview: "engineering/CAD style".into() },
+        StyleInfo {
+            id: Uuid::new_v4(),
+            name: "Streets".into(),
+            preview: "light map with road labels".into(),
+        },
+        StyleInfo {
+            id: Uuid::new_v4(),
+            name: "Satellite".into(),
+            preview: "aerial imagery".into(),
+        },
+        StyleInfo {
+            id: Uuid::new_v4(),
+            name: "Terrain".into(),
+            preview: "hillshade with contours".into(),
+        },
+        StyleInfo {
+            id: Uuid::new_v4(),
+            name: "Dark".into(),
+            preview: "dark theme for overlays".into(),
+        },
+        StyleInfo {
+            id: Uuid::new_v4(),
+            name: "Blueprint".into(),
+            preview: "engineering/CAD style".into(),
+        },
     ]
 }
 
@@ -175,9 +195,13 @@ mod tests {
             height: 512,
             format: ImageFormat::Jpeg,
             style_id: None,
-            markers: vec![
-                MapMarker { longitude: 0.0, latitude: 0.0, color: "#ff0000".into(), size: MarkerSize::Large, label: Some("A".into()) },
-            ],
+            markers: vec![MapMarker {
+                longitude: 0.0,
+                latitude: 0.0,
+                color: "#ff0000".into(),
+                size: MarkerSize::Large,
+                label: Some("A".into()),
+            }],
             overlays: vec![],
             dpi: 150,
         };

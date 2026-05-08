@@ -60,7 +60,7 @@ pub enum SlopeUnit {
 /// Slope calculation method.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SlopeMethod {
-    Horn,       // 3x3 Horn's method
+    Horn,              // 3x3 Horn's method
     ZevenbergenThorne, // smoother for gentle terrain
 }
 
@@ -120,7 +120,11 @@ pub struct ContourLine {
 }
 
 /// Compute slope for a DEM grid (simplified demo).
-pub fn compute_slope(grid: &[Vec<f64>], cell_size_m: f64, params: &SlopeParams) -> TerrainAnalysisResult {
+pub fn compute_slope(
+    grid: &[Vec<f64>],
+    cell_size_m: f64,
+    params: &SlopeParams,
+) -> TerrainAnalysisResult {
     let rows = grid.len();
     let cols = if rows > 0 { grid[0].len() } else { 0 };
     let mut slopes = Vec::new();
@@ -139,10 +143,15 @@ pub fn compute_slope(grid: &[Vec<f64>], cell_size_m: f64, params: &SlopeParams) 
         }
     }
 
-    let mean = if slopes.is_empty() { 0.0 } else { slopes.iter().sum::<f64>() / slopes.len() as f64 };
+    let mean = if slopes.is_empty() {
+        0.0
+    } else {
+        slopes.iter().sum::<f64>() / slopes.len() as f64
+    };
     let min = slopes.iter().cloned().fold(f64::INFINITY, f64::min);
     let max = slopes.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let variance = slopes.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / slopes.len().max(1) as f64;
+    let variance =
+        slopes.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / slopes.len().max(1) as f64;
 
     TerrainAnalysisResult {
         id: Uuid::new_v4(),
@@ -176,7 +185,11 @@ pub fn hillshade_cell(dz_dx: f64, dz_dy: f64, params: &HillshadeParams) -> u8 {
 
 /// Compute viewshed from an observer point (simplified).
 #[allow(clippy::needless_range_loop)]
-pub fn compute_viewshed(dem_grid: &[Vec<f64>], cell_size_m: f64, params: &ViewshedParams) -> ViewshedResult {
+pub fn compute_viewshed(
+    dem_grid: &[Vec<f64>],
+    cell_size_m: f64,
+    params: &ViewshedParams,
+) -> ViewshedResult {
     let rows = dem_grid.len();
     let cols = if rows > 0 { dem_grid[0].len() } else { 0 };
     let total_cells = (rows * cols) as u64;
@@ -195,7 +208,8 @@ pub fn compute_viewshed(dem_grid: &[Vec<f64>], cell_size_m: f64, params: &Viewsh
     let mut max_dist = 0.0f64;
 
     for i in center_row.saturating_sub(radius_cells)..=(center_row + radius_cells).min(rows - 1) {
-        for j in center_col.saturating_sub(radius_cells)..=(center_col + radius_cells).min(cols - 1) {
+        for j in center_col.saturating_sub(radius_cells)..=(center_col + radius_cells).min(cols - 1)
+        {
             let di = i as f64 - center_row as f64;
             let dj = j as f64 - center_col as f64;
             let dist = (di * di + dj * dj).sqrt() * cell_size_m;
@@ -215,7 +229,11 @@ pub fn compute_viewshed(dem_grid: &[Vec<f64>], cell_size_m: f64, params: &Viewsh
     ViewshedResult {
         observer: params.observer_position,
         visible_area_m2: visible_cells as f64 * cell_size_m * cell_size_m,
-        visible_percentage: if analyzed > 0 { visible_cells as f64 / analyzed as f64 * 100.0 } else { 0.0 },
+        visible_percentage: if analyzed > 0 {
+            visible_cells as f64 / analyzed as f64 * 100.0
+        } else {
+            0.0
+        },
         max_visible_distance_m: max_dist,
         total_analyzed_cells: analyzed,
         visible_cells,
@@ -224,12 +242,24 @@ pub fn compute_viewshed(dem_grid: &[Vec<f64>], cell_size_m: f64, params: &Viewsh
 
 /// Generate contour lines from a DEM grid (simplified).
 #[allow(clippy::needless_range_loop)]
-pub fn generate_contours(dem_grid: &[Vec<f64>], cell_size_m: f64, params: &ContourParams) -> Vec<ContourLine> {
+pub fn generate_contours(
+    dem_grid: &[Vec<f64>],
+    cell_size_m: f64,
+    params: &ContourParams,
+) -> Vec<ContourLine> {
     let rows = dem_grid.len();
     let cols = if rows > 0 { dem_grid[0].len() } else { 0 };
 
-    let min_elev = dem_grid.iter().flat_map(|row| row.iter()).cloned().fold(f64::INFINITY, f64::min);
-    let max_elev = dem_grid.iter().flat_map(|row| row.iter()).cloned().fold(f64::NEG_INFINITY, f64::max);
+    let min_elev = dem_grid
+        .iter()
+        .flat_map(|row| row.iter())
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
+    let max_elev = dem_grid
+        .iter()
+        .flat_map(|row| row.iter())
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
 
     let mut contours = Vec::new();
     let mut elev = (min_elev / params.interval_m).ceil() * params.interval_m;
@@ -253,7 +283,12 @@ pub fn generate_contours(dem_grid: &[Vec<f64>], cell_size_m: f64, params: &Conto
 
         if !vertices.is_empty() {
             let length_m = vertices.len() as f64 * cell_size_m;
-            contours.push(ContourLine { elevation_m: elev, is_index, vertices, length_m });
+            contours.push(ContourLine {
+                elevation_m: elev,
+                is_index,
+                vertices,
+                length_m,
+            });
         }
 
         elev += params.interval_m;
@@ -265,8 +300,15 @@ pub fn generate_contours(dem_grid: &[Vec<f64>], cell_size_m: f64, params: &Conto
 /// List available terrain analysis operations.
 pub fn available_analyses() -> Vec<&'static str> {
     vec![
-        "Slope", "Aspect", "Hillshade", "Viewshed", "Watershed",
-        "ContourLines", "CutFill", "FlowDirection", "FlowAccumulation",
+        "Slope",
+        "Aspect",
+        "Hillshade",
+        "Viewshed",
+        "Watershed",
+        "ContourLines",
+        "CutFill",
+        "FlowDirection",
+        "FlowAccumulation",
     ]
 }
 
@@ -284,7 +326,10 @@ mod tests {
             vec![0.0, 5.0, 10.0, 15.0, 20.0],
             vec![0.0, 5.0, 10.0, 15.0, 20.0],
         ];
-        let params = SlopeParams { output_unit: SlopeUnit::Degrees, method: SlopeMethod::Horn };
+        let params = SlopeParams {
+            output_unit: SlopeUnit::Degrees,
+            method: SlopeMethod::Horn,
+        };
         let result = compute_slope(&grid, 10.0, &params);
         assert!(result.statistics.mean_value > 0.0);
         assert_eq!(result.analysis_type, AnalysisType::Slope);
@@ -325,7 +370,11 @@ mod tests {
             vec![10.0, 20.0, 30.0, 40.0],
             vec![15.0, 25.0, 35.0, 45.0],
         ];
-        let params = ContourParams { interval_m: 10.0, base_contour_m: 0.0, smooth_factor: 0.0 };
+        let params = ContourParams {
+            interval_m: 10.0,
+            base_contour_m: 0.0,
+            smooth_factor: 0.0,
+        };
         let contours = generate_contours(&grid, 10.0, &params);
         assert!(!contours.is_empty());
     }

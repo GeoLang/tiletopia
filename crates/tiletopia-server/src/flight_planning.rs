@@ -61,9 +61,9 @@ pub enum WaypointAction {
 pub struct FlightParameters {
     pub altitude_m: f64,
     pub speed_mps: f64,
-    pub overlap_front_pct: f64,  // 70–80% typical
-    pub overlap_side_pct: f64,   // 60–70% typical
-    pub gsd_cm_per_px: f64,      // ground sampling distance
+    pub overlap_front_pct: f64, // 70–80% typical
+    pub overlap_side_pct: f64,  // 60–70% typical
+    pub gsd_cm_per_px: f64,     // ground sampling distance
     pub camera: CameraSpec,
     pub max_flight_time_min: f64,
     pub home_position: [f64; 2], // takeoff/landing [lon, lat]
@@ -112,10 +112,8 @@ pub fn generate_grid_plan(
         / (camera.focal_length_mm * camera.image_width_px as f64);
 
     // Calculate spacing between lines
-    let footprint_width_m =
-        altitude_m * camera.sensor_width_mm / camera.focal_length_mm;
-    let footprint_height_m =
-        altitude_m * camera.sensor_height_mm / camera.focal_length_mm;
+    let footprint_width_m = altitude_m * camera.sensor_width_mm / camera.focal_length_mm;
+    let footprint_height_m = altitude_m * camera.sensor_height_mm / camera.focal_length_mm;
     let line_spacing_m = footprint_width_m * (1.0 - overlap_side / 100.0);
     let photo_spacing_m = footprint_height_m * (1.0 - overlap_front / 100.0);
 
@@ -132,8 +130,7 @@ pub fn generate_grid_plan(
     let mut seq = 0u32;
     for line in 0..num_lines.min(20) {
         // cap for demo
-        let lon =
-            min_lon + (max_lon - min_lon) * (line as f64 / num_lines.max(1) as f64);
+        let lon = min_lon + (max_lon - min_lon) * (line as f64 / num_lines.max(1) as f64);
         let (start_lat, end_lat) = if line % 2 == 0 {
             (min_lat, max_lat)
         } else {

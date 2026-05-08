@@ -38,10 +38,10 @@ pub enum VariogramModel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariogramParams {
     pub model: VariogramModel,
-    pub nugget: f64,       // variance at distance 0
-    pub sill: f64,         // total variance plateau
-    pub range: f64,        // distance at which sill is reached
-    pub r_squared: f64,    // goodness-of-fit
+    pub nugget: f64,    // variance at distance 0
+    pub sill: f64,      // total variance plateau
+    pub range: f64,     // distance at which sill is reached
+    pub r_squared: f64, // goodness-of-fit
 }
 
 /// Empirical variogram point (lag bin).
@@ -103,7 +103,11 @@ pub fn idw_interpolation(samples: &[SamplePoint], query_x: f64, query_y: f64, po
 }
 
 /// Compute empirical variogram from sample data.
-pub fn compute_variogram(samples: &[SamplePoint], n_lags: usize, max_lag: f64) -> Vec<VariogramBin> {
+pub fn compute_variogram(
+    samples: &[SamplePoint],
+    n_lags: usize,
+    max_lag: f64,
+) -> Vec<VariogramBin> {
     let lag_size = max_lag / n_lags as f64;
     let mut bins: Vec<(f64, u32)> = vec![(0.0, 0); n_lags]; // (sum_semivariance, count)
 
@@ -139,7 +143,10 @@ pub fn fit_spherical_variogram(bins: &[VariogramBin]) -> VariogramParams {
     if bins.is_empty() {
         return VariogramParams {
             model: VariogramModel::Spherical,
-            nugget: 0.0, sill: 1.0, range: 1.0, r_squared: 0.0,
+            nugget: 0.0,
+            sill: 1.0,
+            range: 1.0,
+            r_squared: 0.0,
         };
     }
 
@@ -154,16 +161,29 @@ pub fn fit_spherical_variogram(bins: &[VariogramBin]) -> VariogramParams {
 
     // Compute R² (simplified)
     let mean_var = bins.iter().map(|b| b.semivariance).sum::<f64>() / bins.len() as f64;
-    let ss_tot = bins.iter().map(|b| (b.semivariance - mean_var).powi(2)).sum::<f64>();
-    let ss_res: f64 = bins.iter().map(|b| {
-        let predicted = spherical_model(b.lag_distance, nugget, sill, range);
-        (b.semivariance - predicted).powi(2)
-    }).sum();
-    let r_squared = if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 };
+    let ss_tot = bins
+        .iter()
+        .map(|b| (b.semivariance - mean_var).powi(2))
+        .sum::<f64>();
+    let ss_res: f64 = bins
+        .iter()
+        .map(|b| {
+            let predicted = spherical_model(b.lag_distance, nugget, sill, range);
+            (b.semivariance - predicted).powi(2)
+        })
+        .sum();
+    let r_squared = if ss_tot > 0.0 {
+        1.0 - ss_res / ss_tot
+    } else {
+        0.0
+    };
 
     VariogramParams {
         model: VariogramModel::Spherical,
-        nugget, sill, range, r_squared,
+        nugget,
+        sill,
+        range,
+        r_squared,
     }
 }
 
@@ -180,7 +200,12 @@ fn spherical_model(h: f64, nugget: f64, sill: f64, range: f64) -> f64 {
 }
 
 /// Ordinary kriging at a single point.
-pub fn kriging_estimate(samples: &[SamplePoint], query_x: f64, query_y: f64, variogram: &VariogramParams) -> (f64, f64) {
+pub fn kriging_estimate(
+    samples: &[SamplePoint],
+    query_x: f64,
+    query_y: f64,
+    variogram: &VariogramParams,
+) -> (f64, f64) {
     let n = samples.len();
     if n == 0 {
         return (0.0, 0.0);
@@ -198,7 +223,11 @@ pub fn kriging_estimate(samples: &[SamplePoint], query_x: f64, query_y: f64, var
         let dy = s.y - query_y;
         let dist = (dx * dx + dy * dy).sqrt();
         let gamma = spherical_model(dist, variogram.nugget, variogram.sill, variogram.range);
-        let w = if gamma > 0.0 { variogram.sill / gamma } else { 100.0 };
+        let w = if gamma > 0.0 {
+            variogram.sill / gamma
+        } else {
+            100.0
+        };
         weights.push(w);
         weight_sum += w;
     }
@@ -211,7 +240,8 @@ pub fn kriging_estimate(samples: &[SamplePoint], query_x: f64, query_y: f64, var
         let dx = s.x - query_x;
         let dy = s.y - query_y;
         let dist = (dx * dx + dy * dy).sqrt();
-        variance += normalized_w * spherical_model(dist, variogram.nugget, variogram.sill, variogram.range);
+        variance +=
+            normalized_w * spherical_model(dist, variogram.nugget, variogram.sill, variogram.range);
     }
 
     (estimate, variance)
@@ -228,7 +258,10 @@ pub fn interpolate_grid(
     let rows = ((bounds[3] - bounds[1]) / resolution).ceil() as usize;
     let mut values = Vec::with_capacity(rows * cols);
     let mut variances = Vec::new();
-    let has_variance = matches!(method, InterpolationMethod::OrdinaryKriging | InterpolationMethod::SimpleKriging { .. });
+    let has_variance = matches!(
+        method,
+        InterpolationMethod::OrdinaryKriging | InterpolationMethod::SimpleKriging { .. }
+    );
 
     let variogram = if has_variance {
         let bins = compute_variogram(samples, 10, bounds[2] - bounds[0]);
@@ -245,17 +278,26 @@ pub fn interpolate_grid(
                 InterpolationMethod::Idw { power } => {
                     values.push(idw_interpolation(samples, x, y, *power));
                 }
-                InterpolationMethod::OrdinaryKriging | InterpolationMethod::SimpleKriging { .. } => {
+                InterpolationMethod::OrdinaryKriging
+                | InterpolationMethod::SimpleKriging { .. } => {
                     let (est, var) = kriging_estimate(samples, x, y, variogram.as_ref().unwrap());
                     values.push(est);
                     variances.push(var);
                 }
                 InterpolationMethod::UniversalKriging => {
                     // fallback to ordinary
-                    let (est, var) = kriging_estimate(samples, x, y, variogram.as_ref().unwrap_or(&VariogramParams {
-                        model: VariogramModel::Spherical,
-                        nugget: 0.0, sill: 1.0, range: 1.0, r_squared: 0.0,
-                    }));
+                    let (est, var) = kriging_estimate(
+                        samples,
+                        x,
+                        y,
+                        variogram.as_ref().unwrap_or(&VariogramParams {
+                            model: VariogramModel::Spherical,
+                            nugget: 0.0,
+                            sill: 1.0,
+                            range: 1.0,
+                            r_squared: 0.0,
+                        }),
+                    );
                     values.push(est);
                     variances.push(var);
                 }
@@ -266,7 +308,8 @@ pub fn interpolate_grid(
     let min_v = values.iter().cloned().fold(f64::INFINITY, f64::min);
     let max_v = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let mean_v = values.iter().sum::<f64>() / values.len().max(1) as f64;
-    let var_v = values.iter().map(|v| (v - mean_v).powi(2)).sum::<f64>() / values.len().max(1) as f64;
+    let var_v =
+        values.iter().map(|v| (v - mean_v).powi(2)).sum::<f64>() / values.len().max(1) as f64;
 
     InterpolationResult {
         id: Uuid::new_v4(),
@@ -301,7 +344,9 @@ pub fn morans_i(samples: &[SamplePoint], bandwidth: f64) -> f64 {
 
     for i in 0..samples.len() {
         for j in 0..samples.len() {
-            if i == j { continue; }
+            if i == j {
+                continue;
+            }
             let dx = samples[i].x - samples[j].x;
             let dy = samples[i].y - samples[j].y;
             let dist = (dx * dx + dy * dy).sqrt();
@@ -324,11 +369,31 @@ mod tests {
 
     fn sample_data() -> Vec<SamplePoint> {
         vec![
-            SamplePoint { x: 0.0, y: 0.0, value: 10.0 },
-            SamplePoint { x: 1.0, y: 0.0, value: 12.0 },
-            SamplePoint { x: 0.0, y: 1.0, value: 11.0 },
-            SamplePoint { x: 1.0, y: 1.0, value: 13.0 },
-            SamplePoint { x: 0.5, y: 0.5, value: 11.5 },
+            SamplePoint {
+                x: 0.0,
+                y: 0.0,
+                value: 10.0,
+            },
+            SamplePoint {
+                x: 1.0,
+                y: 0.0,
+                value: 12.0,
+            },
+            SamplePoint {
+                x: 0.0,
+                y: 1.0,
+                value: 11.0,
+            },
+            SamplePoint {
+                x: 1.0,
+                y: 1.0,
+                value: 13.0,
+            },
+            SamplePoint {
+                x: 0.5,
+                y: 0.5,
+                value: 11.5,
+            },
         ]
     }
 
@@ -360,10 +425,26 @@ mod tests {
     #[test]
     fn test_fit_spherical_variogram() {
         let bins = vec![
-            VariogramBin { lag_distance: 0.2, semivariance: 0.5, pair_count: 10 },
-            VariogramBin { lag_distance: 0.5, semivariance: 1.2, pair_count: 20 },
-            VariogramBin { lag_distance: 1.0, semivariance: 2.0, pair_count: 15 },
-            VariogramBin { lag_distance: 1.5, semivariance: 2.3, pair_count: 8 },
+            VariogramBin {
+                lag_distance: 0.2,
+                semivariance: 0.5,
+                pair_count: 10,
+            },
+            VariogramBin {
+                lag_distance: 0.5,
+                semivariance: 1.2,
+                pair_count: 20,
+            },
+            VariogramBin {
+                lag_distance: 1.0,
+                semivariance: 2.0,
+                pair_count: 15,
+            },
+            VariogramBin {
+                lag_distance: 1.5,
+                semivariance: 2.3,
+                pair_count: 8,
+            },
         ];
         let params = fit_spherical_variogram(&bins);
         assert!(params.sill > 0.0);
@@ -375,7 +456,10 @@ mod tests {
         let samples = sample_data();
         let variogram = VariogramParams {
             model: VariogramModel::Spherical,
-            nugget: 0.1, sill: 2.0, range: 2.0, r_squared: 0.9,
+            nugget: 0.1,
+            sill: 2.0,
+            range: 2.0,
+            r_squared: 0.9,
         };
         let (est, var) = kriging_estimate(&samples, 0.5, 0.5, &variogram);
         assert!(est > 10.0 && est < 14.0);
@@ -385,7 +469,12 @@ mod tests {
     #[test]
     fn test_interpolate_grid() {
         let samples = sample_data();
-        let result = interpolate_grid(&samples, [0.0, 0.0, 1.0, 1.0], 0.5, &InterpolationMethod::Idw { power: 2.0 });
+        let result = interpolate_grid(
+            &samples,
+            [0.0, 0.0, 1.0, 1.0],
+            0.5,
+            &InterpolationMethod::Idw { power: 2.0 },
+        );
         assert_eq!(result.grid_rows, 2);
         assert_eq!(result.grid_cols, 2);
         assert_eq!(result.values.len(), 4);
@@ -395,14 +484,41 @@ mod tests {
     fn test_morans_i_clustered() {
         // Spatially clustered data should have positive Moran's I
         let samples = vec![
-            SamplePoint { x: 0.0, y: 0.0, value: 10.0 },
-            SamplePoint { x: 0.1, y: 0.0, value: 10.5 },
-            SamplePoint { x: 0.0, y: 0.1, value: 10.2 },
-            SamplePoint { x: 5.0, y: 5.0, value: 50.0 },
-            SamplePoint { x: 5.1, y: 5.0, value: 49.5 },
-            SamplePoint { x: 5.0, y: 5.1, value: 50.3 },
+            SamplePoint {
+                x: 0.0,
+                y: 0.0,
+                value: 10.0,
+            },
+            SamplePoint {
+                x: 0.1,
+                y: 0.0,
+                value: 10.5,
+            },
+            SamplePoint {
+                x: 0.0,
+                y: 0.1,
+                value: 10.2,
+            },
+            SamplePoint {
+                x: 5.0,
+                y: 5.0,
+                value: 50.0,
+            },
+            SamplePoint {
+                x: 5.1,
+                y: 5.0,
+                value: 49.5,
+            },
+            SamplePoint {
+                x: 5.0,
+                y: 5.1,
+                value: 50.3,
+            },
         ];
         let i = morans_i(&samples, 1.0);
-        assert!(i > 0.0, "Moran's I should be positive for clustered data, got {i}");
+        assert!(
+            i > 0.0,
+            "Moran's I should be positive for clustered data, got {i}"
+        );
     }
 }

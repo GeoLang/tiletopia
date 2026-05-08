@@ -14,7 +14,7 @@ pub struct MultispectralImage {
     pub bands: Vec<Band>,
     pub width: u32,
     pub height: u32,
-    pub gsd_m: f64,     // ground sample distance
+    pub gsd_m: f64,       // ground sample distance
     pub bounds: [f64; 4], // [min_x, min_y, max_x, max_y]
     pub capture_date: String,
     pub sensor: String,
@@ -120,18 +120,34 @@ pub struct Hotspot {
 
 /// Compute NDVI from red and NIR bands.
 pub fn compute_ndvi(red_band: &[f64], nir_band: &[f64]) -> Vec<f64> {
-    red_band.iter().zip(nir_band.iter()).map(|(r, n)| {
-        let sum = n + r;
-        if sum.abs() < 1e-10 { 0.0 } else { (n - r) / sum }
-    }).collect()
+    red_band
+        .iter()
+        .zip(nir_band.iter())
+        .map(|(r, n)| {
+            let sum = n + r;
+            if sum.abs() < 1e-10 {
+                0.0
+            } else {
+                (n - r) / sum
+            }
+        })
+        .collect()
 }
 
 /// Compute any normalized difference index: (band_a - band_b) / (band_a + band_b).
 pub fn normalized_difference(band_a: &[f64], band_b: &[f64]) -> Vec<f64> {
-    band_a.iter().zip(band_b.iter()).map(|(a, b)| {
-        let sum = a + b;
-        if sum.abs() < 1e-10 { 0.0 } else { (a - b) / sum }
-    }).collect()
+    band_a
+        .iter()
+        .zip(band_b.iter())
+        .map(|(a, b)| {
+            let sum = a + b;
+            if sum.abs() < 1e-10 {
+                0.0
+            } else {
+                (a - b) / sum
+            }
+        })
+        .collect()
 }
 
 /// Compute Enhanced Vegetation Index.
@@ -146,17 +162,28 @@ pub fn compute_evi(nir: &[f64], red: &[f64], blue: &[f64]) -> Vec<f64> {
         .zip(blue.iter())
         .map(|((n, r), b)| {
             let denom = n + c1 * r - c2 * b + l;
-            if denom.abs() < 1e-10 { 0.0 } else { g * (n - r) / denom }
+            if denom.abs() < 1e-10 {
+                0.0
+            } else {
+                g * (n - r) / denom
+            }
         })
         .collect()
 }
 
 /// Compute SAVI (Soil Adjusted Vegetation Index).
 pub fn compute_savi(nir: &[f64], red: &[f64], l_factor: f64) -> Vec<f64> {
-    nir.iter().zip(red.iter()).map(|(n, r)| {
-        let denom = n + r + l_factor;
-        if denom.abs() < 1e-10 { 0.0 } else { ((n - r) / denom) * (1.0 + l_factor) }
-    }).collect()
+    nir.iter()
+        .zip(red.iter())
+        .map(|(n, r)| {
+            let denom = n + r + l_factor;
+            if denom.abs() < 1e-10 {
+                0.0
+            } else {
+                ((n - r) / denom) * (1.0 + l_factor)
+            }
+        })
+        .collect()
 }
 
 /// Classify NDVI values into vegetation health categories.
@@ -170,17 +197,27 @@ pub fn classify_ndvi(ndvi_values: &[f64], pixel_area_m2: f64) -> IndexClassifica
     ];
 
     let total = ndvi_values.len() as f64;
-    let classes = classes_def.iter().map(|(name, min, max, color)| {
-        let count = ndvi_values.iter().filter(|v| **v >= *min && **v < *max).count() as f64;
-        IndexClass {
-            name: name.to_string(),
-            min_value: *min,
-            max_value: *max,
-            color: color.to_string(),
-            area_m2: count * pixel_area_m2,
-            percentage: if total > 0.0 { count / total * 100.0 } else { 0.0 },
-        }
-    }).collect();
+    let classes = classes_def
+        .iter()
+        .map(|(name, min, max, color)| {
+            let count = ndvi_values
+                .iter()
+                .filter(|v| **v >= *min && **v < *max)
+                .count() as f64;
+            IndexClass {
+                name: name.to_string(),
+                min_value: *min,
+                max_value: *max,
+                color: color.to_string(),
+                area_m2: count * pixel_area_m2,
+                percentage: if total > 0.0 {
+                    count / total * 100.0
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect();
 
     IndexClassification { classes }
 }
@@ -195,15 +232,22 @@ pub fn detect_thermal_anomalies(
     let n = thermal_band.len();
     if n == 0 {
         return ThermalResult {
-            id: Uuid::new_v4(), min_temp_c: 0.0, max_temp_c: 0.0, mean_temp_c: 0.0,
-            hotspots: vec![], cold_spots: vec![],
+            id: Uuid::new_v4(),
+            min_temp_c: 0.0,
+            max_temp_c: 0.0,
+            mean_temp_c: 0.0,
+            hotspots: vec![],
+            cold_spots: vec![],
         };
     }
 
     let mean = thermal_band.iter().sum::<f64>() / n as f64;
     let std_dev = (thermal_band.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
     let min_temp = thermal_band.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max_temp = thermal_band.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let max_temp = thermal_band
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
 
     let hot_threshold = mean + threshold_std * std_dev;
     let cold_threshold = mean - threshold_std * std_dev;
@@ -216,17 +260,23 @@ pub fn detect_thermal_anomalies(
         let y = (i as u32 / width) as f64 * pixel_size_m;
 
         if temp > hot_threshold {
-            let severity = if temp > mean + 3.0 * std_dev { "critical" }
-                else if temp > mean + 2.0 * std_dev { "high" }
-                else { "moderate" };
+            let severity = if temp > mean + 3.0 * std_dev {
+                "critical"
+            } else if temp > mean + 2.0 * std_dev {
+                "high"
+            } else {
+                "moderate"
+            };
             hotspots.push(Hotspot {
-                position: [x, y], temperature_c: temp,
+                position: [x, y],
+                temperature_c: temp,
                 area_m2: pixel_size_m * pixel_size_m,
                 severity: severity.into(),
             });
         } else if temp < cold_threshold {
             cold_spots.push(Hotspot {
-                position: [x, y], temperature_c: temp,
+                position: [x, y],
+                temperature_c: temp,
                 area_m2: pixel_size_m * pixel_size_m,
                 severity: "low".into(),
             });
@@ -245,16 +295,30 @@ pub fn detect_thermal_anomalies(
 
 /// Simple band math (addition, subtraction, ratios between two bands).
 pub fn band_math(band_a: &[f64], band_b: &[f64], operation: &str) -> Vec<f64> {
-    band_a.iter().zip(band_b.iter()).map(|(a, b)| {
-        match operation {
+    band_a
+        .iter()
+        .zip(band_b.iter())
+        .map(|(a, b)| match operation {
             "add" => a + b,
             "subtract" => a - b,
             "multiply" => a * b,
-            "divide" => if b.abs() < 1e-10 { 0.0 } else { a / b },
-            "ratio" => if b.abs() < 1e-10 { 0.0 } else { a / b },
+            "divide" => {
+                if b.abs() < 1e-10 {
+                    0.0
+                } else {
+                    a / b
+                }
+            }
+            "ratio" => {
+                if b.abs() < 1e-10 {
+                    0.0
+                } else {
+                    a / b
+                }
+            }
             _ => 0.0,
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 /// List supported spectral indices.

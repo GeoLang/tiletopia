@@ -577,17 +577,44 @@ async fn elevation_profile_demo() -> Json<serde_json::Value> {
 
 /// Routes for map matching.
 pub fn map_matching_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/map-matching/match", get(map_match_demo))
+    Router::new().route("/api/v1/map-matching/match", get(map_match_demo))
 }
 
 async fn map_match_demo() -> Json<serde_json::Value> {
     let request = map_matching::MapMatchRequest {
         trace: vec![
-            map_matching::GpsPoint { latitude: 37.7749, longitude: -122.4194, timestamp: None, accuracy_m: Some(5.0), speed_mps: None, bearing_deg: None },
-            map_matching::GpsPoint { latitude: 37.7755, longitude: -122.4180, timestamp: None, accuracy_m: Some(5.0), speed_mps: None, bearing_deg: None },
-            map_matching::GpsPoint { latitude: 37.7760, longitude: -122.4165, timestamp: None, accuracy_m: Some(5.0), speed_mps: None, bearing_deg: None },
-            map_matching::GpsPoint { latitude: 37.7768, longitude: -122.4150, timestamp: None, accuracy_m: Some(5.0), speed_mps: None, bearing_deg: None },
+            map_matching::GpsPoint {
+                latitude: 37.7749,
+                longitude: -122.4194,
+                timestamp: None,
+                accuracy_m: Some(5.0),
+                speed_mps: None,
+                bearing_deg: None,
+            },
+            map_matching::GpsPoint {
+                latitude: 37.7755,
+                longitude: -122.4180,
+                timestamp: None,
+                accuracy_m: Some(5.0),
+                speed_mps: None,
+                bearing_deg: None,
+            },
+            map_matching::GpsPoint {
+                latitude: 37.7760,
+                longitude: -122.4165,
+                timestamp: None,
+                accuracy_m: Some(5.0),
+                speed_mps: None,
+                bearing_deg: None,
+            },
+            map_matching::GpsPoint {
+                latitude: 37.7768,
+                longitude: -122.4150,
+                timestamp: None,
+                accuracy_m: Some(5.0),
+                speed_mps: None,
+                bearing_deg: None,
+            },
         ],
         profile: map_matching::MatchProfile::Driving,
         search_radius_m: 50.0,
@@ -638,14 +665,20 @@ async fn static_map_formats() -> Json<serde_json::Value> {
 /// Routes for drone flight planning.
 pub fn flight_planning_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/v1/flight-planning/generate", get(generate_flight_demo))
+        .route(
+            "/api/v1/flight-planning/generate",
+            get(generate_flight_demo),
+        )
         .route("/api/v1/flight-planning/patterns", get(flight_patterns))
 }
 
 async fn generate_flight_demo() -> Json<serde_json::Value> {
     let area = vec![
-        [-122.42, 37.77], [-122.41, 37.77],
-        [-122.41, 37.78], [-122.42, 37.78], [-122.42, 37.77],
+        [-122.42, 37.77],
+        [-122.41, 37.77],
+        [-122.41, 37.78],
+        [-122.42, 37.78],
+        [-122.42, 37.77],
     ];
     let plan = flight_planning::generate_grid_plan(&area, 80.0, 0.8, 0.7);
     Json(serde_json::json!({
@@ -666,8 +699,14 @@ async fn flight_patterns() -> Json<serde_json::Value> {
 /// Routes for scan registration (ICP).
 pub fn scan_registration_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/v1/scan-registration/demo", get(scan_registration_demo))
-        .route("/api/v1/scan-registration/methods", get(registration_methods))
+        .route(
+            "/api/v1/scan-registration/demo",
+            get(scan_registration_demo),
+        )
+        .route(
+            "/api/v1/scan-registration/methods",
+            get(registration_methods),
+        )
 }
 
 async fn scan_registration_demo() -> Json<serde_json::Value> {
@@ -709,7 +748,10 @@ async fn issue_stats() -> Json<serde_json::Value> {
 /// Routes for terrain analysis.
 pub fn terrain_analysis_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/v1/terrain-analysis/operations", get(terrain_operations))
+        .route(
+            "/api/v1/terrain-analysis/operations",
+            get(terrain_operations),
+        )
         .route("/api/v1/terrain-analysis/demo", get(terrain_analysis_demo))
 }
 
@@ -755,11 +797,31 @@ async fn geostat_methods() -> Json<serde_json::Value> {
 
 async fn geostat_demo() -> Json<serde_json::Value> {
     let samples = vec![
-        geostatistics::SamplePoint { x: 0.0, y: 0.0, value: 10.0 },
-        geostatistics::SamplePoint { x: 1.0, y: 0.0, value: 12.0 },
-        geostatistics::SamplePoint { x: 0.0, y: 1.0, value: 11.0 },
-        geostatistics::SamplePoint { x: 1.0, y: 1.0, value: 13.0 },
-        geostatistics::SamplePoint { x: 0.5, y: 0.5, value: 11.5 },
+        geostatistics::SamplePoint {
+            x: 0.0,
+            y: 0.0,
+            value: 10.0,
+        },
+        geostatistics::SamplePoint {
+            x: 1.0,
+            y: 0.0,
+            value: 12.0,
+        },
+        geostatistics::SamplePoint {
+            x: 0.0,
+            y: 1.0,
+            value: 11.0,
+        },
+        geostatistics::SamplePoint {
+            x: 1.0,
+            y: 1.0,
+            value: 13.0,
+        },
+        geostatistics::SamplePoint {
+            x: 0.5,
+            y: 0.5,
+            value: 11.5,
+        },
     ];
     let result = geostatistics::interpolate_grid(
         &samples,

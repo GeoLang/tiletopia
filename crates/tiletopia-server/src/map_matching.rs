@@ -140,9 +140,30 @@ mod tests {
     fn test_map_match() {
         let req = MapMatchRequest {
             trace: vec![
-                GpsPoint { latitude: 37.7749, longitude: -122.4194, timestamp: Some(1000.0), accuracy_m: Some(10.0), speed_mps: None, bearing_deg: None },
-                GpsPoint { latitude: 37.7755, longitude: -122.4185, timestamp: Some(1005.0), accuracy_m: Some(8.0), speed_mps: None, bearing_deg: None },
-                GpsPoint { latitude: 37.7762, longitude: -122.4170, timestamp: Some(1010.0), accuracy_m: Some(12.0), speed_mps: None, bearing_deg: None },
+                GpsPoint {
+                    latitude: 37.7749,
+                    longitude: -122.4194,
+                    timestamp: Some(1000.0),
+                    accuracy_m: Some(10.0),
+                    speed_mps: None,
+                    bearing_deg: None,
+                },
+                GpsPoint {
+                    latitude: 37.7755,
+                    longitude: -122.4185,
+                    timestamp: Some(1005.0),
+                    accuracy_m: Some(8.0),
+                    speed_mps: None,
+                    bearing_deg: None,
+                },
+                GpsPoint {
+                    latitude: 37.7762,
+                    longitude: -122.4170,
+                    timestamp: Some(1010.0),
+                    accuracy_m: Some(12.0),
+                    speed_mps: None,
+                    bearing_deg: None,
+                },
             ],
             profile: MatchProfile::Driving,
             search_radius_m: 50.0,
@@ -156,9 +177,14 @@ mod tests {
     #[test]
     fn test_snapped_closer_to_road() {
         let req = MapMatchRequest {
-            trace: vec![
-                GpsPoint { latitude: 37.7749, longitude: -122.4194, timestamp: None, accuracy_m: None, speed_mps: None, bearing_deg: None },
-            ],
+            trace: vec![GpsPoint {
+                latitude: 37.7749,
+                longitude: -122.4194,
+                timestamp: None,
+                accuracy_m: None,
+                speed_mps: None,
+                bearing_deg: None,
+            }],
             profile: MatchProfile::Walking,
             search_radius_m: 30.0,
         };
@@ -172,8 +198,22 @@ mod tests {
     fn test_road_segments() {
         let req = MapMatchRequest {
             trace: vec![
-                GpsPoint { latitude: 37.7749, longitude: -122.4194, timestamp: None, accuracy_m: None, speed_mps: None, bearing_deg: None },
-                GpsPoint { latitude: 37.7780, longitude: -122.4150, timestamp: None, accuracy_m: None, speed_mps: None, bearing_deg: None },
+                GpsPoint {
+                    latitude: 37.7749,
+                    longitude: -122.4194,
+                    timestamp: None,
+                    accuracy_m: None,
+                    speed_mps: None,
+                    bearing_deg: None,
+                },
+                GpsPoint {
+                    latitude: 37.7780,
+                    longitude: -122.4150,
+                    timestamp: None,
+                    accuracy_m: None,
+                    speed_mps: None,
+                    bearing_deg: None,
+                },
             ],
             profile: MatchProfile::Cycling,
             search_radius_m: 50.0,

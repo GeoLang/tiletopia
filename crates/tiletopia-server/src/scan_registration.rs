@@ -38,8 +38,7 @@ impl Transform3D {
     pub fn identity() -> Self {
         Self {
             matrix: [
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
-                1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
         }
     }
@@ -82,8 +81,8 @@ pub enum RegistrationStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistrationResult {
     pub transforms: Vec<ScanTransform>,
-    pub fitness_score: f64,     // 0.0–1.0 (higher = better overlap)
-    pub rmse: f64,              // root-mean-square error in meters
+    pub fitness_score: f64, // 0.0–1.0 (higher = better overlap)
+    pub rmse: f64,          // root-mean-square error in meters
     pub iterations: u32,
     pub inlier_ratio: f64,
     pub computation_time_secs: f64,

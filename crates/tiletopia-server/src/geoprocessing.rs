@@ -123,7 +123,11 @@ pub fn convex_hull(points: &[[f64; 2]]) -> Vec<[f64; 2]> {
 
     let mut pts: Vec<[f64; 2]> = points.to_vec();
     // Find lowest point (min y, then min x)
-    pts.sort_by(|a, b| a[1].partial_cmp(&b[1]).unwrap().then(a[0].partial_cmp(&b[0]).unwrap()));
+    pts.sort_by(|a, b| {
+        a[1].partial_cmp(&b[1])
+            .unwrap()
+            .then(a[0].partial_cmp(&b[0]).unwrap())
+    });
     let pivot = pts[0];
 
     // Sort by polar angle
