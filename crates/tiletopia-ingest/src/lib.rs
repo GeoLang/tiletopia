@@ -6,6 +6,7 @@
 pub mod bim_reader;
 pub mod gltf_reader;
 pub mod las_reader;
+pub mod photogrammetry;
 pub mod tiff_reader;
 
 use thiserror::Error;

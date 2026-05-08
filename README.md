@@ -44,6 +44,23 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Entity linking** — map 3D tiles to metadata (building ID → sensor readings)
 - **3D annotation layers** — persist user-drawn annotations server-side
 - **Update API** — push model changes without full re-tile
+- **Change detection & time slider** — compare point clouds across epochs, generate heatmaps
+- **Scripting / rules engine** — trigger alerts when sensor thresholds are crossed
+- **CRDT collaborative editing** — conflict-free concurrent annotations via hybrid logical clocks
+
+### Advanced Analytics
+- **Spatial queries** — radius search, k-nearest neighbor, bounding box, polygon clip, volume calculation
+- **AI point cloud classification** — automatic ground/vegetation/building/water classification (ASPRS LAS standard)
+- **Colorization from imagery** — project ortho photos or camera images onto point clouds
+- **glTF structural metadata** — queryable per-feature properties (EXT_structural_metadata)
+
+### Interoperability
+- **3D Tiles Next implicit tiling** — Morton-coded subtrees with availability bitstreams
+- **Federated mesh networking** — peer-to-peer tile routing across distributed instances
+- **CI/CD pipeline validation** — tileset schema checks, GitHub Actions workflow generation
+- **Photogrammetry (SfM)** — feature detection, matching, triangulation from photos
+- **Global DEM terrain** — SRTM/Copernicus/ASTER with TMS tiling and bilinear sampling
+- **Edge deployment** — cross-compile for ARM/embedded with offline bundles
 
 ### Storage
 - **Local filesystem** — zero-config default
@@ -195,13 +212,15 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 cargo test
 ```
 
-53 unit tests covering:
+114 unit tests covering:
 - Core: AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, GPU compute, diff detection, plugins (21)
+- Core: spatial queries (radius/kNN/bbox/polygon clip/volume), AI point cloud classification, change detection & time slider, implicit tiling (3D Tiles Next), colorization from imagery, glTF structural metadata (35)
 - Store: local filesystem CRUD, path traversal (6)
 - Server: health, assets, tilesets, security, annotations, temporal versioning, multi-tenancy, offline export (13)
-- Ingest: LAS/LAZ, GeoTIFF, BIM/IFC readers (8)
-- Terrain: quantized mesh generation (5)
-- Terrain: quantized mesh, multi-LOD, interpolation (5)
+- Server: federated mesh networking, CRDT collaborative editing, scripting/rules engine, CI/CD pipeline validation (19)
+- Ingest: LAS/LAZ, GeoTIFF, BIM/IFC readers, photogrammetry (SfM) (13)
+- Terrain: quantized mesh generation, global DEM terrain (12)
+- Worker: background job processing (5)
 
 ---
 

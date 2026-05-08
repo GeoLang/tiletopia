@@ -3,13 +3,19 @@
 //! Spatial indexing, LOD generation, and OGC 3D Tiles 1.1 output.
 
 pub mod bounding_volume;
+pub mod classify;
+pub mod colorize;
 pub mod crs;
 pub mod diff;
+pub mod diff_viz;
 pub mod gpu;
+pub mod implicit_tiling;
 pub mod lod;
+pub mod metadata;
 pub mod octree;
 pub mod plugin;
 pub mod spatial;
+pub mod spatial_query;
 pub mod tile;
 pub mod tileset;
 

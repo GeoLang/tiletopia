@@ -51,6 +51,27 @@ enum Commands {
         /// Path to tileset.json or source file
         path: PathBuf,
     },
+
+    /// Validate a tileset.json file
+    Validate {
+        /// Path to tileset.json
+        path: PathBuf,
+    },
+
+    /// Build for edge/embedded deployment (ARM, minimal binary)
+    Edge {
+        /// Target triple (e.g. aarch64-unknown-linux-musl)
+        #[arg(long, default_value = "aarch64-unknown-linux-musl")]
+        target: String,
+
+        /// Strip debug symbols
+        #[arg(long, default_value = "true")]
+        strip: bool,
+
+        /// Output directory
+        #[arg(short, long, default_value = "./dist")]
+        output: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -140,6 +161,75 @@ async fn main() -> anyhow::Result<()> {
                 let points = tiletopia_ingest::read_point_cloud(&path)?;
                 println!("Points: {}", points.len());
             }
+        }
+
+        Commands::Validate { path } => {
+            let data = std::fs::read_to_string(&path)?;
+            let errors = tiletopia_server::cicd::validate_tileset(&data);
+            if errors.is_empty() {
+                println!("✓ {} is valid", path.display());
+            } else {
+                println!("✗ {} has {} issue(s):", path.display(), errors.len());
+                for err in &errors {
+                    println!("  [{:?}] {}: {}", err.severity, err.check, err.message);
+                }
+                std::process::exit(1);
+            }
+        }
+
+        Commands::Edge {
+            target,
+            strip,
+            output,
+        } => {
+            println!("Building TileTopia for edge deployment");
+            println!("  Target: {}", target);
+            println!("  Strip: {}", strip);
+            println!("  Output: {}", output.display());
+            println!();
+            println!("Run the following commands:");
+            println!("  rustup target add {}", target);
+            let mut cmd = format!(
+                "  cargo build --release --target {} --no-default-features",
+                target
+            );
+            if strip {
+                cmd.push_str(" && strip target/{}/release/tiletopia-cli");
+            }
+            println!("{}", cmd);
+            println!(
+                "  cp target/{}/release/tiletopia-cli {}/tiletopia",
+                target,
+                output.display()
+            );
+            println!();
+            println!("Supported edge targets:");
+            println!("  aarch64-unknown-linux-musl   (ARM64 - Raspberry Pi, Jetson, drones)");
+            println!("  armv7-unknown-linux-musleabihf (ARMv7 - older embedded)");
+            println!("  x86_64-unknown-linux-musl    (x86 static binary)");
+
+            // Create output dir
+            std::fs::create_dir_all(&output)?;
+
+            // Write edge deployment readme
+            let readme = format!(
+                "# TileTopia Edge Deployment\n\n\
+                 Binary built for: {}\n\n\
+                 ## Usage\n\n\
+                 ```sh\n\
+                 # Tile locally on device\n\
+                 ./tiletopia tile --input scan.las --output ./tiles\n\n\
+                 # Serve tiles on local network\n\
+                 ./tiletopia serve --data-dir ./tiles --port 3000\n\
+                 ```\n\n\
+                 ## Resource Requirements\n\n\
+                 - RAM: 256MB minimum, 1GB recommended\n\
+                 - Storage: depends on dataset size\n\
+                 - No runtime dependencies (statically linked)\n",
+                target
+            );
+            std::fs::write(output.join("README.md"), readme)?;
+            println!("✓ Edge deployment package prepared at {}", output.display());
         }
     }
 

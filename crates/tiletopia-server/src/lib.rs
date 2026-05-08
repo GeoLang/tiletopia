@@ -5,9 +5,13 @@
 
 pub mod annotations;
 pub mod auth;
+pub mod cicd;
+pub mod crdt;
+pub mod federation;
 pub mod metrics;
 pub mod offline_export;
 pub mod realtime;
+pub mod scripting;
 pub mod streaming;
 pub mod temporal;
 pub mod tenant;
