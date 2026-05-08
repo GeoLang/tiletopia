@@ -19,6 +19,12 @@ pub struct DemoState {
     pub story_store: StoryStore,
 }
 
+impl Default for DemoState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DemoState {
     /// Create and seed demo state with sample data.
     pub fn new() -> Self {
@@ -265,7 +271,7 @@ async fn measurement_handler() -> Json<MeasurementResult> {
         cut_volume_m3: (cf.cut_volume * 100.0).round() / 100.0,
         fill_volume_m3: (cf.fill_volume * 100.0).round() / 100.0,
         slope_percent: (slope * 100.0).round() / 100.0,
-        bearing_degrees: (bearing_rad.to_degrees() * 100.0).round() / 100.0,
+        bearing_degrees: ((bearing_rad.to_degrees().rem_euclid(360.0)) * 100.0).round() / 100.0,
     })
 }
 
@@ -338,20 +344,23 @@ async fn anomaly_handler() -> Json<AnomalyResult> {
     };
     let encroachments = detect_encroachment(&boundary, &epoch2, &encroach_config);
 
-    // Statistical outlier removal on survey data (2503 points, 3 extreme outliers)
+    // Statistical outlier removal on survey data
+    // Dense 20x20 grid at 0.5m spacing with 5 extreme outliers at z=±100m
     let mut outlier_cloud: Vec<[f64; 3]> = Vec::new();
-    for i in 0..50 {
-        for j in 0..50 {
-            let z = 10.0 + 2.0 * ((i as f64 * 0.3).sin() + (j as f64 * 0.4).cos());
+    for i in 0..20 {
+        for j in 0..20 {
+            let z = 10.0 + 0.5 * ((i as f64 * 0.7).sin() + (j as f64 * 0.5).cos());
             outlier_cloud.push([i as f64 * 0.5, j as f64 * 0.5, z]);
         }
     }
-    outlier_cloud.push([12.0, 12.0, 45.0]);
-    outlier_cloud.push([8.0, 8.0, -30.0]);
-    outlier_cloud.push([20.0, 20.0, 55.0]);
+    // Inject extreme outliers (z=100+ when grid is z≈10)
+    outlier_cloud.push([5.0, 5.0, 110.0]);
+    outlier_cloud.push([3.0, 3.0, -80.0]);
+    outlier_cloud.push([7.0, 7.0, 120.0]);
+    outlier_cloud.push([2.0, 8.0, -95.0]);
+    outlier_cloud.push([8.0, 2.0, 105.0]);
     let total_pts = outlier_cloud.len();
-    // SOR with tight parameters demonstrates the algorithm works on real data
-    let inlier_indices = statistical_outlier_removal(&outlier_cloud, 8, 3.0);
+    let inlier_indices = statistical_outlier_removal(&outlier_cloud, 6, 2.0);
     let removed = total_pts - inlier_indices.len();
 
     Json(AnomalyResult {
@@ -435,6 +444,21 @@ async fn clash_handler() -> Json<ClashResult> {
             bbox_max: [20.3, 15.0, 3.0],
             vertices: vec![[20.15, 0.0, 1.5], [20.15, 15.0, 1.5]],
         },
+        // Close-proximity elements for soft clashes
+        BimElement {
+            id: "pipe-MEP-301".into(),
+            element_type: BimElementType::Pipe,
+            bbox_min: [20.4, 5.0, 1.0],
+            bbox_max: [20.6, 5.3, 2.5],
+            vertices: vec![[20.5, 5.15, 1.0], [20.5, 5.15, 2.5]],
+        },
+        BimElement {
+            id: "duct-HVAC-102".into(),
+            element_type: BimElementType::Duct,
+            bbox_min: [5.4, 5.0, 5.3],
+            bbox_max: [5.7, 5.3, 8.0],
+            vertices: vec![[5.55, 5.15, 5.3], [5.55, 5.15, 8.0]],
+        },
     ];
 
     let config = ClashConfig {
@@ -467,9 +491,36 @@ async fn clash_handler() -> Json<ClashResult> {
 
 // ─── Audit Log ───────────────────────────────────────────────────────────────
 
-async fn audit_handler(State(state): State<Arc<AppState>>) -> Json<Vec<crate::audit::AuditEntry>> {
+#[derive(serde::Deserialize, Default)]
+struct AuditParams {
+    user_id: Option<String>,
+    action: Option<String>,
+    resource_type: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn audit_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<AuditParams>,
+) -> Json<Vec<crate::audit::AuditEntry>> {
+    let action = params.action.and_then(|a| match a.as_str() {
+        "Create" => Some(AuditAction::Create),
+        "Read" => Some(AuditAction::Read),
+        "Update" => Some(AuditAction::Update),
+        "Delete" => Some(AuditAction::Delete),
+        "Upload" => Some(AuditAction::Upload),
+        "Download" => Some(AuditAction::Download),
+        "Login" => Some(AuditAction::Login),
+        "Logout" => Some(AuditAction::Logout),
+        "PermissionChange" => Some(AuditAction::PermissionChange),
+        "Export" => Some(AuditAction::Export),
+        _ => None,
+    });
     let entries = state.demo.audit_log.query(&AuditQuery {
-        limit: Some(20),
+        user_id: params.user_id,
+        action,
+        resource_type: params.resource_type,
+        limit: Some(params.limit.unwrap_or(20)),
         ..Default::default()
     });
     Json(entries)
