@@ -3019,6 +3019,7 @@ dependencies = [
  "memmap2",
  "rayon",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tiff",
  "tiletopia-core",

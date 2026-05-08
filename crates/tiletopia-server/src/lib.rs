@@ -3,9 +3,14 @@
 //! Serves 3D Tiles tilesets, manages assets, streams tiles with
 //! view-dependent LOD, and provides WebSocket for real-time data.
 
+pub mod annotations;
 pub mod auth;
 pub mod metrics;
+pub mod offline_export;
 pub mod realtime;
+pub mod streaming;
+pub mod temporal;
+pub mod tenant;
 pub mod upload;
 
 use axum::{
@@ -67,6 +72,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/assets/{id}/tileset.json", get(get_tileset))
         .route("/api/v1/assets/{id}/tiles/{path}", get(get_tile))
         .route("/api/v1/assets/{id}/tile", axum::routing::post(start_tiling))
+        .route("/api/v1/assets/{id}/upload/init", axum::routing::post(streaming::init_streaming_upload))
+        .route("/api/v1/assets/{id}/upload/chunk", axum::routing::post(streaming::upload_chunk))
+        .route("/api/v1/assets/{id}/upload/complete", axum::routing::post(streaming::complete_streaming_upload))
         .route("/api/v1/health", get(health))
         .route("/metrics", get(metrics::metrics_handler))
         .layer(middleware::from_fn(auth::auth_middleware))

@@ -3,6 +3,7 @@
 //! Parse point clouds (LAS/LAZ/E57/PLY), 3D models (glTF/OBJ/CityGML/IFC),
 //! terrain (GeoTIFF/DTED), and vector data (Shapefile/GeoJSON/KML).
 
+pub mod bim_reader;
 pub mod las_reader;
 pub mod tiff_reader;
 pub mod gltf_reader;
