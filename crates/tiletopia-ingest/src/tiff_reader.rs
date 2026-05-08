@@ -10,12 +10,14 @@ pub fn read(path: &Path) -> Result<Heightmap, IngestError> {
     let mut decoder = Decoder::new(std::io::BufReader::new(file))
         .map_err(|e| IngestError::ParseError(format!("TIFF decode error: {e}")))?;
 
-    let (width, height) = decoder.dimensions()
+    let (width, height) = decoder
+        .dimensions()
         .map_err(|e| IngestError::ParseError(format!("TIFF dimensions error: {e}")))?;
     let width = width as usize;
     let height = height as usize;
 
-    let image = decoder.read_image()
+    let image = decoder
+        .read_image()
         .map_err(|e| IngestError::ParseError(format!("TIFF read error: {e}")))?;
 
     let elevations: Vec<f64> = match image {
@@ -27,7 +29,11 @@ pub fn read(path: &Path) -> Result<Heightmap, IngestError> {
         DecodingResult::I32(data) => data.into_iter().map(|v| v as f64).collect(),
         DecodingResult::U8(data) => data.into_iter().map(|v| v as f64).collect(),
         DecodingResult::I8(data) => data.into_iter().map(|v| v as f64).collect(),
-        _ => return Err(IngestError::ParseError("unsupported TIFF sample format".into())),
+        _ => {
+            return Err(IngestError::ParseError(
+                "unsupported TIFF sample format".into(),
+            ));
+        }
     };
 
     if elevations.len() != width * height {

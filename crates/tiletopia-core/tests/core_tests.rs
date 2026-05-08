@@ -1,8 +1,10 @@
 #[cfg(test)]
 mod tests {
     use tiletopia_core::bounding_volume::Aabb;
-    use tiletopia_core::octree::{build_octree, collect_stats, OctreeConfig, OctreeNode, OctreePoint};
     use tiletopia_core::lod::generate_tileset;
+    use tiletopia_core::octree::{
+        OctreeConfig, OctreeNode, OctreePoint, build_octree, collect_stats,
+    };
     use tiletopia_core::tile::write_pnts;
     use tiletopia_core::{BoundingVolume, Refine, Tile, TileContent, Tileset, TilesetAsset};
 
@@ -54,9 +56,7 @@ mod tests {
 
     #[test]
     fn octree_leaf_small_input() {
-        let points: Vec<OctreePoint> = (0..100)
-            .map(|i| make_point(i as f64, 0.0, 0.0))
-            .collect();
+        let points: Vec<OctreePoint> = (0..100).map(|i| make_point(i as f64, 0.0, 0.0)).collect();
         let config = OctreeConfig {
             max_points_per_node: 200,
             ..Default::default()
@@ -93,9 +93,13 @@ mod tests {
             asset: TilesetAsset::default(),
             geometric_error: 100.0,
             root: Tile {
-                bounding_volume: BoundingVolume::Sphere { sphere: [0.0, 0.0, 0.0, 1000.0] },
+                bounding_volume: BoundingVolume::Sphere {
+                    sphere: [0.0, 0.0, 0.0, 1000.0],
+                },
                 geometric_error: 50.0,
-                content: Some(TileContent { uri: "tiles/root.pnts".into() }),
+                content: Some(TileContent {
+                    uri: "tiles/root.pnts".into(),
+                }),
                 children: vec![],
                 refine: Some(Refine::Add),
                 transform: None,
@@ -140,10 +144,7 @@ mod tests {
 
     #[test]
     fn write_pnts_format() {
-        let points = vec![
-            make_point(1.0, 2.0, 3.0),
-            make_point(4.0, 5.0, 6.0),
-        ];
+        let points = vec![make_point(1.0, 2.0, 3.0), make_point(4.0, 5.0, 6.0)];
         let mut buf = Vec::new();
         write_pnts(&points, &mut buf).unwrap();
         // Check magic bytes

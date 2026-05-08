@@ -47,9 +47,7 @@ pub fn enu_to_ecef_matrix(lat: f64, lon: f64, height: f64) -> [f64; 16] {
 
     // Column-major 4x4
     [
-        east[0], east[1], east[2], 0.0,
-        north[0], north[1], north[2], 0.0,
-        up[0], up[1], up[2], 0.0,
-        origin[0], origin[1], origin[2], 1.0,
+        east[0], east[1], east[2], 0.0, north[0], north[1], north[2], 0.0, up[0], up[1], up[2],
+        0.0, origin[0], origin[1], origin[2], 1.0,
     ]
 }

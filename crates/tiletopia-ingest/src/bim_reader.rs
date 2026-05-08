@@ -91,7 +91,11 @@ pub fn read_ifc(path: &Path) -> Result<BimModel, BimError> {
     let elements = extract_elements(&content);
 
     Ok(BimModel {
-        filename: path.file_name().unwrap_or_default().to_string_lossy().into(),
+        filename: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into(),
         schema,
         elements,
         project_name,
@@ -159,7 +163,13 @@ fn extract_elements(content: &str) -> Vec<BimElement> {
     for line in content.lines() {
         for (ifc_type, bim_type) in &type_map {
             if line.contains(ifc_type) && line.contains('=') {
-                let id = line.split('=').next().unwrap_or("").trim().trim_start_matches('#').to_string();
+                let id = line
+                    .split('=')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_start_matches('#')
+                    .to_string();
                 let name = extract_first_quoted(line).unwrap_or_default();
                 let global_id = extract_global_id(line).unwrap_or_default();
                 elements.push(BimElement {
@@ -197,8 +207,14 @@ fn extract_global_id(line: &str) -> Option<String> {
 pub fn elements_to_batch_table(elements: &[BimElement]) -> serde_json::Value {
     let ids: Vec<&str> = elements.iter().map(|e| e.global_id.as_str()).collect();
     let names: Vec<&str> = elements.iter().map(|e| e.name.as_str()).collect();
-    let types: Vec<String> = elements.iter().map(|e| format!("{:?}", e.element_type)).collect();
-    let storeys: Vec<&str> = elements.iter().map(|e| e.storey.as_deref().unwrap_or("")).collect();
+    let types: Vec<String> = elements
+        .iter()
+        .map(|e| format!("{:?}", e.element_type))
+        .collect();
+    let storeys: Vec<&str> = elements
+        .iter()
+        .map(|e| e.storey.as_deref().unwrap_or(""))
+        .collect();
 
     serde_json::json!({
         "globalId": ids,

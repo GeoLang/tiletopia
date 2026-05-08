@@ -5,8 +5,8 @@ use std::path::Path;
 
 /// Read a LAS/LAZ file into a vector of points.
 pub fn read(path: &Path) -> Result<Vec<Point3D>, IngestError> {
-    let mut reader = las::Reader::from_path(path)
-        .map_err(|e| IngestError::ParseError(e.to_string()))?;
+    let mut reader =
+        las::Reader::from_path(path).map_err(|e| IngestError::ParseError(e.to_string()))?;
 
     let points: Vec<Point3D> = reader
         .points()

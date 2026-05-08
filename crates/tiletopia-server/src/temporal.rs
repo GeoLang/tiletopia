@@ -41,11 +41,19 @@ pub struct VersionHistory {
 
 impl VersionHistory {
     pub fn new(asset_id: Uuid) -> Self {
-        Self { asset_id, versions: Vec::new() }
+        Self {
+            asset_id,
+            versions: Vec::new(),
+        }
     }
 
     /// Add a new version.
-    pub fn add_version(&mut self, tileset_path: String, tile_count: u64, label: Option<String>) -> &TilesetVersion {
+    pub fn add_version(
+        &mut self,
+        tileset_path: String,
+        tile_count: u64,
+        label: Option<String>,
+    ) -> &TilesetVersion {
         let version = self.versions.len() as u32 + 1;
         let v = TilesetVersion {
             id: Uuid::new_v4(),
@@ -95,8 +103,7 @@ impl VersionHistory {
 
     /// Save version history to JSON.
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 

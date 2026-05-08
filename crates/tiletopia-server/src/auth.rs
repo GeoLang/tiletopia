@@ -1,12 +1,7 @@
 //! JWT authentication middleware.
 
-use axum::{
-    extract::Request,
-    http::StatusCode,
-    middleware::Next,
-    response::Response,
-};
-use jsonwebtoken::{decode, DecodingKey, Validation};
+use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
+use jsonwebtoken::{DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 
 /// JWT claims.

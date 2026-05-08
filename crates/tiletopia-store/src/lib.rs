@@ -59,15 +59,13 @@ impl LocalStore {
 impl TileStore for LocalStore {
     async fn get(&self, key: &str) -> Result<Bytes, StoreError> {
         let path = self.resolve(key);
-        let data = tokio::fs::read(&path)
-            .await
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    StoreError::NotFound(key.to_string())
-                } else {
-                    StoreError::Io(e)
-                }
-            })?;
+        let data = tokio::fs::read(&path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                StoreError::NotFound(key.to_string())
+            } else {
+                StoreError::Io(e)
+            }
+        })?;
         Ok(Bytes::from(data))
     }
 

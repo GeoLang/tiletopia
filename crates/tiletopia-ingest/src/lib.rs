@@ -4,9 +4,9 @@
 //! terrain (GeoTIFF/DTED), and vector data (Shapefile/GeoJSON/KML).
 
 pub mod bim_reader;
+pub mod gltf_reader;
 pub mod las_reader;
 pub mod tiff_reader;
-pub mod gltf_reader;
 
 use thiserror::Error;
 

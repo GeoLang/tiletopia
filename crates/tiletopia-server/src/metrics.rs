@@ -23,7 +23,10 @@ pub fn install() {
     metrics::describe_counter!("tiletopia_uploads_total", "Total file uploads");
     metrics::describe_gauge!("tiletopia_assets_total", "Total assets managed");
     metrics::describe_gauge!("tiletopia_tiles_served", "Tiles served");
-    metrics::describe_histogram!("tiletopia_tiling_duration_seconds", "Tiling job duration in seconds");
+    metrics::describe_histogram!(
+        "tiletopia_tiling_duration_seconds",
+        "Tiling job duration in seconds"
+    );
 }
 
 /// Increment a counter metric.
@@ -48,7 +51,10 @@ pub async fn metrics_handler() -> impl IntoResponse {
         None => "# HELP tiletopia_up Server is running\ntiletopia_up 1\n".to_string(),
     };
     (
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         output,
     )
 }

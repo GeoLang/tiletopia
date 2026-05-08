@@ -4,7 +4,11 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Parser)]
-#[command(name = "tiletopia", version, about = "Fast open-source 3D Tiles server")]
+#[command(
+    name = "tiletopia",
+    version,
+    about = "Fast open-source 3D Tiles server"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -53,8 +57,7 @@ enum Commands {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -93,11 +96,7 @@ async fn main() -> anyhow::Result<()> {
                 max_geometric_error: max_error,
             };
 
-            let stats = tiletopia_core::tileset::tile_point_cloud(
-                octree_points,
-                &output,
-                &config,
-            )?;
+            let stats = tiletopia_core::tileset::tile_point_cloud(octree_points, &output, &config)?;
 
             tracing::info!(
                 "Done! {} nodes ({} leaf, {} internal), max depth {}",

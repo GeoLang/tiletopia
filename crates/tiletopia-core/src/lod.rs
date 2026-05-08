@@ -28,7 +28,9 @@ struct NodePath {
 
 impl NodePath {
     fn new() -> Self {
-        Self { segments: Vec::new() }
+        Self {
+            segments: Vec::new(),
+        }
     }
 
     fn push(&mut self, idx: u8) {
@@ -81,7 +83,11 @@ fn generate_tile(node: &OctreeNode, base_url: &str, path: &mut NodePath) -> Tile
                 transform: None,
             }
         }
-        OctreeNode::Internal { children, lod_points, .. } => {
+        OctreeNode::Internal {
+            children,
+            lod_points,
+            ..
+        } => {
             let content = if lod_points.is_empty() {
                 None
             } else {

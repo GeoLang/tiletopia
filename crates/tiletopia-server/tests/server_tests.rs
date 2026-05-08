@@ -3,12 +3,13 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use std::sync::Arc;
-    use tiletopia_server::{router, AppState};
+    use tiletopia_server::{AppState, router};
     use tokio::sync::RwLock;
     use tower::ServiceExt;
 
     fn test_state() -> Arc<AppState> {
-        let dir = std::env::temp_dir().join(format!("tiletopia_server_test_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("tiletopia_server_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();
         Arc::new(AppState {
             assets: RwLock::new(vec![]),

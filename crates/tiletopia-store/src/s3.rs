@@ -15,7 +15,11 @@ impl S3Store {
     pub async fn new(bucket: String, prefix: String) -> Result<Self, StoreError> {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let client = aws_sdk_s3::Client::new(&config);
-        Ok(Self { client, bucket, prefix })
+        Ok(Self {
+            client,
+            bucket,
+            prefix,
+        })
     }
 
     fn key(&self, path: &str) -> String {
@@ -30,7 +34,8 @@ impl S3Store {
 #[async_trait::async_trait]
 impl TileStore for S3Store {
     async fn get(&self, key: &str) -> Result<Bytes, StoreError> {
-        let result = self.client
+        let result = self
+            .client
             .get_object()
             .bucket(&self.bucket)
             .key(self.key(key))
@@ -38,7 +43,10 @@ impl TileStore for S3Store {
             .await
             .map_err(|e| StoreError::Other(format!("S3 get error: {e}")))?;
 
-        let data = result.body.collect().await
+        let data = result
+            .body
+            .collect()
+            .await
             .map_err(|e| StoreError::Other(format!("S3 body read error: {e}")))?;
 
         Ok(data.into_bytes())
@@ -71,7 +79,8 @@ impl TileStore for S3Store {
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
         let full_prefix = self.key(prefix);
-        let result = self.client
+        let result = self
+            .client
             .list_objects_v2()
             .bucket(&self.bucket)
             .prefix(&full_prefix)
@@ -79,17 +88,23 @@ impl TileStore for S3Store {
             .await
             .map_err(|e| StoreError::Other(format!("S3 list error: {e}")))?;
 
-        let keys: Vec<String> = result.contents()
+        let keys: Vec<String> = result
+            .contents()
             .iter()
             .filter_map(|obj| obj.key())
-            .map(|k| k.strip_prefix(&format!("{}/", self.prefix)).unwrap_or(k).to_string())
+            .map(|k| {
+                k.strip_prefix(&format!("{}/", self.prefix))
+                    .unwrap_or(k)
+                    .to_string()
+            })
             .collect();
 
         Ok(keys)
     }
 
     async fn exists(&self, key: &str) -> Result<bool, StoreError> {
-        match self.client
+        match self
+            .client
             .head_object()
             .bucket(&self.bucket)
             .key(self.key(key))

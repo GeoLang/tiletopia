@@ -71,7 +71,11 @@ impl OctreeNode {
     pub fn point_count(&self) -> usize {
         match self {
             OctreeNode::Leaf { points, .. } => points.len(),
-            OctreeNode::Internal { children, lod_points, .. } => {
+            OctreeNode::Internal {
+                children,
+                lod_points,
+                ..
+            } => {
                 lod_points.len()
                     + children
                         .iter()
@@ -103,7 +107,11 @@ fn build_node(
         || depth >= config.max_depth
         || bounds.max_extent() < config.min_extent
     {
-        return OctreeNode::Leaf { bounds, points, depth };
+        return OctreeNode::Leaf {
+            bounds,
+            points,
+            depth,
+        };
     }
 
     let octants = bounds.octants();
@@ -134,7 +142,12 @@ fn build_node(
         }
     });
 
-    OctreeNode::Internal { bounds, children, lod_points, depth }
+    OctreeNode::Internal {
+        bounds,
+        children,
+        lod_points,
+        depth,
+    }
 }
 
 /// Walk the octree and collect statistics.
@@ -161,7 +174,11 @@ fn collect_stats_recursive(node: &OctreeNode, stats: &mut OctreeStats) {
             stats.leaf_nodes += 1;
             stats.total_points += points.len();
         }
-        OctreeNode::Internal { children, lod_points, .. } => {
+        OctreeNode::Internal {
+            children,
+            lod_points,
+            ..
+        } => {
             stats.internal_nodes += 1;
             stats.total_points += lod_points.len();
             for child in children.iter().flatten() {

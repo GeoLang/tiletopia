@@ -16,7 +16,10 @@ pub enum AnnotationGeometry {
     /// A polygon (closed ring).
     Polygon { positions: Vec<[f64; 3]> },
     /// A 3D box (center + half-extents).
-    Box { center: [f64; 3], half_extents: [f64; 3] },
+    Box {
+        center: [f64; 3],
+        half_extents: [f64; 3],
+    },
     /// A sphere.
     Sphere { center: [f64; 3], radius: f64 },
 }
@@ -36,9 +39,15 @@ pub struct AnnotationStyle {
     pub icon: Option<String>,
 }
 
-fn default_color() -> String { "#ff0000".into() }
-fn default_opacity() -> f32 { 1.0 }
-fn default_line_width() -> f32 { 2.0 }
+fn default_color() -> String {
+    "#ff0000".into()
+}
+fn default_opacity() -> f32 {
+    1.0
+}
+fn default_line_width() -> f32 {
+    2.0
+}
 
 /// A single annotation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,21 +107,27 @@ impl AnnotationLayer {
     }
 
     pub fn find_in_radius(&self, center: [f64; 3], radius: f64) -> Vec<&Annotation> {
-        self.annotations.iter().filter(|a| {
-            let pos = match &a.geometry {
-                AnnotationGeometry::Point { position } => *position,
-                AnnotationGeometry::Sphere { center, .. } => *center,
-                AnnotationGeometry::Box { center, .. } => *center,
-                AnnotationGeometry::Polyline { positions } | AnnotationGeometry::Polygon { positions } => {
-                    if positions.is_empty() { return false; }
-                    positions[0]
-                }
-            };
-            let dx = pos[0] - center[0];
-            let dy = pos[1] - center[1];
-            let dz = pos[2] - center[2];
-            (dx * dx + dy * dy + dz * dz).sqrt() <= radius
-        }).collect()
+        self.annotations
+            .iter()
+            .filter(|a| {
+                let pos = match &a.geometry {
+                    AnnotationGeometry::Point { position } => *position,
+                    AnnotationGeometry::Sphere { center, .. } => *center,
+                    AnnotationGeometry::Box { center, .. } => *center,
+                    AnnotationGeometry::Polyline { positions }
+                    | AnnotationGeometry::Polygon { positions } => {
+                        if positions.is_empty() {
+                            return false;
+                        }
+                        positions[0]
+                    }
+                };
+                let dx = pos[0] - center[0];
+                let dy = pos[1] - center[1];
+                let dz = pos[2] - center[2];
+                (dx * dx + dy * dy + dz * dz).sqrt() <= radius
+            })
+            .collect()
     }
 }
 
@@ -123,7 +138,9 @@ pub struct AnnotationStore {
 }
 
 impl AnnotationStore {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn create_layer(&mut self, asset_id: Uuid, name: String) -> Uuid {
         let layer = AnnotationLayer::new(asset_id, name);
@@ -133,7 +150,10 @@ impl AnnotationStore {
     }
 
     pub fn get_layers_for_asset(&self, asset_id: Uuid) -> Vec<&AnnotationLayer> {
-        self.layers.iter().filter(|l| l.asset_id == asset_id).collect()
+        self.layers
+            .iter()
+            .filter(|l| l.asset_id == asset_id)
+            .collect()
     }
 
     pub fn get_layer_mut(&mut self, layer_id: Uuid) -> Option<&mut AnnotationLayer> {
@@ -142,8 +162,7 @@ impl AnnotationStore {
 
     /// Save all annotations to a JSON file.
     pub fn save_to_file(&self, path: &std::path::Path) -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(&self.layers)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string_pretty(&self.layers).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 
@@ -170,8 +189,16 @@ mod tests {
             layer_id: Uuid::nil(),
             label: "Crack".into(),
             description: Some("Structural crack".into()),
-            geometry: AnnotationGeometry::Point { position: [1.0, 2.0, 3.0] },
-            style: AnnotationStyle { color: "#ff0000".into(), opacity: 1.0, line_width: 2.0, fill: false, icon: None },
+            geometry: AnnotationGeometry::Point {
+                position: [1.0, 2.0, 3.0],
+            },
+            style: AnnotationStyle {
+                color: "#ff0000".into(),
+                opacity: 1.0,
+                line_width: 2.0,
+                fill: false,
+                icon: None,
+            },
             created_by: "user1".into(),
             created_at: chrono::Utc::now(),
             updated_at: None,
@@ -194,8 +221,16 @@ mod tests {
                 layer_id: Uuid::nil(),
                 label: format!("Point {}", i),
                 description: None,
-                geometry: AnnotationGeometry::Point { position: [i as f64, 0.0, 0.0] },
-                style: AnnotationStyle { color: "#00ff00".into(), opacity: 1.0, line_width: 1.0, fill: false, icon: None },
+                geometry: AnnotationGeometry::Point {
+                    position: [i as f64, 0.0, 0.0],
+                },
+                style: AnnotationStyle {
+                    color: "#00ff00".into(),
+                    opacity: 1.0,
+                    line_width: 1.0,
+                    fill: false,
+                    icon: None,
+                },
                 created_by: "test".into(),
                 created_at: chrono::Utc::now(),
                 updated_at: None,

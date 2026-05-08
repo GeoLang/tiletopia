@@ -81,7 +81,10 @@ impl PluginRegistry {
 
     /// Find an ingest plugin that can handle the given file.
     pub fn find_ingest(&self, path: &Path) -> Option<&dyn IngestPlugin> {
-        self.ingest_plugins.iter().find(|p| p.can_handle(path)).map(|p| p.as_ref())
+        self.ingest_plugins
+            .iter()
+            .find(|p| p.can_handle(path))
+            .map(|p| p.as_ref())
     }
 
     /// List all registered ingest plugins.
@@ -101,7 +104,9 @@ impl PluginRegistry {
     #[cfg(feature = "plugin-dylib")]
     pub unsafe fn load_dylib(&mut self, _path: &Path) -> Result<(), PluginError> {
         // Placeholder: would use libloading to load .so/.dylib/.dll
-        Err(PluginError::LoadError("dylib loading not yet implemented".into()))
+        Err(PluginError::LoadError(
+            "dylib loading not yet implemented".into(),
+        ))
     }
 }
 
@@ -123,7 +128,15 @@ mod tests {
             path.extension().map_or(false, |e| e == "xyz")
         }
         fn read_points(&self, _path: &Path) -> Result<Vec<PluginPoint>, PluginError> {
-            Ok(vec![PluginPoint { x: 1.0, y: 2.0, z: 3.0, r: 255, g: 0, b: 0, attributes: vec![] }])
+            Ok(vec![PluginPoint {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                r: 255,
+                g: 0,
+                b: 0,
+                attributes: vec![],
+            }])
         }
     }
 

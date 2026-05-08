@@ -75,70 +75,88 @@ impl GpuContext {
         // Upload data
         self.queue.write_buffer(&input_buffer, 0, input_bytes);
         let params = [cell_size, n as f32];
-        self.queue.write_buffer(&params_buffer, 0, bytemuck_cast_slice(&params));
+        self.queue
+            .write_buffer(&params_buffer, 0, bytemuck_cast_slice(&params));
 
         // Create shader module
-        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("morton_shader"),
-            source: wgpu::ShaderSource::Wgsl(MORTON_SHADER.into()),
-        });
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("morton_shader"),
+                source: wgpu::ShaderSource::Wgsl(MORTON_SHADER.into()),
+            });
 
         // Pipeline
-        let bind_group_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: None,
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-        let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("morton_pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: None,
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("morton_pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: input_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: output_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -156,11 +174,16 @@ impl GpuContext {
         // Read back
         let slice = staging_buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| { tx.send(result).unwrap(); });
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
         self.device.poll(wgpu::Maintain::Wait);
         rx.recv().unwrap().unwrap();
         let data = slice.get_mapped_range();
-        let result: Vec<u32> = data.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let result: Vec<u32> = data
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
         drop(data);
         staging_buffer.unmap();
         result
@@ -215,9 +238,13 @@ fn bytemuck_cast_slice(data: &[f32]) -> &[u8] {
 /// Whether GPU acceleration is available at runtime.
 pub fn gpu_available() -> bool {
     #[cfg(feature = "gpu")]
-    { GpuContext::new().is_some() }
+    {
+        GpuContext::new().is_some()
+    }
     #[cfg(not(feature = "gpu"))]
-    { false }
+    {
+        false
+    }
 }
 
 /// GPU-accelerated point decimation.
@@ -225,10 +252,7 @@ pub fn gpu_available() -> bool {
 /// Strategy: compute Morton codes (GPU), sort points by spatial locality,
 /// then take uniformly-spaced samples. This gives spatially-uniform decimation
 /// unlike naive stride sampling on unsorted data.
-pub fn decimate_points_gpu(
-    positions: &[[f32; 3]],
-    target_count: usize,
-) -> Vec<[f32; 3]> {
+pub fn decimate_points_gpu(positions: &[[f32; 3]], target_count: usize) -> Vec<[f32; 3]> {
     if positions.len() <= target_count {
         return positions.to_vec();
     }
@@ -243,12 +267,18 @@ pub fn decimate_points_gpu(
 
     // Stride sample from spatially-sorted points → uniform spatial distribution
     let stride = std::cmp::max(1, positions.len() / target_count);
-    indices.iter().step_by(stride).map(|&i| positions[i]).collect()
+    indices
+        .iter()
+        .step_by(stride)
+        .map(|&i| positions[i])
+        .collect()
 }
 
 /// Estimate a good cell size for the given decimation ratio.
 fn estimate_cell_size(positions: &[[f32; 3]], target_count: usize) -> f32 {
-    if positions.is_empty() { return 1.0; }
+    if positions.is_empty() {
+        return 1.0;
+    }
     // Compute bounding box extent
     let mut min = [f32::MAX; 3];
     let mut max = [f32::MIN; 3];
@@ -268,10 +298,7 @@ fn estimate_cell_size(positions: &[[f32; 3]], target_count: usize) -> f32 {
 ///
 /// When GPU feature is enabled and hardware is available, runs on GPU.
 /// Otherwise uses CPU.
-pub fn spatial_hash_gpu(
-    positions: &[[f32; 3]],
-    cell_size: f32,
-) -> Vec<u32> {
+pub fn spatial_hash_gpu(positions: &[[f32; 3]], cell_size: f32) -> Vec<u32> {
     #[cfg(feature = "gpu")]
     {
         if let Some(ctx) = GpuContext::new() {
@@ -279,12 +306,15 @@ pub fn spatial_hash_gpu(
         }
     }
     // CPU fallback
-    positions.iter().map(|p| {
-        let cx = (p[0] / cell_size).floor() as u32;
-        let cy = (p[1] / cell_size).floor() as u32;
-        let cz = (p[2] / cell_size).floor() as u32;
-        morton_encode(cx, cy, cz)
-    }).collect()
+    positions
+        .iter()
+        .map(|p| {
+            let cx = (p[0] / cell_size).floor() as u32;
+            let cy = (p[1] / cell_size).floor() as u32;
+            let cz = (p[2] / cell_size).floor() as u32;
+            morton_encode(cx, cy, cz)
+        })
+        .collect()
 }
 
 /// Encode 3D coordinates to Morton code (Z-order curve).

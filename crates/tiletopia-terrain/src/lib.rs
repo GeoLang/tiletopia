@@ -111,8 +111,16 @@ pub fn generate_quantized_mesh(heightmap: &Heightmap) -> Vec<u8> {
     let w = heightmap.width;
     let h = heightmap.height;
 
-    let min_h = heightmap.elevations.iter().copied().fold(f32::INFINITY, f32::min);
-    let max_h = heightmap.elevations.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let min_h = heightmap
+        .elevations
+        .iter()
+        .copied()
+        .fold(f32::INFINITY, f32::min);
+    let max_h = heightmap
+        .elevations
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
     let range = (max_h - min_h).max(1.0);
 
     // Quantize vertices to u16

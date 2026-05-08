@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use tiletopia_store::{LocalStore, StoreError, TileStore};
     use bytes::Bytes;
+    use tiletopia_store::{LocalStore, StoreError, TileStore};
 
     fn temp_store() -> (LocalStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -12,7 +12,10 @@ mod tests {
     #[tokio::test]
     async fn put_and_get() {
         let (store, _dir) = temp_store();
-        store.put("test/file.txt", Bytes::from("hello")).await.unwrap();
+        store
+            .put("test/file.txt", Bytes::from("hello"))
+            .await
+            .unwrap();
         let data = store.get("test/file.txt").await.unwrap();
         assert_eq!(data.as_ref(), b"hello");
     }
@@ -54,8 +57,13 @@ mod tests {
         let (store, _dir) = temp_store();
         // ".." is stripped, so "../escape.txt" becomes "/escape.txt" → "escape.txt"
         // The file should end up inside the store root, not outside it
-        store.put("subdir/../inside.txt", Bytes::from("safe")).await.unwrap();
-        assert!(store.exists("subdir/inside.txt").await.unwrap()
-            || store.exists("inside.txt").await.unwrap());
+        store
+            .put("subdir/../inside.txt", Bytes::from("safe"))
+            .await
+            .unwrap();
+        assert!(
+            store.exists("subdir/inside.txt").await.unwrap()
+                || store.exists("inside.txt").await.unwrap()
+        );
     }
 }

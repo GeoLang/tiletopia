@@ -18,28 +18,22 @@ pub async fn upload_asset(
     let mut name = None;
     let mut data = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+    {
         let field_name = field.name().unwrap_or("").to_string();
         match field_name.as_str() {
             "name" => {
-                name = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|_| StatusCode::BAD_REQUEST)?,
-                );
+                name = Some(field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
             }
             "file" => {
                 let file_name = field.file_name().unwrap_or("upload").to_string();
                 if name.is_none() {
                     name = Some(file_name);
                 }
-                data = Some(
-                    field
-                        .bytes()
-                        .await
-                        .map_err(|_| StatusCode::BAD_REQUEST)?,
-                );
+                data = Some(field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?);
             }
             _ => {}
         }

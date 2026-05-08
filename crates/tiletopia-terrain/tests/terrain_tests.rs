@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use tiletopia_terrain::{generate_quantized_mesh, generate_terrain, Heightmap};
+    use tiletopia_terrain::{Heightmap, generate_quantized_mesh, generate_terrain};
 
     fn flat_heightmap(width: u32, height: u32, elevation: f32) -> Heightmap {
         Heightmap {

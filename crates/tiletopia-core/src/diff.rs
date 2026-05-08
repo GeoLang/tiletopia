@@ -41,11 +41,12 @@ impl SpatialGrid {
             let hash = hash_point(p);
             cells.entry(key).or_default().push(hash);
         }
-        let hashed: HashMap<(i64, i64, i64), CellHash> = cells
-            .into_iter()
-            .map(|(k, v)| (k, hash_vec(&v)))
-            .collect();
-        Self { cell_size, cells: hashed }
+        let hashed: HashMap<(i64, i64, i64), CellHash> =
+            cells.into_iter().map(|(k, v)| (k, hash_vec(&v))).collect();
+        Self {
+            cell_size,
+            cells: hashed,
+        }
     }
 
     /// Compare this grid with a previous snapshot.
@@ -67,7 +68,11 @@ impl SpatialGrid {
             .copied()
             .collect();
 
-        DiffResult { changed_cells, removed_cells, unchanged_count }
+        DiffResult {
+            changed_cells,
+            removed_cells,
+            unchanged_count,
+        }
     }
 
     /// Get the bounding box of changed cells.
@@ -113,7 +118,10 @@ impl SpatialGrid {
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let data = std::fs::read(path)?;
         if data.len() < 16 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "too short"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "too short",
+            ));
         }
         let cell_size = f64::from_le_bytes(data[0..8].try_into().unwrap());
         let count = u64::from_le_bytes(data[8..16].try_into().unwrap()) as usize;
@@ -135,7 +143,11 @@ impl SpatialGrid {
 }
 
 /// Filter points to only those in changed cells.
-pub fn filter_changed_points(points: &[OctreePoint], diff: &DiffResult, cell_size: f64) -> Vec<OctreePoint> {
+pub fn filter_changed_points(
+    points: &[OctreePoint],
+    diff: &DiffResult,
+    cell_size: f64,
+) -> Vec<OctreePoint> {
     let changed_set: std::collections::HashSet<_> = diff.changed_cells.iter().copied().collect();
     points
         .iter()

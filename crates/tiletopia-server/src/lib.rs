@@ -14,12 +14,12 @@ pub mod tenant;
 pub mod upload;
 
 use axum::{
+    Router,
     extract::{Path, State},
     http::StatusCode,
     middleware,
     response::Json,
     routing::get,
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -67,14 +67,29 @@ pub enum AssetStatus {
 /// Build the Axum router.
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/api/v1/assets", get(list_assets).post(upload::upload_asset))
+        .route(
+            "/api/v1/assets",
+            get(list_assets).post(upload::upload_asset),
+        )
         .route("/api/v1/assets/{id}", get(get_asset).delete(delete_asset))
         .route("/api/v1/assets/{id}/tileset.json", get(get_tileset))
         .route("/api/v1/assets/{id}/tiles/{path}", get(get_tile))
-        .route("/api/v1/assets/{id}/tile", axum::routing::post(start_tiling))
-        .route("/api/v1/assets/{id}/upload/init", axum::routing::post(streaming::init_streaming_upload))
-        .route("/api/v1/assets/{id}/upload/chunk", axum::routing::post(streaming::upload_chunk))
-        .route("/api/v1/assets/{id}/upload/complete", axum::routing::post(streaming::complete_streaming_upload))
+        .route(
+            "/api/v1/assets/{id}/tile",
+            axum::routing::post(start_tiling),
+        )
+        .route(
+            "/api/v1/assets/{id}/upload/init",
+            axum::routing::post(streaming::init_streaming_upload),
+        )
+        .route(
+            "/api/v1/assets/{id}/upload/chunk",
+            axum::routing::post(streaming::upload_chunk),
+        )
+        .route(
+            "/api/v1/assets/{id}/upload/complete",
+            axum::routing::post(streaming::complete_streaming_upload),
+        )
         .route("/api/v1/health", get(health))
         .route("/metrics", get(metrics::metrics_handler))
         .layer(middleware::from_fn(auth::auth_middleware))
@@ -112,7 +127,10 @@ async fn delete_asset(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode> {
     let mut assets = state.assets.write().await;
-    let pos = assets.iter().position(|a| a.id == id).ok_or(StatusCode::NOT_FOUND)?;
+    let pos = assets
+        .iter()
+        .position(|a| a.id == id)
+        .ok_or(StatusCode::NOT_FOUND)?;
     assets.remove(pos);
 
     // Remove asset directory
@@ -143,7 +161,11 @@ async fn get_tile(
     if tile_path.contains("..") {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let file_path = state.data_dir.join(id.to_string()).join("tiles").join(&tile_path);
+    let file_path = state
+        .data_dir
+        .join(id.to_string())
+        .join("tiles")
+        .join(&tile_path);
     tokio::fs::read(&file_path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)
@@ -157,7 +179,10 @@ async fn start_tiling(
     // Find the asset and update status
     {
         let mut assets = state.assets.write().await;
-        let asset = assets.iter_mut().find(|a| a.id == id).ok_or(StatusCode::NOT_FOUND)?;
+        let asset = assets
+            .iter_mut()
+            .find(|a| a.id == id)
+            .ok_or(StatusCode::NOT_FOUND)?;
         asset.status = AssetStatus::Tiling;
     }
 
@@ -178,23 +203,25 @@ async fn start_tiling(
         };
 
         // Run tiling
-        let result = tokio::task::spawn_blocking(move || -> Result<tiletopia_core::octree::OctreeStats, String> {
-            let points = tiletopia_ingest::read_point_cloud(&input_path)
-                .map_err(|e| e.to_string())?;
-            let octree_points: Vec<tiletopia_core::octree::OctreePoint> = points
-                .into_iter()
-                .map(|p| tiletopia_core::octree::OctreePoint {
-                    position: [p.x, p.y, p.z],
-                    color: [p.r, p.g, p.b],
-                    intensity: p.intensity,
-                    classification: p.classification,
-                })
-                .collect();
+        let result = tokio::task::spawn_blocking(
+            move || -> Result<tiletopia_core::octree::OctreeStats, String> {
+                let points =
+                    tiletopia_ingest::read_point_cloud(&input_path).map_err(|e| e.to_string())?;
+                let octree_points: Vec<tiletopia_core::octree::OctreePoint> = points
+                    .into_iter()
+                    .map(|p| tiletopia_core::octree::OctreePoint {
+                        position: [p.x, p.y, p.z],
+                        color: [p.r, p.g, p.b],
+                        intensity: p.intensity,
+                        classification: p.classification,
+                    })
+                    .collect();
 
-            let config = tiletopia_core::tileset::TilingConfig::default();
-            tiletopia_core::tileset::tile_point_cloud(octree_points, &asset_dir, &config)
-                .map_err(|e| e.to_string())
-        })
+                let config = tiletopia_core::tileset::TilingConfig::default();
+                tiletopia_core::tileset::tile_point_cloud(octree_points, &asset_dir, &config)
+                    .map_err(|e| e.to_string())
+            },
+        )
         .await;
 
         let mut assets = state_clone.assets.write().await;

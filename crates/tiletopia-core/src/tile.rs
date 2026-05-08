@@ -90,8 +90,7 @@ pub fn write_tileset_to_dir(
 
     // Generate tileset.json
     let tileset = crate::lod::generate_tileset(root, "tiles/");
-    let tileset_json = serde_json::to_string_pretty(&tileset)
-        .map_err(io::Error::other)?;
+    let tileset_json = serde_json::to_string_pretty(&tileset).map_err(io::Error::other)?;
     std::fs::write(output_dir.join("tileset.json"), tileset_json)?;
 
     // Write all tile files
@@ -104,7 +103,9 @@ struct NodePath {
 
 impl NodePath {
     fn new() -> Self {
-        Self { segments: Vec::new() }
+        Self {
+            segments: Vec::new(),
+        }
     }
 
     fn push(&mut self, idx: u8) {
@@ -138,7 +139,11 @@ fn write_node_tiles(
                 write_pnts(points, &mut file)?;
             }
         }
-        crate::octree::OctreeNode::Internal { children, lod_points, .. } => {
+        crate::octree::OctreeNode::Internal {
+            children,
+            lod_points,
+            ..
+        } => {
             if !lod_points.is_empty() {
                 let filename = path.to_filename();
                 let mut file = std::fs::File::create(tiles_dir.join(&filename))?;
