@@ -1,0 +1,133 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #0d1117;
+  --sidebar: #161b22;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --heading: #f0f6fc;
+  --accent: #58a6ff;
+  --accent2: #3fb950;
+  --muted: #8b949e;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  height: 100vh;
+}
+
+#sidebar {
+  width: 280px;
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+}
+
+#sidebar h1 {
+  font-size: 1.25rem;
+  color: var(--heading);
+}
+
+nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  font-size: 0.9rem;
+}
+
+.nav-btn:hover { background: var(--border); }
+.nav-btn.active { background: var(--accent); color: #fff; }
+
+#asset-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.asset-item {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.asset-item:hover { border-color: var(--accent); }
+.asset-item .name { color: var(--heading); }
+.asset-item .status { color: var(--muted); font-size: 0.75rem; }
+.asset-item .status.ready { color: var(--accent2); }
+
+#upload-section {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+#upload-section h3 {
+  font-size: 0.9rem;
+  color: var(--heading);
+  margin-bottom: 8px;
+}
+
+#file-input {
+  width: 100%;
+  margin-bottom: 8px;
+  font-size: 0.8rem;
+  color: var(--text);
+}
+
+#upload-btn {
+  width: 100%;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  padding: 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+#upload-btn:hover { opacity: 0.9; }
+
+#server-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f85149;
+}
+
+.status-dot.connected { background: var(--accent2); }
+
+#cesium-container {
+  flex: 1;
+  position: relative;
+}

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TileTopia Dashboard</title>
+<link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <h1>🌍 TileTopia</h1>
+    <nav>
+      <button class="nav-btn active" data-view="viewer">3D Viewer</button>
+      <button class="nav-btn" data-view="assets">Assets</button>
+      <button class="nav-btn" data-view="jobs">Jobs</button>
+    </nav>
+    <div id="asset-list"></div>
+    <div id="upload-section">
+      <h3>Upload</h3>
+      <input type="file" id="file-input" accept=".las,.laz,.tif,.tiff,.gltf,.glb">
+      <button id="upload-btn">Upload & Tile</button>
+    </div>
+    <div id="server-status">
+      <span class="status-dot"></span>
+      <span id="status-text">Connecting...</span>
+    </div>
+  </aside>
+  <main id="cesium-container"></main>
+</div>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
