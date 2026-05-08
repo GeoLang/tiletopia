@@ -1,0 +1,20 @@
+[package]
+name = "tiletopia-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Async tiling pipeline — background jobs, progress tracking"
+
+[dependencies]
+tiletopia-core = { path = "../tiletopia-core" }
+tiletopia-ingest = { path = "../tiletopia-ingest" }
+tiletopia-terrain = { path = "../tiletopia-terrain" }
+tiletopia-store = { path = "../tiletopia-store" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+rayon = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

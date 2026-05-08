@@ -1,0 +1,15 @@
+[package]
+name = "tiletopia-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Format readers — LAS/LAZ, CityGML, GeoTIFF, glTF, OBJ, Shapefile"
+
+[dependencies]
+tiletopia-core = { path = "../tiletopia-core" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rayon = { workspace = true }
+memmap2 = { workspace = true }
+las = { workspace = true }

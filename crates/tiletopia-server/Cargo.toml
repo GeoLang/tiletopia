@@ -1,0 +1,21 @@
+[package]
+name = "tiletopia-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "REST API server — tile streaming, asset management, WebSocket real-time layer"
+
+[dependencies]
+tiletopia-core = { path = "../tiletopia-core" }
+tiletopia-worker = { path = "../tiletopia-worker" }
+tiletopia-store = { path = "../tiletopia-store" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

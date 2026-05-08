@@ -1,0 +1,16 @@
+[package]
+name = "tiletopia-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core tiling engine — spatial indexing, LOD generation, 3D Tiles output"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+bytes = { workspace = true }
+memmap2 = { workspace = true }

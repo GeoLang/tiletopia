@@ -1,0 +1,26 @@
+[package]
+name = "tiletopia-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI tool — tile, serve, and manage geospatial assets"
+
+[[bin]]
+name = "tiletopia"
+path = "src/main.rs"
+
+[dependencies]
+tiletopia-core = { path = "../tiletopia-core" }
+tiletopia-server = { path = "../tiletopia-server" }
+tiletopia-worker = { path = "../tiletopia-worker" }
+tiletopia-ingest = { path = "../tiletopia-ingest" }
+tiletopia-terrain = { path = "../tiletopia-terrain" }
+tiletopia-store = { path = "../tiletopia-store" }
+axum = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
