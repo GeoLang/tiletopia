@@ -68,6 +68,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <a href="https://github.com/TileTopia-HQ/tiletopia">GitHub</a>
 <a href="https://github.com/TileTopia-HQ/tiletopia#quick-start" class="secondary">Quick Start</a>
 <a href="#comparison" class="secondary">vs Cesium Ion</a>
+<a href="#competitors" class="secondary">vs Industry</a>
 </div>
 <div class="stats">
 <div class="stat"><div class="num">7</div><div class="label">Rust crates</div></div>
@@ -235,6 +236,113 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 </tbody>
 </table>
 <p style="margin-top:12px;color:var(--muted);font-size:.85rem">Highlighted rows = TileTopia exclusives (34 features Ion cannot match).</p>
+</div>
+</section>
+
+<section id="competitors">
+<div class="container">
+<h2>TileTopia vs The Industry</h2>
+<p style="color:var(--muted);margin-bottom:20px">How we compare across the entire 3D geospatial platform landscape.</p>
+<div style="overflow-x:auto">
+<table>
+<thead>
+<tr><th>Capability</th><th>TileTopia</th><th>Cesium Ion</th><th>Mapbox</th><th>Google Maps</th><th>Bentley iTwin</th><th>Trimble Clarity</th><th>Potree</th></tr>
+</thead>
+<tbody>
+<tr><td>OGC 3D Tiles 1.1</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Point cloud tiling</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅ (viewer)</td></tr>
+<tr><td>Terrain generation</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Vector tiles</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Self-hosted / on-prem</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td></tr>
+<tr><td>Open source</td><td class="check">✅ GPL-3.0</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td></tr>
+<tr><td>REST API</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr><td>WebSocket real-time</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Digital twin / IoT</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>BIM/IFC support</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>GPU-accelerated tiling</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Multi-renderer (Cesium/deck.gl/MapLibre)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Anomaly detection</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Clash detection (BIM)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>3D measurement tools</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr><td>Plugin/extension system</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Scheduled processing (cron)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Webhook integrations</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Team workspaces / RBAC</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr><td>Mobile SDK</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Offline / air-gapped</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td></tr>
+<tr><td>Export packages (LAS/GeoJSON/GLB)</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr><td>Usage metering / billing API</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Data residency / GDPR</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td></tr>
+<tr><td>HA clustering</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Temporal versioning</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td><strong>Price (monthly)</strong></td><td class="check"><strong>$0</strong></td><td class="cross">$150–$3,750</td><td class="cross">$0–$1,500+</td><td class="cross">Pay-per-use</td><td class="cross">$10K+ enterprise</td><td class="cross">$500–$2,000</td><td class="check">$0</td></tr>
+</tbody>
+</table>
+</div>
+<p style="margin-top:16px;color:var(--muted);font-size:.85rem">TileTopia scores <strong>26/26</strong> — the only platform with full coverage across tiling, real-time, analytics, enterprise, and deployment flexibility.</p>
+
+<div class="grid" style="margin-top:28px">
+<div class="card">
+<h3>vs Mapbox</h3>
+<ul>
+<li>Mapbox = 2D vector tiles + limited terrain</li>
+<li>No 3D Tiles, no point clouds, no BIM</li>
+<li>No self-hosting — locked to Mapbox Cloud</li>
+<li>Pricing scales aggressively past free tier</li>
+<li>No real-time / WebSocket / digital twin</li>
+</ul>
+</div>
+<div class="card">
+<h3>vs Google Maps Platform</h3>
+<ul>
+<li>Photorealistic 3D Tiles (read-only, no upload)</li>
+<li>Cannot bring your own data</li>
+<li>No point cloud or BIM tiling</li>
+<li>Pay-per-tile-request pricing adds up fast</li>
+<li>No offline, no self-host, vendor lock-in</li>
+</ul>
+</div>
+<div class="card">
+<h3>vs Bentley iTwin</h3>
+<ul>
+<li>Excellent BIM/infrastructure — but $10K+/yr</li>
+<li>No open source, no self-hosting</li>
+<li>No point cloud tiling pipeline</li>
+<li>No terrain generation from DEMs</li>
+<li>Enterprise sales cycle (months)</li>
+</ul>
+</div>
+<div class="card">
+<h3>vs Trimble Clarity</h3>
+<ul>
+<li>Good point cloud hosting — narrow scope</li>
+<li>No 3D Tiles output, no terrain, no BIM</li>
+<li>No API-first design</li>
+<li>No scheduling, plugins, or webhooks</li>
+<li>$500+/month for meaningful storage</li>
+</ul>
+</div>
+<div class="card">
+<h3>vs Potree</h3>
+<ul>
+<li>Excellent open-source point cloud viewer</li>
+<li>Viewer only — no tiling engine, no API</li>
+<li>No 3D Tiles format, no CesiumJS compat</li>
+<li>No terrain, no BIM, no analytics</li>
+<li>No managed deployment or enterprise features</li>
+</ul>
+</div>
+<div class="card">
+<h3>Why TileTopia wins</h3>
+<ul>
+<li>Only platform that is open-source AND full-featured</li>
+<li>Self-hosted = zero vendor lock-in, full data control</li>
+<li>Covers point clouds + terrain + BIM + vector</li>
+<li>Real-time digital twin + analytics + automation</li>
+<li>GPU-accelerated performance at zero cost</li>
+</ul>
+</div>
+</div>
 </div>
 </section>
 
