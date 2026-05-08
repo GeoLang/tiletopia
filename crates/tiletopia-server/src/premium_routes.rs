@@ -7,7 +7,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{
-    AppState, api_keys, export, metering, mobile, plugins, scheduler, webhooks, workspaces,
+    AppState, api_keys, bim4d, classification, cog, collaboration, export, geocoding, indoor,
+    metering, mobile, photogrammetry, plugins, routing, scheduler, stac, versioning, webhooks,
+    workspaces,
 };
 
 /// Routes for API key management.
@@ -239,4 +241,184 @@ async fn mobile_config() -> Json<mobile::SdkConfig> {
 async fn offline_packages() -> Json<serde_json::Value> {
     let packages = mobile::available_offline_packages();
     Json(serde_json::json!({ "packages": packages }))
+}
+
+// ─── Gap-closing feature routes ─────────────────────────────────────────────
+
+/// Routes for photogrammetry pipeline.
+pub fn photogrammetry_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route(
+            "/api/v1/photogrammetry/projects",
+            get(list_photogrammetry_projects),
+        )
+        .route("/api/v1/photogrammetry/presets", get(quality_presets))
+}
+
+async fn list_photogrammetry_projects() -> Json<serde_json::Value> {
+    let engine = photogrammetry::PhotogrammetryEngine::new();
+    let projects = engine.list_projects(None).await;
+    Json(serde_json::json!({ "projects": projects }))
+}
+
+async fn quality_presets() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "presets": ["Draft", "Medium", "High", "Ultra"]
+    }))
+}
+
+/// Routes for point cloud classification.
+pub fn classification_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route(
+            "/api/v1/classification/models",
+            get(list_classification_models),
+        )
+        .route("/api/v1/classification/classes", get(list_classes))
+}
+
+async fn list_classification_models() -> Json<serde_json::Value> {
+    let models = classification::ClassificationEngine::available_models();
+    Json(serde_json::json!({ "models": models }))
+}
+
+async fn list_classes() -> Json<serde_json::Value> {
+    let engine = classification::ClassificationEngine::new();
+    let jobs = engine.list_jobs(None).await;
+    Json(serde_json::json!({ "jobs": jobs }))
+}
+
+/// Routes for real-time collaboration.
+pub fn collaboration_routes() -> Router<Arc<AppState>> {
+    Router::new().route(
+        "/api/v1/collaboration/sessions",
+        get(list_collaboration_sessions),
+    )
+}
+
+async fn list_collaboration_sessions() -> Json<serde_json::Value> {
+    let engine = collaboration::CollaborationEngine::new();
+    let sessions = engine.list_sessions().await;
+    Json(serde_json::json!({ "sessions": sessions }))
+}
+
+/// Routes for asset versioning.
+pub fn versioning_routes() -> Router<Arc<AppState>> {
+    Router::new().route("/api/v1/versioning/assets", get(list_versioned_assets))
+}
+
+async fn list_versioned_assets() -> Json<serde_json::Value> {
+    let engine = versioning::VersioningEngine::new();
+    let assets = engine.list_assets().await;
+    Json(serde_json::json!({ "assets": assets }))
+}
+
+/// Routes for BIM 4D scheduling.
+pub fn bim4d_routes() -> Router<Arc<AppState>> {
+    Router::new().route("/api/v1/bim4d/projects", get(list_bim4d_projects))
+}
+
+async fn list_bim4d_projects() -> Json<serde_json::Value> {
+    let engine = bim4d::Bim4DEngine::new();
+    let projects = engine.list_projects().await;
+    Json(serde_json::json!({ "projects": projects }))
+}
+
+/// Routes for geocoding.
+pub fn geocoding_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/geocoding/search", get(geocode_search))
+        .route("/api/v1/geocoding/reverse", get(geocode_reverse))
+}
+
+async fn geocode_search() -> Json<serde_json::Value> {
+    let result = geocoding::geocode("Golden Gate Bridge");
+    Json(serde_json::json!(result))
+}
+
+async fn geocode_reverse() -> Json<serde_json::Value> {
+    let place = geocoding::reverse_geocode(37.7749, -122.4194);
+    Json(serde_json::json!(place))
+}
+
+/// Routes for STAC catalog.
+pub fn stac_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/stac", get(stac_root))
+        .route("/api/v1/stac/collections", get(stac_collections))
+        .route("/api/v1/stac/search", get(stac_search))
+}
+
+async fn stac_root() -> Json<serde_json::Value> {
+    let catalog = stac::root_catalog();
+    Json(serde_json::json!(catalog))
+}
+
+async fn stac_collections() -> Json<serde_json::Value> {
+    let colls = stac::collections();
+    Json(serde_json::json!({ "collections": colls }))
+}
+
+async fn stac_search() -> Json<serde_json::Value> {
+    let items = stac::search_items(None, None, None, 10);
+    Json(serde_json::json!({ "type": "FeatureCollection", "features": items }))
+}
+
+/// Routes for indoor mapping.
+pub fn indoor_routes() -> Router<Arc<AppState>> {
+    Router::new().route("/api/v1/indoor/buildings", get(list_buildings))
+}
+
+async fn list_buildings() -> Json<serde_json::Value> {
+    let buildings = indoor::demo_buildings();
+    Json(serde_json::json!({ "buildings": buildings }))
+}
+
+/// Routes for Cloud Optimized GeoTIFF.
+pub fn cog_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/cog/datasets", get(list_cog_datasets))
+        .route("/api/v1/cog/stats", get(cog_stats))
+}
+
+async fn list_cog_datasets() -> Json<serde_json::Value> {
+    let engine = cog::CogEngine::new();
+    let datasets = engine.list_datasets().to_vec();
+    Json(serde_json::json!({ "datasets": datasets }))
+}
+
+async fn cog_stats() -> Json<serde_json::Value> {
+    let engine = cog::CogEngine::new();
+    let datasets = engine.list_datasets();
+    let total_bytes: u64 = datasets.iter().map(|d| d.file_size_bytes).sum();
+    Json(serde_json::json!({
+        "dataset_count": datasets.len(),
+        "total_size_bytes": total_bytes
+    }))
+}
+
+/// Routes for routing/navigation.
+pub fn routing_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/routing/stats", get(routing_stats))
+        .route("/api/v1/routing/route", get(compute_demo_route))
+}
+
+async fn routing_stats() -> Json<routing::RoutingStats> {
+    let engine = routing::RoutingEngine::new();
+    Json(engine.stats())
+}
+
+async fn compute_demo_route() -> Json<serde_json::Value> {
+    let engine = routing::RoutingEngine::new();
+    let req = routing::RouteRequest {
+        origin: [-122.4194, 37.7749],
+        destination: [-122.4100, 37.7800],
+        profile: routing::RoutingProfile::Driving,
+        alternatives: false,
+    };
+    match engine.compute_route(&req) {
+        Some(route) => Json(serde_json::json!(route)),
+        None => Json(serde_json::json!({"error": "No route found"})),
+    }
 }

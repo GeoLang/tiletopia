@@ -8,10 +8,14 @@ pub mod api_keys;
 pub mod arvr;
 pub mod audit;
 pub mod auth;
+pub mod bim4d;
 pub mod catalog;
 pub mod cicd;
+pub mod classification;
 pub mod cloud_store;
 pub mod cluster;
+pub mod cog;
+pub mod collaboration;
 pub mod crdt;
 pub mod dashboard;
 pub mod demo;
@@ -19,12 +23,15 @@ pub mod encryption;
 pub mod export;
 pub mod federation;
 pub mod flythrough;
+pub mod geocoding;
 pub mod geofence;
+pub mod indoor;
 pub mod marketplace;
 pub mod metering;
 pub mod metrics;
 pub mod mobile;
 pub mod offline_export;
+pub mod photogrammetry;
 pub mod plugins;
 pub mod premium_routes;
 pub mod priority_queue;
@@ -32,14 +39,17 @@ pub mod rbac;
 pub mod realtime;
 pub mod reports;
 pub mod retention;
+pub mod routing;
 pub mod scheduler;
 pub mod scripting;
+pub mod stac;
 pub mod stories;
 pub mod streaming;
 pub mod temporal;
 pub mod tenant;
 pub mod terrain_api;
 pub mod upload;
+pub mod versioning;
 pub mod webhook;
 pub mod webhooks;
 pub mod whitelabel;
@@ -137,6 +147,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::scheduler_routes())
         .merge(premium_routes::plugin_routes())
         .merge(premium_routes::mobile_routes())
+        .merge(premium_routes::photogrammetry_routes())
+        .merge(premium_routes::classification_routes())
+        .merge(premium_routes::collaboration_routes())
+        .merge(premium_routes::versioning_routes())
+        .merge(premium_routes::bim4d_routes())
+        .merge(premium_routes::geocoding_routes())
+        .merge(premium_routes::stac_routes())
+        .merge(premium_routes::indoor_routes())
+        .merge(premium_routes::cog_routes())
+        .merge(premium_routes::routing_routes())
         .layer(middleware::from_fn(auth::auth_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)
