@@ -97,6 +97,32 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **AR/VR Foveated Rendering** — eye-tracked LOD for XR headsets (Quest/Vision Pro/HoloLens)
 - **Cinematic Flythrough** — keyframed camera paths with easing for presentations
 - **Automated Site Reports** — scheduled HTML/PDF report generation from templates
+- **API Key Management** — create/revoke keys, per-key rate limiting, usage tracking
+- **Usage Metering & Billing** — track API calls, storage, compute per tenant (free/pro/enterprise tiers)
+- **Task Scheduler** — cron-like recurring jobs with stats, recent runs, failure handling
+- **Plugin System** — custom format adapters, processing pipelines, type-safe registry
+- **Mobile SDK** — adaptive quality based on device GPU/memory/network, offline packages
+- **Multi-Format Export** — GeoJSON, Shapefile, KML, DXF, OBJ, LAS, GeoTIFF, 3D PDF, FBX
+
+### 2D Map Tiles
+- **XYZ Raster Tiles** — proxy + cache OSM, Stamen, or any slippy map source
+- **Vector Tiles (MVT/PBF)** — generate Mapbox Vector Tiles from GeoJSON/PostGIS
+- **MapLibre GL Styles** — serve style JSON with sources + layers for web map clients
+- **TileJSON 3.0.0** — auto-discovery metadata for tile consumers
+- **Tile Caching** — LRU cache with TTL, hit rate tracking, invalidation
+- **Custom Overlays** — render asset footprints and BIM zones as vector tile layers
+
+### Geospatial Services
+- **Photogrammetry (SfM/MVS)** — Structure from Motion + Multi-View Stereo pipeline with quality presets
+- **Point Cloud Classification** — ASPRS-standard classes (ground/vegetation/building/water), ML models (PointNet++/RandLA-Net)
+- **Real-Time Collaboration** — multi-user sessions with 3D cursors, viewports, annotations, and replies
+- **Asset Versioning** — full version history, diffs, change regions between versions
+- **BIM 4D Scheduling** — construction timeline, phases, Gantt keyframes, progress tracking
+- **Geocoding** — forward/reverse/batch address lookup with confidence scores
+- **STAC Catalog** — OGC SpatioTemporal Asset Catalog (v1.0.0) with collections + item search
+- **Indoor Mapping** — floor plans, room navigation, BLE beacon positioning, accessibility routing
+- **Cloud Optimized GeoTIFF (COG)** — range-request tile serving with overviews and band statistics
+- **Routing & Navigation** — Dijkstra/A* shortest path, multi-profile (driving/walking/cycling), turn-by-turn directions
 
 ---
 
@@ -171,6 +197,16 @@ docker run -p 3000:3000 -v /path/to/data:/data tiletopia serve --data-dir /data
 | `GET` | `/api/v1/assets/{id}/tileset.json` | Serve tileset |
 | `GET` | `/api/v1/assets/{id}/tiles/{path}` | Serve individual tile |
 | `WS` | `/api/v1/realtime/{id}` | WebSocket for live data |
+| `GET` | `/api/v1/tiles/sources` | List 2D tile sources (OSM, etc.) |
+| `GET` | `/api/v1/tiles/styles` | MapLibre GL style JSON |
+| `GET` | `/api/v1/stac` | STAC catalog root |
+| `GET` | `/api/v1/stac/collections` | STAC collections |
+| `GET` | `/api/v1/stac/search` | STAC item search |
+| `GET` | `/api/v1/geocoding/search` | Forward geocode |
+| `GET` | `/api/v1/geocoding/reverse` | Reverse geocode |
+| `GET` | `/api/v1/routing/route` | Compute route |
+| `GET` | `/api/v1/cog/datasets` | Cloud Optimized GeoTIFF datasets |
+| `GET` | `/api/v1/indoor/buildings` | Indoor floor plans |
 | `GET` | `/metrics` | Prometheus metrics |
 
 ---
@@ -221,9 +257,15 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 | **Plugin system (custom formats)** | ✅ | ❌ |
 | **Local filesystem storage** | ✅ | ❌ |
 | **Open source** | ✅ GPL-3.0 | ❌ Proprietary |
+| **2D map tiles (XYZ/MVT)** | ✅ | ❌ |
+| **STAC catalog (OGC)** | ✅ | ❌ |
+| **Geocoding (forward/reverse)** | ✅ | ❌ |
+| **Routing & navigation** | ✅ | ❌ |
+| **Indoor mapping** | ✅ | ❌ |
+| **Real-time collaboration** | ✅ | ❌ |
 | **Price** | **Free forever** | $150–$3,750/month |
 
-**16 exclusive features** that Cesium Ion cannot match.
+**22 exclusive features** that Cesium Ion cannot match.
 
 ---
 
@@ -233,7 +275,7 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 cargo test
 ```
 
-213 unit tests covering:
+282 unit tests covering:
 - Core: AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, GPU compute, diff detection, plugins (21)
 - Core: spatial queries (radius/kNN/bbox/polygon clip/volume), AI point cloud classification, change detection & time slider, implicit tiling (3D Tiles Next), colorization from imagery, glTF structural metadata (35)
 - Core: 3D measurement (distance/area/volume/cut-fill/slope/bearing), anomaly detection (deformation/encroachment/deviation/outlier), predictive analytics (linear regression/exponential smoothing/trend/seasonal), BIM clash detection (hard/soft/design deviation) (22)
@@ -241,6 +283,8 @@ cargo test
 - Server: health, assets, tilesets, security, annotations, temporal versioning, multi-tenancy, offline export (13)
 - Server: federated mesh networking, CRDT collaborative editing, scripting/rules engine, CI/CD pipeline validation (19)
 - Server: RBAC with OIDC, audit logging, Raft consensus clustering, priority queue with SLA, webhook delivery, white-label branding, geospatial marketplace, data residency geofencing, retention lifecycle/GDPR, field-level encryption, custom dashboards, narrated presentations (Stories), AR/VR foveated rendering, cinematic flythrough, automated site reports (75)
+- Server: API keys, metering, webhooks, workspaces, export, scheduler, plugins, mobile (22)
+- Server: photogrammetry, classification, collaboration, versioning, BIM 4D, geocoding, STAC, indoor, COG, routing, map tiles (47)
 - Ingest: LAS/LAZ, GeoTIFF, BIM/IFC readers, photogrammetry (SfM) (13)
 - Terrain: quantized mesh generation, global DEM terrain (12)
 - Worker: background job processing (5)

@@ -62,7 +62,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/3D_Tiles-1.1-green" alt="3D Tiles">
 <img src="https://img.shields.io/badge/Rust-2024-orange" alt="Rust">
-<img src="https://img.shields.io/badge/tests-213_passing-brightgreen" alt="Tests">
+<img src="https://img.shields.io/badge/tests-282_passing-brightgreen" alt="Tests">
 </div>
 <div class="hero">
 <a href="https://github.com/TileTopia-HQ/tiletopia">GitHub</a>
@@ -72,7 +72,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 </div>
 <div class="stats">
 <div class="stat"><div class="num">7</div><div class="label">Rust crates</div></div>
-<div class="stat"><div class="num">213</div><div class="label">Unit tests</div></div>
+<div class="stat"><div class="num">282</div><div class="label">Unit tests</div></div>
 <div class="stat"><div class="num">$0</div><div class="label">Per month</div></div>
 <div class="stat"><div class="num">∞</div><div class="label">Data limit</div></div>
 </div>
@@ -123,6 +123,39 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <li>Entity linking (3D → metadata)</li>
 <li>Live model update API</li>
 <li>3D annotation layers</li>
+</ul>
+</div>
+<div class="card">
+<h3>🗺️ 2D Map Tiles</h3>
+<ul>
+<li>XYZ raster tiles (proxy + cache OSM)</li>
+<li>Vector tiles (MVT/PBF) from GeoJSON</li>
+<li>MapLibre GL style management</li>
+<li>TileJSON 3.0.0 auto-discovery</li>
+<li>Tile caching with TTL & hit tracking</li>
+<li>Custom overlay layers</li>
+</ul>
+</div>
+<div class="card">
+<h3>🌐 Geospatial Services</h3>
+<ul>
+<li>Photogrammetry (SfM/MVS pipeline)</li>
+<li>Point classification (PointNet++)</li>
+<li>Geocoding (forward/reverse/batch)</li>
+<li>STAC catalog (OGC v1.0.0)</li>
+<li>Indoor mapping & navigation</li>
+<li>Routing (Dijkstra, turn-by-turn)</li>
+</ul>
+</div>
+<div class="card">
+<h3>🤝 Collaboration</h3>
+<ul>
+<li>Real-time multi-user sessions</li>
+<li>3D cursors & viewport sharing</li>
+<li>Annotation threads with replies</li>
+<li>Asset versioning & diffs</li>
+<li>BIM 4D construction scheduling</li>
+<li>Cloud Optimized GeoTIFF (COG)</li>
 </ul>
 </div>
 <div class="card">
@@ -232,10 +265,17 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr class="exclusive"><td><strong>AR/VR foveated rendering</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
 <tr class="exclusive"><td><strong>Cinematic flythrough (keyframed)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
 <tr class="exclusive"><td><strong>Automated site reports</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>2D Map Tiles (XYZ + MVT)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>STAC Catalog (OGC)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Geocoding (forward/reverse)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Routing & navigation</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Indoor mapping & floor plans</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Real-time collaboration (multi-user)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr class="exclusive"><td><strong>Cloud Optimized GeoTIFF (COG)</strong></td><td class="check">✅</td><td class="cross">❌</td></tr>
 <tr class="exclusive"><td><strong>Price</strong></td><td class="check"><strong>Free forever</strong></td><td class="cross">$150–$3,750/month</td></tr>
 </tbody>
 </table>
-<p style="margin-top:12px;color:var(--muted);font-size:.85rem">Highlighted rows = TileTopia exclusives (34 features Ion cannot match).</p>
+<p style="margin-top:12px;color:var(--muted);font-size:.85rem">Highlighted rows = TileTopia exclusives (42 features Ion cannot match).</p>
 </div>
 </section>
 
@@ -275,11 +315,20 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td>Data residency / GDPR</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td></tr>
 <tr><td>HA clustering</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
 <tr><td>Temporal versioning</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>2D Map Tiles (XYZ/MVT)</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>STAC Catalog (OGC)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Geocoding</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Routing / Navigation</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Indoor mapping</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Real-time collaboration</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Cloud Optimized GeoTIFF</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>Photogrammetry pipeline</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
+<tr><td>BIM 4D scheduling</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
 <tr><td><strong>Price (monthly)</strong></td><td class="check"><strong>$0</strong></td><td class="cross">$150–$3,750</td><td class="cross">$0–$1,500+</td><td class="cross">Pay-per-use</td><td class="cross">$10K+ enterprise</td><td class="cross">$500–$2,000</td><td class="check">$0</td></tr>
 </tbody>
 </table>
 </div>
-<p style="margin-top:16px;color:var(--muted);font-size:.85rem">TileTopia scores <strong>26/26</strong> — the only platform with full coverage across tiling, real-time, analytics, enterprise, and deployment flexibility.</p>
+<p style="margin-top:16px;color:var(--muted);font-size:.85rem">TileTopia scores <strong>36/36</strong> — the only platform with full coverage across tiling, real-time, analytics, enterprise, and deployment flexibility.</p>
 
 <div class="grid" style="margin-top:28px">
 <div class="card">
@@ -433,6 +482,24 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td><code>GET</code></td><td><code>/api/v1/plugins/pipelines</code></td><td>Processing pipelines</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/mobile/config</code></td><td>Mobile SDK config</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/mobile/offline</code></td><td>Offline tile packages</td></tr>
+<tr><td colspan="3" style="color:var(--accent);font-weight:600;padding-top:12px">2D Tiles & Geospatial Services</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/tiles/sources</code></td><td>List tile sources (OSM, vector)</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/tiles/styles</code></td><td>MapLibre GL style JSON</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/tiles/cache/stats</code></td><td>Tile cache hit rate & size</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/stac</code></td><td>STAC catalog root</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/stac/collections</code></td><td>STAC collections</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/stac/search</code></td><td>STAC item search</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/geocoding/search</code></td><td>Forward geocode</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/geocoding/reverse</code></td><td>Reverse geocode</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/routing/route</code></td><td>Compute route (driving/walking/cycling)</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/routing/stats</code></td><td>Routing graph statistics</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/cog/datasets</code></td><td>Cloud Optimized GeoTIFF datasets</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/indoor/buildings</code></td><td>Indoor floor plans</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/photogrammetry/projects</code></td><td>Photogrammetry projects</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/classification/models</code></td><td>ML classification models</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/collaboration/sessions</code></td><td>Active collaboration sessions</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/versioning/assets</code></td><td>Versioned assets</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/bim4d/projects</code></td><td>BIM 4D schedules</td></tr>
 </table>
 </div>
 </section>
