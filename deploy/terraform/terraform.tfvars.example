@@ -1,0 +1,18 @@
+# Copy this to terraform.tfvars and customize
+
+aws_region    = "us-east-1"
+project_name  = "tiletopia"
+environment   = "prod"
+
+# Fargate sizing (see https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html)
+cpu    = 512   # 0.5 vCPU  (~$15/month)
+memory = 1024  # 1 GB
+
+# Scale out for production
+desired_count = 1  # Increase for HA (2+ with multi-AZ)
+
+# Custom domain (optional — requires ACM certificate)
+# domain_name = "tiles.yourdomain.com"
+
+# Container image (set after first ECR push, or use Docker Hub)
+# container_image = "123456789.dkr.ecr.us-east-1.amazonaws.com/tiletopia-prod:latest"

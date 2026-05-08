@@ -9,6 +9,7 @@ pub mod audit;
 pub mod auth;
 pub mod catalog;
 pub mod cicd;
+pub mod cloud_store;
 pub mod cluster;
 pub mod crdt;
 pub mod dashboard;
