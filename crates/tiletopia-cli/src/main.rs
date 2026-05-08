@@ -137,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
                 assets: RwLock::new(vec![]),
                 data_dir,
                 realtime: tiletopia_server::realtime::RealtimeState::new(),
+                demo: tiletopia_server::demo::DemoState::new(),
             });
 
             let app = tiletopia_server::router(state);

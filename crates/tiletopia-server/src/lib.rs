@@ -11,6 +11,7 @@ pub mod cicd;
 pub mod cluster;
 pub mod crdt;
 pub mod dashboard;
+pub mod demo;
 pub mod encryption;
 pub mod federation;
 pub mod flythrough;
@@ -51,6 +52,7 @@ pub struct AppState {
     pub assets: RwLock<Vec<Asset>>,
     pub data_dir: std::path::PathBuf,
     pub realtime: realtime::RealtimeState,
+    pub demo: demo::DemoState,
 }
 
 /// A managed geospatial asset.
@@ -111,6 +113,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/health", get(health))
         .route("/metrics", get(metrics::metrics_handler))
+        .merge(demo::demo_routes())
         .layer(middleware::from_fn(auth::auth_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)

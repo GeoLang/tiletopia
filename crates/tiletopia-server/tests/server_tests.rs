@@ -15,6 +15,7 @@ mod tests {
             assets: RwLock::new(vec![]),
             data_dir: dir,
             realtime: tiletopia_server::realtime::RealtimeState::new(),
+            demo: tiletopia_server::demo::DemoState::new(),
         })
     }
 
