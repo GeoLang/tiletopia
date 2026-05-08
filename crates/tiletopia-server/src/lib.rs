@@ -13,6 +13,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 /// Server application state.
@@ -59,6 +60,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/assets/{id}/tileset.json", get(get_tileset))
         .route("/api/v1/assets/{id}/tiles/{path}", get(get_tile))
         .route("/api/v1/health", get(health))
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 

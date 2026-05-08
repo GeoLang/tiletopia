@@ -73,27 +73,39 @@ async fn main() -> anyhow::Result<()> {
             let points = tiletopia_ingest::read_point_cloud(&input)?;
             tracing::info!("Read {} points", points.len());
 
-            // TODO: build octree, generate LOD, write 3D Tiles
-            std::fs::create_dir_all(&output)?;
+            // Convert ingest points to octree points
+            let octree_points: Vec<tiletopia_core::octree::OctreePoint> = points
+                .into_iter()
+                .map(|p| tiletopia_core::octree::OctreePoint {
+                    position: [p.x, p.y, p.z],
+                    color: [p.r, p.g, p.b],
+                    intensity: p.intensity,
+                    classification: p.classification,
+                })
+                .collect();
 
-            let tileset = tiletopia_core::Tileset {
-                asset: tiletopia_core::TilesetAsset::default(),
-                geometric_error: max_error,
-                root: tiletopia_core::Tile {
-                    bounding_volume: tiletopia_core::BoundingVolume::Sphere {
-                        sphere: [0.0, 0.0, 0.0, 1000.0],
-                    },
-                    geometric_error: max_error,
-                    content: None,
-                    children: vec![],
-                    refine: Some(tiletopia_core::Refine::Replace),
-                    transform: None,
+            // Run tiling pipeline
+            let config = tiletopia_core::tileset::TilingConfig {
+                octree: tiletopia_core::octree::OctreeConfig {
+                    max_points_per_node: 20_000,
+                    ..Default::default()
                 },
+                max_geometric_error: max_error,
             };
 
-            let json = serde_json::to_string_pretty(&tileset)?;
-            std::fs::write(output.join("tileset.json"), json)?;
-            tracing::info!("Wrote tileset.json");
+            let stats = tiletopia_core::tileset::tile_point_cloud(
+                octree_points,
+                &output,
+                &config,
+            )?;
+
+            tracing::info!(
+                "Done! {} nodes ({} leaf, {} internal), max depth {}",
+                stats.total_nodes,
+                stats.leaf_nodes,
+                stats.internal_nodes,
+                stats.max_depth,
+            );
         }
 
         Commands::Serve {
