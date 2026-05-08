@@ -1,7 +1,6 @@
-//! Cesium Stories — interactive guided tours through 3D scenes.
+//! TileTopia Stories — interactive narrated presentations through 3D scenes.
 //!
-//! Similar to Cesium Ion Stories: narrated flythrough presentations with
-//! waypoints, annotations, and embedded media.
+//! Guided tours with waypoints, camera animations, annotations, and embedded media.
 
 use serde::{Deserialize, Serialize};
 

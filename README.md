@@ -93,7 +93,7 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Retention Lifecycle** — automated tiering, archival, GDPR right-to-erasure policies
 - **Field-Level Encryption** — AES-256/ChaCha20 at rest with key rotation
 - **Custom Dashboards** — drag-and-drop widget layouts for KPIs and monitoring
-- **Cesium Stories** — narrated slide-based presentations with camera animations
+- **Narrated Presentations (Stories)** — guided slide-based tours with camera animations
 - **AR/VR Foveated Rendering** — eye-tracked LOD for XR headsets (Quest/Vision Pro/HoloLens)
 - **Cinematic Flythrough** — keyframed camera paths with easing for presentations
 - **Automated Site Reports** — scheduled HTML/PDF report generation from templates
@@ -240,7 +240,7 @@ cargo test
 - Store: local filesystem CRUD, path traversal (6)
 - Server: health, assets, tilesets, security, annotations, temporal versioning, multi-tenancy, offline export (13)
 - Server: federated mesh networking, CRDT collaborative editing, scripting/rules engine, CI/CD pipeline validation (19)
-- Server: RBAC with OIDC, audit logging, Raft consensus clustering, priority queue with SLA, webhook delivery, white-label branding, geospatial marketplace, data residency geofencing, retention lifecycle/GDPR, field-level encryption, custom dashboards, Cesium Stories, AR/VR foveated rendering, cinematic flythrough, automated site reports (75)
+- Server: RBAC with OIDC, audit logging, Raft consensus clustering, priority queue with SLA, webhook delivery, white-label branding, geospatial marketplace, data residency geofencing, retention lifecycle/GDPR, field-level encryption, custom dashboards, narrated presentations (Stories), AR/VR foveated rendering, cinematic flythrough, automated site reports (75)
 - Ingest: LAS/LAZ, GeoTIFF, BIM/IFC readers, photogrammetry (SfM) (13)
 - Terrain: quantized mesh generation, global DEM terrain (12)
 - Worker: background job processing (5)
