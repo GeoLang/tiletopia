@@ -7,7 +7,7 @@ description = "Core tiling engine — spatial indexing, LOD generation, 3D Tiles
 
 [features]
 default = []
-gpu = []
+gpu = ["dep:wgpu", "dep:pollster"]
 plugin-dylib = []
 
 [dependencies]
@@ -19,3 +19,5 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 bytes = { workspace = true }
 memmap2 = { workspace = true }
+wgpu = { workspace = true, optional = true }
+pollster = { version = "0.4", optional = true }
