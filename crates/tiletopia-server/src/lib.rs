@@ -3,9 +3,15 @@
 //! Serves 3D Tiles tilesets, manages assets, streams tiles with
 //! view-dependent LOD, and provides WebSocket for real-time data.
 
+pub mod auth;
+pub mod metrics;
+pub mod realtime;
+pub mod upload;
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    middleware,
     response::Json,
     routing::get,
     Router,
@@ -20,6 +26,7 @@ use uuid::Uuid;
 pub struct AppState {
     pub assets: RwLock<Vec<Asset>>,
     pub data_dir: std::path::PathBuf,
+    pub realtime: realtime::RealtimeState,
 }
 
 /// A managed geospatial asset.
@@ -55,11 +62,14 @@ pub enum AssetStatus {
 /// Build the Axum router.
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/api/v1/assets", get(list_assets).post(create_asset))
-        .route("/api/v1/assets/{id}", get(get_asset))
+        .route("/api/v1/assets", get(list_assets).post(upload::upload_asset))
+        .route("/api/v1/assets/{id}", get(get_asset).delete(delete_asset))
         .route("/api/v1/assets/{id}/tileset.json", get(get_tileset))
         .route("/api/v1/assets/{id}/tiles/{path}", get(get_tile))
+        .route("/api/v1/assets/{id}/tile", axum::routing::post(start_tiling))
         .route("/api/v1/health", get(health))
+        .route("/metrics", get(metrics::metrics_handler))
+        .layer(middleware::from_fn(auth::auth_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -76,29 +86,6 @@ async fn list_assets(State(state): State<Arc<AppState>>) -> Json<Vec<Asset>> {
     Json(assets.clone())
 }
 
-async fn create_asset(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<CreateAssetRequest>,
-) -> (StatusCode, Json<Asset>) {
-    let asset = Asset {
-        id: Uuid::new_v4(),
-        name: req.name,
-        asset_type: req.asset_type,
-        status: AssetStatus::Uploading,
-        created_at: chrono::Utc::now(),
-        tile_count: 0,
-        size_bytes: 0,
-    };
-    state.assets.write().await.push(asset.clone());
-    (StatusCode::CREATED, Json(asset))
-}
-
-#[derive(Deserialize)]
-struct CreateAssetRequest {
-    name: String,
-    asset_type: AssetType,
-}
-
 async fn get_asset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
@@ -112,11 +99,25 @@ async fn get_asset(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+async fn delete_asset(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, StatusCode> {
+    let mut assets = state.assets.write().await;
+    let pos = assets.iter().position(|a| a.id == id).ok_or(StatusCode::NOT_FOUND)?;
+    assets.remove(pos);
+
+    // Remove asset directory
+    let asset_dir = state.data_dir.join(id.to_string());
+    let _ = tokio::fs::remove_dir_all(&asset_dir).await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn get_tileset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<tiletopia_core::Tileset>, StatusCode> {
-    // Serve tileset.json from storage
     let tileset_path = state.data_dir.join(id.to_string()).join("tileset.json");
     let data = tokio::fs::read_to_string(&tileset_path)
         .await
@@ -130,8 +131,81 @@ async fn get_tile(
     State(state): State<Arc<AppState>>,
     Path((id, tile_path)): Path<(Uuid, String)>,
 ) -> Result<Vec<u8>, StatusCode> {
-    let file_path = state.data_dir.join(id.to_string()).join(&tile_path);
+    // Sanitize tile path to prevent directory traversal
+    if tile_path.contains("..") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let file_path = state.data_dir.join(id.to_string()).join("tiles").join(&tile_path);
     tokio::fs::read(&file_path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)
+}
+
+/// Start a tiling job for an uploaded asset.
+async fn start_tiling(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, StatusCode> {
+    // Find the asset and update status
+    {
+        let mut assets = state.assets.write().await;
+        let asset = assets.iter_mut().find(|a| a.id == id).ok_or(StatusCode::NOT_FOUND)?;
+        asset.status = AssetStatus::Tiling;
+    }
+
+    // Spawn tiling job in background
+    let state_clone = Arc::clone(&state);
+    tokio::spawn(async move {
+        let asset_dir = state_clone.data_dir.join(id.to_string());
+        let input_dir = asset_dir.join("input");
+
+        // Find the input file
+        let mut entries = match tokio::fs::read_dir(&input_dir).await {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let input_path = match entries.next_entry().await {
+            Ok(Some(entry)) => entry.path(),
+            _ => return,
+        };
+
+        // Run tiling
+        let result = tokio::task::spawn_blocking(move || -> Result<tiletopia_core::octree::OctreeStats, String> {
+            let points = tiletopia_ingest::read_point_cloud(&input_path)
+                .map_err(|e| e.to_string())?;
+            let octree_points: Vec<tiletopia_core::octree::OctreePoint> = points
+                .into_iter()
+                .map(|p| tiletopia_core::octree::OctreePoint {
+                    position: [p.x, p.y, p.z],
+                    color: [p.r, p.g, p.b],
+                    intensity: p.intensity,
+                    classification: p.classification,
+                })
+                .collect();
+
+            let config = tiletopia_core::tileset::TilingConfig::default();
+            tiletopia_core::tileset::tile_point_cloud(octree_points, &asset_dir, &config)
+                .map_err(|e| e.to_string())
+        })
+        .await;
+
+        let mut assets = state_clone.assets.write().await;
+        if let Some(asset) = assets.iter_mut().find(|a| a.id == id) {
+            match result {
+                Ok(Ok(stats)) => {
+                    asset.status = AssetStatus::Ready;
+                    asset.tile_count = stats.total_nodes as u64;
+                    tracing::info!("Tiling complete for {}: {} nodes", id, stats.total_nodes);
+                    tracing::info!("metric: tiling_jobs_completed");
+                }
+                _ => {
+                    asset.status = AssetStatus::Error;
+                    tracing::error!("Tiling failed for {}", id);
+                    tracing::info!("metric: tiling_jobs_failed");
+                }
+            }
+        }
+    });
+
+    Ok(StatusCode::ACCEPTED)
 }

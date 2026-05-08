@@ -116,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
             let state = Arc::new(tiletopia_server::AppState {
                 assets: RwLock::new(vec![]),
                 data_dir,
+                realtime: tiletopia_server::realtime::RealtimeState::new(),
             });
 
             let app = tiletopia_server::router(state);
