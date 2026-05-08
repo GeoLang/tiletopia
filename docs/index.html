@@ -43,6 +43,14 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 .stat .num{font-size:2rem;color:var(--heading);font-weight:bold}
 .stat .label{color:var(--muted);font-size:.85rem;margin-top:4px}
 @media(max-width:600px){header h1{font-size:2.2rem}.grid{grid-template-columns:1fr}}
+/* Lightbox */
+.showcase-img{cursor:pointer;transition:transform .15s,box-shadow .15s}
+.showcase-img:hover{transform:scale(1.02);box-shadow:0 4px 20px rgba(88,166,255,.3)}
+#lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9999;justify-content:center;align-items:center;cursor:zoom-out}
+#lightbox.active{display:flex}
+#lightbox img{max-width:92vw;max-height:90vh;border-radius:8px;box-shadow:0 0 40px rgba(0,0,0,.8)}
+#lightbox .close-btn{position:absolute;top:16px;right:24px;color:#fff;font-size:2rem;cursor:pointer;opacity:.7;transition:opacity .2s}
+#lightbox .close-btn:hover{opacity:1}
 </style>
 </head>
 <body>
@@ -235,31 +243,31 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <h2>Feature Showcase</h2>
 <div class="grid" style="grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px">
 <div>
-<img src="screenshots/3d-viewer.png" alt="3D Globe Viewer with CesiumJS" style="width:100%;border-radius:8px;border:1px solid var(--border)">
+<img class="showcase-img" src="screenshots/3d-viewer.png" alt="3D Globe Viewer with CesiumJS" style="width:100%;border-radius:8px;border:1px solid var(--border)">
 <p style="color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center">3D Globe Viewer — CesiumJS integration with real-time tile streaming</p>
 </div>
 <div>
-<img src="screenshots/measurement-tools.png" alt="3D Measurement Tools" style="width:100%;border-radius:8px;border:1px solid var(--border)">
+<img class="showcase-img" src="screenshots/measurement-tools.png" alt="3D Measurement Tools" style="width:100%;border-radius:8px;border:1px solid var(--border)">
 <p style="color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center">Measurement Tools — distance, area, volume, cut/fill, slope & bearing</p>
 </div>
 </div>
 <div class="grid" style="grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px">
 <div>
-<img src="screenshots/anomaly-detection.png" alt="Anomaly Detection Alerts" style="width:100%;border-radius:8px;border:1px solid var(--border)">
+<img class="showcase-img" src="screenshots/anomaly-detection.png" alt="Anomaly Detection Alerts" style="width:100%;border-radius:8px;border:1px solid var(--border)">
 <p style="color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center">Anomaly Detection — deformation, encroachment, construction deviation alerts</p>
 </div>
 <div>
-<img src="screenshots/enterprise-admin.png" alt="Enterprise Admin Panel" style="width:100%;border-radius:8px;border:1px solid var(--border)">
+<img class="showcase-img" src="screenshots/enterprise-admin.png" alt="Enterprise Admin Panel" style="width:100%;border-radius:8px;border:1px solid var(--border)">
 <p style="color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center">Enterprise Admin — RBAC, audit log, data residency, job queue + SLA</p>
 </div>
 </div>
 <div class="grid" style="grid-template-columns:1fr 1fr;gap:24px">
 <div>
-<img src="screenshots/clash-analytics.png" alt="BIM Clash Detection & Analytics" style="width:100%;border-radius:8px;border:1px solid var(--border)">
+<img class="showcase-img" src="screenshots/clash-analytics.png" alt="BIM Clash Detection & Analytics" style="width:100%;border-radius:8px;border:1px solid var(--border)">
 <p style="color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center">BIM Clash Detection — hard/soft clashes, trend prediction, encryption</p>
 </div>
 <div>
-<img src="screenshots/stories-presentation.png" alt="Narrated Presentations" style="width:100%;border-radius:8px;border:1px solid var(--border)">
+<img class="showcase-img" src="screenshots/stories-presentation.png" alt="Narrated Presentations" style="width:100%;border-radius:8px;border:1px solid var(--border)">
 <p style="color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center">Narrated Presentations — guided tours with camera waypoints & sharing</p>
 </div>
 </div>
@@ -298,6 +306,25 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td><code>GET</code></td><td><code>/api/v1/assets/{id}/tiles/{path}</code></td><td>Serve tile</td></tr>
 <tr><td><code>WS</code></td><td><code>/api/v1/realtime/{id}</code></td><td>WebSocket live data</td></tr>
 <tr><td><code>GET</code></td><td><code>/metrics</code></td><td>Prometheus metrics</td></tr>
+<tr><td colspan="3" style="color:var(--accent);font-weight:600;padding-top:12px">Premium APIs</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/api-keys</code></td><td>List API keys (masked)</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/api-keys/usage</code></td><td>Key usage stats</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/metering/summary</code></td><td>Usage metering summary</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/metering/pricing</code></td><td>Pricing tiers</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/webhooks</code></td><td>Webhook subscriptions</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/webhooks/events</code></td><td>Available event types</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/workspaces</code></td><td>List organizations</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/workspaces/teams</code></td><td>List teams</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/workspaces/projects</code></td><td>List projects</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/exports</code></td><td>Export jobs</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/exports/formats</code></td><td>Available export formats</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/scheduler/jobs</code></td><td>Scheduled jobs</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/scheduler/stats</code></td><td>Scheduler statistics</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/scheduler/runs</code></td><td>Recent job runs</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/plugins</code></td><td>Plugin marketplace</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/plugins/pipelines</code></td><td>Processing pipelines</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/mobile/config</code></td><td>Mobile SDK config</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/mobile/offline</code></td><td>Offline tile packages</td></tr>
 </table>
 </div>
 </section>
@@ -341,5 +368,22 @@ cargo build --release --features gpu</pre>
 <p style="margin-top:8px">Made for GIS professionals who refuse to pay $150/month for tile hosting.</p>
 </div>
 </footer>
+
+<div id="lightbox"><span class="close-btn">&times;</span><img src="" alt=""></div>
+<script>
+(function(){
+  const lb=document.getElementById('lightbox');
+  const lbImg=lb.querySelector('img');
+  document.querySelectorAll('.showcase-img').forEach(img=>{
+    img.addEventListener('click',()=>{
+      lbImg.src=img.src;
+      lbImg.alt=img.alt;
+      lb.classList.add('active');
+    });
+  });
+  lb.addEventListener('click',()=>lb.classList.remove('active'));
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')lb.classList.remove('active');});
+})();
+</script>
 </body>
 </html>

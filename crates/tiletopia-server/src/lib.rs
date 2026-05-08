@@ -26,6 +26,7 @@ pub mod metrics;
 pub mod mobile;
 pub mod offline_export;
 pub mod plugins;
+pub mod premium_routes;
 pub mod priority_queue;
 pub mod rbac;
 pub mod realtime;
@@ -128,6 +129,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(demo::demo_routes())
         .merge(catalog::catalog_routes())
         .merge(terrain_api::terrain_routes())
+        .merge(premium_routes::api_key_routes())
+        .merge(premium_routes::metering_routes())
+        .merge(premium_routes::webhook_routes())
+        .merge(premium_routes::workspace_routes())
+        .merge(premium_routes::export_routes())
+        .merge(premium_routes::scheduler_routes())
+        .merge(premium_routes::plugin_routes())
+        .merge(premium_routes::mobile_routes())
         .layer(middleware::from_fn(auth::auth_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)
