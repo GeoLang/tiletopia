@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-05-08
+
+### Added
+- **Open Data Catalog** — curated registry of 16 free geospatial datasets across 5 categories
+  - Terrain: Copernicus DEM GLO-30, USGS 3DEP (1m), NASA SRTM, Mapzen terrain tiles
+  - Buildings: OSM 3D Buildings, Overture Maps (2.3B footprints), Google Photorealistic 3D Tiles
+  - Imagery: Sentinel-2 L2A (10m), OpenStreetMap, Esri World Imagery, OpenAerialMap
+  - Point Clouds: OpenTopography, AHN4 Netherlands, USGS Entwine
+  - Vector: OpenMapTiles (MVT), Natural Earth
+  - REST API: `GET /api/v1/catalog`, `GET /api/v1/catalog/{id}`, filter by `?category=`
+- **Terrain Tile Server** — serves quantized-mesh terrain tiles from open DEM data
+  - Endpoint: `GET /api/v1/terrain/{z}/{x}/{y}` + `GET /api/v1/terrain/layer.json`
+  - Quantized-mesh binary encoding (CesiumJS-compatible)
+  - WGS84 ECEF bounding sphere computation
+  - Delta-encoded + zigzag-encoded vertex arrays
+  - High-water-mark triangle index encoding
+  - Edge indices for seamless tile stitching
+  - Auto-loads DEM tiles from disk, falls back to flat terrain
+- **Multi-Renderer Support** — switch between 3 rendering engines at runtime
+  - CesiumJS: 3D globe, quantized-mesh terrain, OGC 3D Tiles
+  - deck.gl: WebGL2 GPU-instanced visualization, loaders.gl 3D Tiles
+  - MapLibre GL JS: vector tiles, 3D terrain exaggeration, 3D buildings
+  - UI: renderer dropdown selector in top-right corner
+- **Frontend catalog panel** — browse datasets by category with metadata (provider, format, resolution, coverage, license)
+
+### Changed
+- `tiletopia-server` now depends on `tiletopia-terrain` for terrain tile generation
+- AppState includes `catalog: OpenDataCatalog` field
+- Added `gui/src/renderers.js` module for renderer abstraction
+
 ## [0.2.0] - 2026-05-08
 
 ### Added

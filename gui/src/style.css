@@ -278,3 +278,87 @@ nav {
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
 }
+
+/* ─── Renderer Selector ─────────────────────────────────── */
+
+#renderer-selector {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 100;
+  background: var(--sidebar);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+}
+
+#renderer-selector label {
+  color: var(--muted);
+}
+
+#renderer-choice {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 0.8rem;
+}
+
+/* ─── Renderer Cards ────────────────────────────────────── */
+
+.renderer-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin: 12px 0;
+}
+
+.renderer-card {
+  background: var(--sidebar);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.renderer-card h4 {
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+
+.renderer-card p {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-bottom: 10px;
+}
+
+.feature-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tag {
+  background: var(--bg);
+  color: var(--accent2);
+  border: 1px solid var(--border);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+}
+
+/* ─── Badge Variants ────────────────────────────────────── */
+
+.badge-success {
+  background: #1a4d2e;
+  color: #3fb950;
+}
+
+.badge-warning {
+  background: #4d3a1a;
+  color: #d29922;
+}

@@ -138,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
                 data_dir,
                 realtime: tiletopia_server::realtime::RealtimeState::new(),
                 demo: tiletopia_server::demo::DemoState::new(),
+                catalog: tiletopia_server::catalog::OpenDataCatalog::new(),
             });
 
             let app = tiletopia_server::router(state);

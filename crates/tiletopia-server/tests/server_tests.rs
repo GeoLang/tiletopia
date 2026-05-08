@@ -16,6 +16,7 @@ mod tests {
             data_dir: dir,
             realtime: tiletopia_server::realtime::RealtimeState::new(),
             demo: tiletopia_server::demo::DemoState::new(),
+            catalog: tiletopia_server::catalog::OpenDataCatalog::new(),
         })
     }
 

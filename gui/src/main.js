@@ -1,6 +1,7 @@
 import * as Cesium from 'cesium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
 import './style.css';
+import { setCesiumViewer, initRendererSelector, getRendererInfo } from './renderers.js';
 
 // API base URL (proxied in dev, same-origin in production)
 const API = '/api/v1';
@@ -27,6 +28,10 @@ const viewer = new Cesium.Viewer('cesium-container', {
 
 // Track loaded tilesets
 const loadedTilesets = new Map();
+
+// Wire up multi-renderer
+setCesiumViewer(viewer);
+initRendererSelector();
 
 // Check server health
 async function checkHealth() {
@@ -110,6 +115,7 @@ document.getElementById('upload-btn').addEventListener('click', async () => {
 
 const panelMap = {
   viewer: 'cesium-container',
+  catalog: 'panel-catalog',
   assets: 'cesium-container',
   jobs: 'cesium-container',
   measure: 'panel-measure',
@@ -128,6 +134,7 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     const targetId = panelMap[view];
     if (targetId) document.getElementById(targetId).classList.add('active');
     // Load data for panels
+    if (view === 'catalog') loadCatalog();
     if (view === 'measure') loadMeasurement();
     if (view === 'anomaly') loadAnomaly();
     if (view === 'clash') loadClash();
@@ -302,6 +309,67 @@ async function loadStories() {
           Auto-play: ${s.settings.auto_play ? 'Yes' : 'No'} · Loop: ${s.settings.loop_playback ? 'Yes' : 'No'} · Default duration: ${s.settings.default_slide_duration_secs}s
         </div>
       </div>`).join('')}
+    </div>`;
+  } catch(e) {
+    panel.innerHTML = `<div class="feature-panel"><p style="color:#f85149">Error: ${e.message}</p></div>`;
+  }
+}
+
+// ─── Data Catalog Panel ──────────────────────────────────────────────────────
+
+async function loadCatalog() {
+  const panel = document.getElementById('panel-catalog');
+  panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading...</p></div>';
+  try {
+    const res = await fetch(`${API}/catalog`);
+    const datasets = await res.json();
+    const renderers = getRendererInfo();
+
+    const categories = [...new Set(datasets.map(d => d.category))];
+    const grouped = {};
+    for (const cat of categories) {
+      grouped[cat] = datasets.filter(d => d.category === cat);
+    }
+
+    const categoryIcons = {
+      Terrain: '⛰️', Buildings: '🏢', Imagery: '🛰️',
+      PointCloud: '📍', Vector: '🗺️', Weather: '🌤️'
+    };
+
+    panel.innerHTML = `<div class="feature-panel">
+      <h2>📦 Open Data Catalog</h2>
+      <p class="subtitle">Curated open geospatial datasets — no subscriptions required. ${datasets.length} datasets across ${categories.length} categories.</p>
+
+      <div class="card-grid">
+        <div class="metric-card"><div class="label">Total Datasets</div><div class="value">${datasets.length}</div></div>
+        <div class="metric-card"><div class="label">Categories</div><div class="value">${categories.length}</div></div>
+        <div class="metric-card"><div class="label">Renderers</div><div class="value">${renderers.length}</div></div>
+        <div class="metric-card"><div class="label">Free / Open</div><div class="value">${datasets.filter(d => d.enabled).length}</div></div>
+      </div>
+
+      <h3 class="section-title">Multi-Renderer Support</h3>
+      <div class="renderer-grid">
+        ${renderers.map(r => `<div class="renderer-card">
+          <h4>${r.name}</h4>
+          <p>${r.description}</p>
+          <div class="feature-tags">${r.features.map(f => `<span class="tag">${f}</span>`).join('')}</div>
+        </div>`).join('')}
+      </div>
+
+      ${categories.map(cat => `
+        <h3 class="section-title">${categoryIcons[cat] || '📁'} ${cat}</h3>
+        <table class="data-table">
+          <thead><tr><th>Dataset</th><th>Provider</th><th>Format</th><th>Resolution</th><th>Coverage</th><th>Status</th></tr></thead>
+          <tbody>${grouped[cat].map(d => `<tr>
+            <td><strong>${d.name}</strong><br><span style="color:var(--muted);font-size:0.75rem">${d.description.slice(0,80)}…</span></td>
+            <td>${d.provider}</td>
+            <td><span class="badge">${d.format}</span></td>
+            <td>${d.resolution || '—'}</td>
+            <td>${d.coverage.scope === 'Global' ? '🌍 Global' : d.coverage.scope.Regional || d.coverage.scope.National || 'Local'}</td>
+            <td>${d.enabled ? '<span class="badge badge-success">Ready</span>' : '<span class="badge badge-warning">API Key</span>'}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      `).join('')}
     </div>`;
   } catch(e) {
     panel.innerHTML = `<div class="feature-panel"><p style="color:#f85149">Error: ${e.message}</p></div>`;

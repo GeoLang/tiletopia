@@ -12,6 +12,7 @@
     <h1>🌍 TileTopia</h1>
     <nav>
       <button class="nav-btn active" data-view="viewer">3D Viewer</button>
+      <button class="nav-btn" data-view="catalog">📦 Data Catalog</button>
       <button class="nav-btn" data-view="assets">Assets</button>
       <button class="nav-btn" data-view="jobs">Jobs</button>
       <button class="nav-btn" data-view="measure">📏 Measurement</button>
@@ -33,11 +34,20 @@
   </aside>
   <main id="main-content">
     <div id="cesium-container" class="panel active"></div>
+    <div id="panel-catalog" class="panel"></div>
     <div id="panel-measure" class="panel"></div>
     <div id="panel-anomaly" class="panel"></div>
     <div id="panel-clash" class="panel"></div>
     <div id="panel-admin" class="panel"></div>
     <div id="panel-stories" class="panel"></div>
+    <div id="renderer-selector">
+      <label>Renderer:</label>
+      <select id="renderer-choice">
+        <option value="cesium" selected>CesiumJS</option>
+        <option value="deckgl">deck.gl</option>
+        <option value="maplibre">MapLibre GL</option>
+      </select>
+    </div>
   </main>
 </div>
 <script type="module" src="/src/main.js"></script>

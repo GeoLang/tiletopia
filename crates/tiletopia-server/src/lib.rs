@@ -7,6 +7,7 @@ pub mod annotations;
 pub mod arvr;
 pub mod audit;
 pub mod auth;
+pub mod catalog;
 pub mod cicd;
 pub mod cluster;
 pub mod crdt;
@@ -29,6 +30,7 @@ pub mod stories;
 pub mod streaming;
 pub mod temporal;
 pub mod tenant;
+pub mod terrain_api;
 pub mod upload;
 pub mod webhook;
 pub mod whitelabel;
@@ -53,6 +55,7 @@ pub struct AppState {
     pub data_dir: std::path::PathBuf,
     pub realtime: realtime::RealtimeState,
     pub demo: demo::DemoState,
+    pub catalog: catalog::OpenDataCatalog,
 }
 
 /// A managed geospatial asset.
@@ -114,6 +117,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/health", get(health))
         .route("/metrics", get(metrics::metrics_handler))
         .merge(demo::demo_routes())
+        .merge(catalog::catalog_routes())
+        .merge(terrain_api::terrain_routes())
         .layer(middleware::from_fn(auth::auth_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)
