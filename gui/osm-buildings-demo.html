@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TileTopia — OSM Buildings Demo</title>
+<script src="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Cesium.js"></script>
+<link href="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; }
+  #app { display: flex; height: 100vh; }
+  #sidebar { width: 360px; background: #16213e; padding: 20px; overflow-y: auto; border-right: 1px solid #0f3460; }
+  #sidebar h1 { font-size: 1.4em; margin-bottom: 8px; color: #4fc3f7; }
+  #sidebar h2 { font-size: 1em; margin: 16px 0 8px; color: #81d4fa; }
+  #cesium-container { flex: 1; }
+  .info-card { background: #0f3460; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .info-card h3 { font-size: 0.85em; color: #4fc3f7; margin-bottom: 4px; }
+  .info-card p { font-size: 0.8em; line-height: 1.4; color: #b0bec5; }
+  .stat { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.8em; border-bottom: 1px solid #1a3a5e; }
+  .stat:last-child { border: none; }
+  .stat-label { color: #90a4ae; }
+  .stat-value { color: #4fc3f7; font-weight: 600; }
+  .tag-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .tag { background: #1a3a5e; border-radius: 4px; padding: 2px 6px; font-size: 0.7em; color: #81d4fa; }
+  #controls { margin-top: 16px; }
+  button { background: #4fc3f7; color: #1a1a2e; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; margin: 4px 4px 4px 0; }
+  button:hover { background: #81d4fa; }
+  button.secondary { background: #0f3460; color: #4fc3f7; border: 1px solid #4fc3f7; }
+  #log { background: #0d1b2a; border-radius: 6px; padding: 8px; margin-top: 12px; font-family: monospace; font-size: 0.7em; max-height: 200px; overflow-y: auto; }
+  .log-entry { padding: 2px 0; border-bottom: 1px solid #1a3a5e; }
+  .log-entry.success { color: #66bb6a; }
+  .log-entry.info { color: #81d4fa; }
+  .cesium-credit-logoContainer { display: none !important; }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <h1>🏢 OSM Buildings Demo</h1>
+    <p style="font-size:0.8em; color:#90a4ae; margin-bottom:12px;">Self-hosted 3D building extrusion from OpenStreetMap data — no Cesium Ion fees.</p>
+
+    <div class="info-card">
+      <h3>Pipeline</h3>
+      <p>OSM Overpass API → Parse → Extrude → 3D Tiles → Viewer</p>
+    </div>
+
+    <div class="info-card" id="stats-card">
+      <h3>Extrusion Stats</h3>
+      <div class="stat"><span class="stat-label">Buildings</span><span class="stat-value" id="stat-buildings">—</span></div>
+      <div class="stat"><span class="stat-label">Vertices</span><span class="stat-value" id="stat-vertices">—</span></div>
+      <div class="stat"><span class="stat-label">Triangles</span><span class="stat-value" id="stat-triangles">—</span></div>
+      <div class="stat"><span class="stat-label">BBox Height</span><span class="stat-value" id="stat-height">—</span></div>
+    </div>
+
+    <div class="info-card" id="building-card" style="display:none;">
+      <h3 id="building-name">Building</h3>
+      <div class="stat"><span class="stat-label">OSM ID</span><span class="stat-value" id="building-id">—</span></div>
+      <div class="stat"><span class="stat-label">Height</span><span class="stat-value" id="building-height">—</span></div>
+      <div class="stat"><span class="stat-label">Roof</span><span class="stat-value" id="building-roof">—</span></div>
+      <div class="stat"><span class="stat-label">Vertices</span><span class="stat-value" id="building-verts">—</span></div>
+      <div class="stat"><span class="stat-label">Triangles</span><span class="stat-value" id="building-tris">—</span></div>
+    </div>
+
+    <h2>Supported Tags</h2>
+    <div class="tag-list" id="tag-list"></div>
+
+    <h2>Roof Shapes</h2>
+    <div class="tag-list" id="roof-list"></div>
+
+    <div id="controls">
+      <h2>Actions</h2>
+      <button onclick="loadDemo()">🏗️ Load Demo Buildings</button>
+      <button onclick="flyToNYC()" class="secondary">✈️ Fly to NYC</button>
+      <button onclick="flyToParis()" class="secondary">✈️ Fly to Paris</button>
+      <button onclick="toggleWireframe()" class="secondary">🔲 Wireframe</button>
+    </div>
+
+    <div id="log"></div>
+  </aside>
+  <div id="cesium-container"></div>
+</div>
+
+<script>
+const API_BASE = 'http://localhost:3002/api/v1';
+let buildings = [];
+let wireframe = false;
+let entities = [];
+let primitives = [];
+
+// Initialize Cesium (no ion token needed — fully self-hosted)
+Cesium.Ion.defaultAccessToken = undefined;
+const viewer = new Cesium.Viewer('cesium-container', {
+  terrain: undefined,
+  baseLayerPicker: false,
+  geocoder: false,
+  animation: false,
+  timeline: false,
+  homeButton: false,
+  sceneModePicker: false,
+  navigationHelpButton: false,
+  infoBox: true,
+  selectionIndicator: true,
+  creditContainer: document.createElement('div'),
+  baseLayer: new Cesium.ImageryLayer(
+    new Cesium.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' })
+  ),
+});
+
+// Start at NYC
+viewer.camera.flyTo({
+  destination: Cesium.Cartesian3.fromDegrees(-73.985, 40.748, 800),
+  orientation: { heading: Cesium.Math.toRadians(30), pitch: Cesium.Math.toRadians(-35), roll: 0 },
+  duration: 0,
+});
+
+function log(msg, type = 'info') {
+  const el = document.getElementById('log');
+  const entry = document.createElement('div');
+  entry.className = `log-entry ${type}`;
+  entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.prepend(entry);
+}
+
+async function loadInfo() {
+  try {
+    const res = await fetch(`${API_BASE}/osm-buildings/info`);
+    const data = await res.json();
+    const tagList = document.getElementById('tag-list');
+    data.supported_tags.forEach(t => {
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = t;
+      tagList.appendChild(tag);
+    });
+    const roofList = document.getElementById('roof-list');
+    data.roof_shapes.forEach(r => {
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = r;
+      roofList.appendChild(tag);
+    });
+    log('Connected to TileTopia OSM Buildings API', 'success');
+  } catch (e) {
+    log('API unavailable — using local demo data', 'info');
+    // Fallback: show tags locally
+    ['building','height','min_height','building:levels','roof:shape','roof:height','name'].forEach(t => {
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = t;
+      document.getElementById('tag-list').appendChild(tag);
+    });
+    ['flat','gabled','hipped','pyramidal'].forEach(r => {
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = r;
+      document.getElementById('roof-list').appendChild(tag);
+    });
+  }
+}
+
+async function loadDemo() {
+  log('Fetching extruded buildings from TileTopia...');
+  try {
+    const res = await fetch(`${API_BASE}/osm-buildings/extrude`);
+    const data = await res.json();
+    document.getElementById('stat-buildings').textContent = data.buildings_extruded;
+    document.getElementById('stat-vertices').textContent = data.total_vertices.toLocaleString();
+    document.getElementById('stat-triangles').textContent = data.total_triangles.toLocaleString();
+    document.getElementById('stat-height').textContent = `${data.bounding_box.max[2].toFixed(1)}m`;
+
+    if (data.sample) {
+      document.getElementById('building-card').style.display = 'block';
+      document.getElementById('building-name').textContent = data.sample.name || 'Building';
+      document.getElementById('building-id').textContent = data.sample.osm_id;
+      document.getElementById('building-height').textContent = `${data.sample.height}m`;
+      document.getElementById('building-verts').textContent = data.sample.vertex_count;
+      document.getElementById('building-tris').textContent = data.sample.triangle_count;
+    }
+    log(`Extruded ${data.buildings_extruded} building(s): ${data.total_vertices} verts, ${data.total_triangles} tris`, 'success');
+    renderBuildings(data);
+  } catch (e) {
+    log('Using local fallback demo buildings');
+    renderFallbackBuildings();
+  }
+}
+
+function renderBuildings(data) {
+  // Clear previous
+  entities.forEach(e => viewer.entities.remove(e));
+  entities = [];
+  primitives.forEach(p => viewer.scene.primitives.remove(p));
+  primitives = [];
+
+  if (!data.meshes || data.meshes.length === 0) {
+    log('No mesh data — falling back to box rendering');
+    renderFallbackBoxes(data);
+    return;
+  }
+
+  // Render each building mesh as a Cesium Primitive with actual polygon geometry
+  data.meshes.forEach(mesh => {
+    if (!mesh.vertices || mesh.vertices.length === 0) return;
+
+    // Reference point (first vertex lon/lat) for local coordinate system
+    const refLon = mesh.vertices[0][0];
+    const refLat = mesh.vertices[0][1];
+    const refCartographic = Cesium.Cartographic.fromDegrees(refLon, refLat, 0);
+    const refCartesian = Cesium.Cartesian3.fromRadians(refCartographic.longitude, refCartographic.latitude, 0);
+
+    // Build position array: convert each vertex from [lon, lat, z_meters] to Cartesian3
+    const positions = new Float64Array(mesh.vertices.length * 3);
+    for (let i = 0; i < mesh.vertices.length; i++) {
+      const [lon, lat, z] = mesh.vertices[i];
+      const cart = Cesium.Cartesian3.fromDegrees(lon, lat, z);
+      positions[i * 3] = cart.x;
+      positions[i * 3 + 1] = cart.y;
+      positions[i * 3 + 2] = cart.z;
+    }
+
+    // Build normal array
+    let normals;
+    if (mesh.normals && mesh.normals.length === mesh.vertices.length) {
+      normals = new Float32Array(mesh.normals.length * 3);
+      for (let i = 0; i < mesh.normals.length; i++) {
+        normals[i * 3] = mesh.normals[i][0];
+        normals[i * 3 + 1] = mesh.normals[i][1];
+        normals[i * 3 + 2] = mesh.normals[i][2];
+      }
+    }
+
+    // Build index array
+    const indices = new Uint32Array(mesh.triangles.length * 3);
+    for (let i = 0; i < mesh.triangles.length; i++) {
+      indices[i * 3] = mesh.triangles[i][0];
+      indices[i * 3 + 1] = mesh.triangles[i][1];
+      indices[i * 3 + 2] = mesh.triangles[i][2];
+    }
+
+    const wallColor = Cesium.Color.fromBytes(mesh.wall_color[0], mesh.wall_color[1], mesh.wall_color[2], 220);
+
+    const geometry = new Cesium.Geometry({
+      attributes: {
+        position: new Cesium.GeometryAttribute({
+          componentDatatype: Cesium.ComponentDatatype.DOUBLE,
+          componentsPerAttribute: 3,
+          values: positions,
+        }),
+        ...(normals ? {
+          normal: new Cesium.GeometryAttribute({
+            componentDatatype: Cesium.ComponentDatatype.FLOAT,
+            componentsPerAttribute: 3,
+            values: normals,
+          }),
+        } : {}),
+      },
+      indices: indices,
+      primitiveType: Cesium.PrimitiveType.TRIANGLES,
+      boundingSphere: Cesium.BoundingSphere.fromVertices(Array.from(positions)),
+    });
+
+    const instance = new Cesium.GeometryInstance({
+      geometry: geometry,
+      attributes: {
+        color: Cesium.ColorGeometryInstanceAttribute.fromColor(wallColor),
+      },
+    });
+
+    const primitive = viewer.scene.primitives.add(new Cesium.Primitive({
+      geometryInstances: instance,
+      appearance: new Cesium.PerInstanceColorAppearance({
+        flat: !normals,
+        translucent: true,
+      }),
+      asynchronous: false,
+    }));
+    primitives.push(primitive);
+  });
+
+  log(`Rendered ${primitives.length} building mesh(es) as 3D primitives`, 'success');
+}
+
+function renderFallbackBoxes(data) {
+  const bldg = data.sample;
+  if (!bldg) return;
+
+  const lon = -73.9845;
+  const lat = 40.7485;
+  const height = bldg.height || 443;
+  const wallColor = bldg.wall_color ? Cesium.Color.fromBytes(bldg.wall_color[0], bldg.wall_color[1], bldg.wall_color[2], 220) : Cesium.Color.LIGHTGRAY.withAlpha(0.85);
+  const roofColor = bldg.roof_color ? Cesium.Color.fromBytes(bldg.roof_color[0], bldg.roof_color[1], bldg.roof_color[2], 255) : Cesium.Color.DARKGRAY;
+
+  const entity = viewer.entities.add({
+    name: bldg.name || 'OSM Building',
+    position: Cesium.Cartesian3.fromDegrees(lon, lat, height / 2),
+    box: {
+      dimensions: new Cesium.Cartesian3(100, 60, height),
+      material: wireframe ? Cesium.Color.CYAN.withAlpha(0.3) : wallColor,
+      outline: true,
+      outlineColor: Cesium.Color.fromBytes(100, 150, 200, 255),
+    },
+  });
+  entities.push(entity);
+}
+
+function renderFallbackBuildings() {
+  document.getElementById('stat-buildings').textContent = '8';
+  document.getElementById('stat-vertices').textContent = '208';
+  document.getElementById('stat-triangles').textContent = '128';
+  document.getElementById('stat-height').textContent = '443m';
+  document.getElementById('building-card').style.display = 'block';
+  document.getElementById('building-name').textContent = 'Empire State Building';
+  document.getElementById('building-id').textContent = '1001';
+  document.getElementById('building-height').textContent = '443m';
+  document.getElementById('building-verts').textContent = '26';
+  document.getElementById('building-tris').textContent = '16';
+
+  renderFallbackBoxes({ sample: { name: 'Empire State Building', osm_id: 1001, height: 443, wall_color: [212, 197, 169], roof_color: [139, 115, 85], vertex_count: 26, triangle_count: 16 } });
+}
+
+function flyToNYC() {
+  viewer.camera.flyTo({
+    destination: Cesium.Cartesian3.fromDegrees(-73.985, 40.748, 800),
+    orientation: { heading: Cesium.Math.toRadians(30), pitch: Cesium.Math.toRadians(-35), roll: 0 },
+    duration: 2,
+  });
+  log('Flying to NYC (Empire State Building)');
+}
+
+function flyToParis() {
+  viewer.camera.flyTo({
+    destination: Cesium.Cartesian3.fromDegrees(2.349, 48.864, 600),
+    orientation: { heading: Cesium.Math.toRadians(0), pitch: Cesium.Math.toRadians(-30), roll: 0 },
+    duration: 2,
+  });
+  log('Flying to Paris');
+}
+
+function toggleWireframe() {
+  wireframe = !wireframe;
+  log(`Wireframe: ${wireframe ? 'ON' : 'OFF'}`);
+  // Re-render with wireframe style
+  if (entities.length > 0) loadDemo();
+}
+
+// Initialize
+loadInfo();
+log('TileTopia OSM Buildings viewer initialized');
+log('Click "Load Demo Buildings" to extrude and render');
+</script>
+</body>
+</html>

@@ -928,6 +928,24 @@ async fn extrude_osm_buildings() -> Json<serde_json::Value> {
         output_format: None,
     };
     let result = osm_buildings::extrude_buildings(&buildings, &request);
+    let meshes: Vec<serde_json::Value> = result
+        .buildings
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "osm_id": b.osm_id,
+                "name": b.name,
+                "height": b.height,
+                "min_height": b.min_height,
+                "wall_color": b.wall_color,
+                "roof_color": b.roof_color,
+                "roof_shape": format!("{:?}", b.roof_shape),
+                "vertices": b.vertices.iter().map(|v| [v.x, v.y, v.z]).collect::<Vec<_>>(),
+                "normals": b.normals,
+                "triangles": b.triangles.iter().map(|t| [t.v0, t.v1, t.v2]).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
     Json(serde_json::json!({
         "buildings_extruded": result.buildings.len(),
         "total_vertices": result.total_vertices,
@@ -936,6 +954,7 @@ async fn extrude_osm_buildings() -> Json<serde_json::Value> {
             "min": result.bounding_box.min,
             "max": result.bounding_box.max,
         },
+        "meshes": meshes,
         "sample": result.buildings.first().map(|b| serde_json::json!({
             "osm_id": b.osm_id,
             "name": b.name,
