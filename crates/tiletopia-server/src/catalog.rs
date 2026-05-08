@@ -96,7 +96,11 @@ impl OpenDataCatalog {
     /// List all datasets, optionally filtered by category.
     pub fn list(&self, category: Option<&DatasetCategory>) -> Vec<&CatalogDataset> {
         match category {
-            Some(cat) => self.datasets.iter().filter(|d| &d.category == cat).collect(),
+            Some(cat) => self
+                .datasets
+                .iter()
+                .filter(|d| &d.category == cat)
+                .collect(),
             None => self.datasets.iter().collect(),
         }
     }
@@ -357,7 +361,9 @@ async fn list_datasets(
         "weather" => Some(DatasetCategory::Weather),
         _ => None,
     });
-    let datasets: Vec<CatalogDataset> = state.catalog.list(category.as_ref())
+    let datasets: Vec<CatalogDataset> = state
+        .catalog
+        .list(category.as_ref())
         .into_iter()
         .cloned()
         .collect();

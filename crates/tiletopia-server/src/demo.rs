@@ -239,15 +239,28 @@ async fn measurement_handler() -> Json<MeasurementResult> {
 
     let mesh = Surface {
         vertices: vec![
-            MeasurePoint::new(0.0, 0.0, 0.0), MeasurePoint::new(10.0, 0.0, 0.0),
-            MeasurePoint::new(10.0, 10.0, 0.0), MeasurePoint::new(0.0, 10.0, 0.0),
-            MeasurePoint::new(0.0, 0.0, 5.0), MeasurePoint::new(10.0, 0.0, 5.0),
-            MeasurePoint::new(10.0, 10.0, 5.0), MeasurePoint::new(0.0, 10.0, 5.0),
+            MeasurePoint::new(0.0, 0.0, 0.0),
+            MeasurePoint::new(10.0, 0.0, 0.0),
+            MeasurePoint::new(10.0, 10.0, 0.0),
+            MeasurePoint::new(0.0, 10.0, 0.0),
+            MeasurePoint::new(0.0, 0.0, 5.0),
+            MeasurePoint::new(10.0, 0.0, 5.0),
+            MeasurePoint::new(10.0, 10.0, 5.0),
+            MeasurePoint::new(0.0, 10.0, 5.0),
         ],
         triangles: vec![
-            [0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6],
-            [0, 4, 5], [0, 5, 1], [2, 6, 7], [2, 7, 3],
-            [0, 3, 7], [0, 7, 4], [1, 5, 6], [1, 6, 2],
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 6, 5],
+            [4, 7, 6],
+            [0, 4, 5],
+            [0, 5, 1],
+            [2, 6, 7],
+            [2, 7, 3],
+            [0, 3, 7],
+            [0, 7, 4],
+            [1, 5, 6],
+            [1, 6, 2],
         ],
     };
 
@@ -335,8 +348,10 @@ async fn anomaly_handler() -> Json<AnomalyResult> {
     let deformations = detect_deformation(&epoch1, &epoch2, &config);
 
     let boundary = vec![
-        [5.0, 5.0, 0.0], [6.0, 5.0, 0.0],
-        [6.0, 6.0, 0.0], [5.0, 6.0, 0.0],
+        [5.0, 5.0, 0.0],
+        [6.0, 5.0, 0.0],
+        [6.0, 6.0, 0.0],
+        [5.0, 6.0, 0.0],
     ];
     let encroach_config = AnomalyConfig {
         encroachment_distance: 2.0,
@@ -367,9 +382,16 @@ async fn anomaly_handler() -> Json<AnomalyResult> {
         deformation_alerts: deformations
             .iter()
             .map(|d| DeformationAlert {
-                grid_cell: [(d.location[0] / 5.0) as usize, (d.location[1] / 5.0) as usize],
+                grid_cell: [
+                    (d.location[0] / 5.0) as usize,
+                    (d.location[1] / 5.0) as usize,
+                ],
                 delta_m: (d.severity * 0.5 * 1000.0).round() / 1000.0,
-                severity: if d.severity > 0.6 { "HIGH".into() } else { "MEDIUM".into() },
+                severity: if d.severity > 0.6 {
+                    "HIGH".into()
+                } else {
+                    "MEDIUM".into()
+                },
             })
             .collect(),
         encroachment_alerts: vec![EncroachmentAlert {
@@ -469,18 +491,40 @@ async fn clash_handler() -> Json<ClashResult> {
 
     let clashes = detect_element_clashes(&elements, &config);
 
-    let hard_count = clashes.iter().filter(|c| matches!(c.clash_type, ClashType::HardClash)).count();
-    let soft_count = clashes.iter().filter(|c| matches!(c.clash_type, ClashType::SoftClash)).count();
+    let hard_count = clashes
+        .iter()
+        .filter(|c| matches!(c.clash_type, ClashType::HardClash))
+        .count();
+    let soft_count = clashes
+        .iter()
+        .filter(|c| matches!(c.clash_type, ClashType::SoftClash))
+        .count();
 
     Json(ClashResult {
         clashes: clashes
             .iter()
             .map(|c| ClashItem {
-                clash_type: match c.clash_type { ClashType::HardClash => "HARD".into(), ClashType::SoftClash => "SOFT".into(), _ => "OTHER".into() },
+                clash_type: match c.clash_type {
+                    ClashType::HardClash => "HARD".into(),
+                    ClashType::SoftClash => "SOFT".into(),
+                    _ => "OTHER".into(),
+                },
                 element_a: c.element_a.clone(),
                 element_b: c.element_b.clone().unwrap_or_default(),
-                detail: format!("{}: {:.3}m", match c.clash_type { ClashType::HardClash => "Overlap", ClashType::SoftClash => "Clearance", _ => "Other" }, c.distance),
-                severity: match c.clash_type { ClashType::HardClash => "Critical".into(), ClashType::SoftClash => "Warning".into(), _ => "Info".into() },
+                detail: format!(
+                    "{}: {:.3}m",
+                    match c.clash_type {
+                        ClashType::HardClash => "Overlap",
+                        ClashType::SoftClash => "Clearance",
+                        _ => "Other",
+                    },
+                    c.distance
+                ),
+                severity: match c.clash_type {
+                    ClashType::HardClash => "Critical".into(),
+                    ClashType::SoftClash => "Warning".into(),
+                    _ => "Info".into(),
+                },
             })
             .collect(),
         total_elements: elements.len(),
@@ -544,9 +588,18 @@ async fn rbac_handler(State(state): State<Arc<AppState>>) -> Json<RbacInfo> {
     let _ = &state.demo.rbac_store;
     Json(RbacInfo {
         users: vec![
-            UserInfo { email: "admin@company.com".into(), role: "Admin".into() },
-            UserInfo { email: "sarah@company.com".into(), role: "Editor".into() },
-            UserInfo { email: "client@external.io".into(), role: "Viewer".into() },
+            UserInfo {
+                email: "admin@company.com".into(),
+                role: "Admin".into(),
+            },
+            UserInfo {
+                email: "sarah@company.com".into(),
+                role: "Editor".into(),
+            },
+            UserInfo {
+                email: "client@external.io".into(),
+                role: "Viewer".into(),
+            },
         ],
         provider: "auth0.com/company".into(),
     })

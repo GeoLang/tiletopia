@@ -3442,7 +3442,7 @@ dependencies = [
 
 [[package]]
 name = "tiletopia-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3462,7 +3462,7 @@ dependencies = [
 
 [[package]]
 name = "tiletopia-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "memmap2",
@@ -3478,7 +3478,7 @@ dependencies = [
 
 [[package]]
 name = "tiletopia-ingest"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "gltf",
  "las",
@@ -3494,7 +3494,7 @@ dependencies = [
 
 [[package]]
 name = "tiletopia-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "axum-extra",
@@ -3521,7 +3521,7 @@ dependencies = [
 
 [[package]]
 name = "tiletopia-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -3538,7 +3538,7 @@ dependencies = [
 
 [[package]]
 name = "tiletopia-terrain"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rayon",
  "serde",
@@ -3550,7 +3550,7 @@ dependencies = [
 
 [[package]]
 name = "tiletopia-worker"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "rayon",

@@ -12,9 +12,7 @@ use axum::{
 };
 use serde::Serialize;
 use std::sync::Arc;
-use tiletopia_terrain::global_dem::{
-    DemTile, TerrainTileCoord, generate_terrain_tile,
-};
+use tiletopia_terrain::global_dem::{DemTile, TerrainTileCoord, generate_terrain_tile};
 
 use crate::AppState;
 
@@ -115,16 +113,15 @@ async fn serve_terrain_tile(
 }
 
 /// Load DEM tiles from disk for the given bounds.
-fn load_dem_tiles_for_bounds(
-    data_dir: &std::path::Path,
-    bounds: [f64; 4],
-) -> Vec<DemTile> {
+fn load_dem_tiles_for_bounds(data_dir: &std::path::Path, bounds: [f64; 4]) -> Vec<DemTile> {
     let required = tiletopia_terrain::global_dem::required_dem_tiles(bounds);
     let mut tiles = Vec::new();
 
     for (lat, lon) in required {
         let dem_path = data_dir.join(format!("dem/{}_{}.bin", lat, lon));
-        if dem_path.exists() && let Ok(tile) = load_dem_tile_from_file(&dem_path, lat, lon) {
+        if dem_path.exists()
+            && let Ok(tile) = load_dem_tile_from_file(&dem_path, lat, lon)
+        {
             tiles.push(tile);
         }
     }
@@ -132,11 +129,7 @@ fn load_dem_tiles_for_bounds(
 }
 
 /// Load a single DEM tile from a binary file (simple format: f32 elevation array).
-fn load_dem_tile_from_file(
-    path: &std::path::Path,
-    lat: i32,
-    lon: i32,
-) -> std::io::Result<DemTile> {
+fn load_dem_tile_from_file(path: &std::path::Path, lat: i32, lon: i32) -> std::io::Result<DemTile> {
     let data = std::fs::read(path)?;
     let samples = ((data.len() / 4) as f64).sqrt() as u32;
 
@@ -174,9 +167,12 @@ fn encode_quantized_mesh(
     buf.extend_from_slice(&cz.to_le_bytes()); // CenterZ
 
     // Find min/max elevation
-    let (min_h, max_h): (f64, f64) = mesh.vertices.iter().fold((f64::MAX, f64::MIN), |(mn, mx): (f64, f64), v| {
-        (mn.min(v[2]), mx.max(v[2]))
-    });
+    let (min_h, max_h): (f64, f64) = mesh
+        .vertices
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(mn, mx): (f64, f64), v| {
+            (mn.min(v[2]), mx.max(v[2]))
+        });
     buf.extend_from_slice(&(min_h as f32).to_le_bytes()); // MinimumHeight
     buf.extend_from_slice(&(max_h as f32).to_le_bytes()); // MaximumHeight
 
@@ -199,7 +195,11 @@ fn encode_quantized_mesh(
     // Quantize positions to u16 (0..32767)
     let lon_range = bounds[2] - bounds[0];
     let lat_range = bounds[3] - bounds[1];
-    let h_range: f64 = if (max_h - min_h).abs() < 1e-6 { 1.0 } else { max_h - min_h };
+    let h_range: f64 = if (max_h - min_h).abs() < 1e-6 {
+        1.0
+    } else {
+        max_h - min_h
+    };
 
     // u (longitude) array - delta encoded
     let mut u_values: Vec<u16> = Vec::with_capacity(mesh.vertices.len());
@@ -239,7 +239,11 @@ fn encode_quantized_mesh(
     buf.extend_from_slice(&triangle_count.to_le_bytes());
 
     // Use 16-bit indices (high-water mark encoded)
-    let flat_indices: Vec<u32> = mesh.indices.iter().flat_map(|t: &[u32; 3]| t.iter().copied()).collect();
+    let flat_indices: Vec<u32> = mesh
+        .indices
+        .iter()
+        .flat_map(|t: &[u32; 3]| t.iter().copied())
+        .collect();
     let hwm_indices = high_water_mark_encode(&flat_indices);
     for idx in &hwm_indices {
         buf.extend_from_slice(&(*idx as u16).to_le_bytes());
@@ -399,7 +403,11 @@ mod tests {
             bounds: [10.0, 45.0, 11.0, 46.0],
             zoom: 5,
         };
-        let coord = TerrainTileCoord { zoom: 5, x: 17, y: 11 };
+        let coord = TerrainTileCoord {
+            zoom: 5,
+            x: 17,
+            y: 11,
+        };
         let bytes = encode_quantized_mesh(&mesh, &coord);
         // Should produce non-empty binary
         assert!(bytes.len() > 88); // At least header size
