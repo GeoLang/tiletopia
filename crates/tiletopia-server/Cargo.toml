@@ -36,7 +36,9 @@ geo-types = { workspace = true }
 tiff = { workspace = true }
 aws-sdk-s3 = { workspace = true }
 aws-config = { workspace = true }
+sqlx = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
+tiletopia-store = { path = "../tiletopia-store" }

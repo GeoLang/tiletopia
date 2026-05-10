@@ -6,6 +6,7 @@
 pub mod bim_reader;
 pub mod citygml_reader;
 pub mod cityjson_reader;
+pub mod crs_detect;
 pub mod dted_reader;
 pub mod e57_reader;
 pub mod fbx_reader;
@@ -14,6 +15,7 @@ pub mod gltf_reader;
 pub mod gpkg_reader;
 pub mod hgt_reader;
 pub mod ifc_reader;
+pub mod imagery_tiler;
 pub mod kml_reader;
 pub mod las_reader;
 pub mod obj_reader;
@@ -106,6 +108,25 @@ pub fn read_point_cloud(path: &std::path::Path) -> Result<Vec<Point3D>, IngestEr
         Some(ext) => Err(IngestError::UnsupportedFormat(ext.to_string())),
         None => Err(IngestError::UnsupportedFormat("unknown".to_string())),
     }
+}
+
+/// Read a point cloud file and reproject to WGS84 if needed.
+pub fn read_point_cloud_wgs84(path: &std::path::Path) -> Result<Vec<Point3D>, IngestError> {
+    let mut points = read_point_cloud(path)?;
+    let crs = crs_detect::detect_crs(path);
+    if !matches!(
+        crs,
+        crs_detect::DetectedCrs::Wgs84 | crs_detect::DetectedCrs::Unknown
+    ) {
+        let mut coords: Vec<[f64; 3]> = points.iter().map(|p| [p.x, p.y, p.z]).collect();
+        crs_detect::reproject_to_wgs84(&mut coords, &crs);
+        for (p, c) in points.iter_mut().zip(coords.iter()) {
+            p.x = c[0];
+            p.y = c[1];
+            p.z = c[2];
+        }
+    }
+    Ok(points)
 }
 
 /// Read vector features from a GeoJSON, Shapefile, KML, or GeoPackage.

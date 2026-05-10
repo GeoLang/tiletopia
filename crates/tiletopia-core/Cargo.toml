@@ -27,3 +27,7 @@ meshopt = { workspace = true }
 bytemuck = { workspace = true }
 draco-rs = { workspace = true, optional = true }
 libloading = { version = "0.8", optional = true }
+image = { workspace = true }
+
+[dev-dependencies]
+gltf = { workspace = true }

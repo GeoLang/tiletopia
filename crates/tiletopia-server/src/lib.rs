@@ -3,6 +3,7 @@
 //! Serves 3D Tiles tilesets, manages assets, streams tiles with
 //! view-dependent LOD, and provides WebSocket for real-time data.
 
+pub mod admin;
 pub mod annotations;
 pub mod api_keys;
 pub mod arvr;
@@ -18,6 +19,7 @@ pub mod cog;
 pub mod collaboration;
 pub mod crdt;
 pub mod dashboard;
+pub mod db;
 pub mod demo;
 pub mod elevation;
 pub mod encryption;
@@ -31,8 +33,10 @@ pub mod geofence;
 pub mod geoprocessing;
 pub mod geostatistics;
 pub mod indoor;
+pub mod ion_compat;
 pub mod isochrone;
 pub mod issue_tracking;
+pub mod job_queue;
 pub mod map_matching;
 pub mod map_tiles;
 pub mod marketplace;
@@ -43,6 +47,7 @@ pub mod multispectral;
 pub mod offline_export;
 pub mod osm_buildings;
 pub mod photogrammetry;
+pub mod plugin_registry;
 pub mod plugins;
 pub mod premium_routes;
 pub mod priority_queue;
@@ -57,12 +62,14 @@ pub mod scripting;
 pub mod stac;
 pub mod static_map;
 pub mod stories;
+pub mod stories_api;
 pub mod streaming;
 pub mod temporal;
 pub mod tenant;
 pub mod terrain_analysis;
 pub mod terrain_api;
 pub mod upload;
+pub mod users;
 pub mod versioning;
 pub mod webhook;
 pub mod webhooks;
@@ -79,17 +86,20 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::time::Instant;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 /// Server application state.
 pub struct AppState {
-    pub assets: RwLock<Vec<Asset>>,
+    pub db: Arc<db::Database>,
+    pub store: Arc<dyn tiletopia_store::TileStore>,
     pub data_dir: std::path::PathBuf,
+    pub job_queue: Arc<job_queue::JobQueue>,
     pub realtime: realtime::RealtimeState,
     pub demo: demo::DemoState,
     pub catalog: catalog::OpenDataCatalog,
+    pub started_at: Instant,
 }
 
 /// A managed geospatial asset.
@@ -102,6 +112,10 @@ pub struct Asset {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub tile_count: u64,
     pub size_bytes: u64,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +138,31 @@ pub enum AssetStatus {
 
 /// Build the Axum router.
 pub fn router(state: Arc<AppState>) -> Router {
+    // Auth routes — placed BEFORE the auth middleware layer so they don't require auth
+    let auth_routes = Router::new()
+        .route("/api/v1/auth/signup", axum::routing::post(users::signup))
+        .route("/api/v1/auth/login", axum::routing::post(users::login));
+
+    // Admin routes — require Admin role
+    let admin_routes = Router::new()
+        .route("/api/v1/admin/stats", get(admin::get_stats))
+        .route("/api/v1/admin/health", get(admin::get_health))
+        .route("/api/v1/admin/users", get(admin::list_users))
+        .route("/api/v1/admin/jobs", get(admin::list_jobs))
+        .route(
+            "/api/v1/admin/users/{id}",
+            axum::routing::delete(admin::delete_user),
+        )
+        .layer(middleware::from_fn(users::require_admin));
+
+    // Org routes (admin only)
+    let org_routes = Router::new()
+        .route(
+            "/api/v1/orgs",
+            get(users::list_orgs).post(users::create_org),
+        )
+        .layer(middleware::from_fn(users::require_admin));
+
     Router::new()
         .route(
             "/api/v1/assets",
@@ -132,10 +171,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/assets/{id}", get(get_asset).delete(delete_asset))
         .route("/api/v1/assets/{id}/tileset.json", get(get_tileset))
         .route("/api/v1/assets/{id}/tiles/{path}", get(get_tile))
+        .route("/api/v1/assets/{id}/thumbnail", get(get_thumbnail))
         .route(
             "/api/v1/assets/{id}/tile",
             axum::routing::post(start_tiling),
         )
+        .route(
+            "/api/v1/assets/{id}/annotations",
+            get(list_annotations).post(create_annotation),
+        )
+        .route(
+            "/api/v1/assets/{id}/annotations/{annotation_id}",
+            axum::routing::delete(delete_annotation),
+        )
+        .route("/api/v1/jobs/{id}", get(get_job_status))
         .route(
             "/api/v1/assets/{id}/upload/init",
             axum::routing::post(streaming::init_streaming_upload),
@@ -148,6 +197,9 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/v1/assets/{id}/upload/complete",
             axum::routing::post(streaming::complete_streaming_upload),
         )
+        .route("/api/v1/users/me", get(users::get_me).put(users::update_me))
+        .merge(admin_routes)
+        .merge(org_routes)
         .route("/api/v1/health", get(health))
         .route("/metrics", get(metrics::metrics_handler))
         .merge(demo::demo_routes())
@@ -186,7 +238,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::geostatistics_routes())
         .merge(premium_routes::multispectral_routes())
         .merge(premium_routes::osm_buildings_routes())
+        .merge(stories_api::story_routes())
+        .merge(catalog::add_dataset_routes())
+        .merge(plugin_registry::plugin_registry_routes())
+        .merge(ion_compat::ion_compat_routes())
         .layer(middleware::from_fn(auth::auth_middleware))
+        .merge(auth_routes)
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -198,20 +255,53 @@ async fn health() -> Json<serde_json::Value> {
     }))
 }
 
-async fn list_assets(State(state): State<Arc<AppState>>) -> Json<Vec<Asset>> {
-    let assets = state.assets.read().await;
-    Json(assets.clone())
+#[derive(Debug, Deserialize)]
+pub struct AssetQuery {
+    pub q: Option<String>,
+    pub tag: Option<String>,
+    pub asset_type: Option<String>,
+    pub status: Option<String>,
+}
+
+async fn list_assets(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<AssetQuery>,
+) -> Result<Json<Vec<Asset>>, StatusCode> {
+    let has_filter = query.q.is_some()
+        || query.tag.is_some()
+        || query.asset_type.is_some()
+        || query.status.is_some();
+
+    let assets = if has_filter {
+        state
+            .db
+            .search_assets(
+                query.q.as_deref(),
+                query.tag.as_deref(),
+                query.asset_type.as_deref(),
+                query.status.as_deref(),
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    } else {
+        state
+            .db
+            .list_assets()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+    Ok(Json(assets))
 }
 
 async fn get_asset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Asset>, StatusCode> {
-    let assets = state.assets.read().await;
-    assets
-        .iter()
-        .find(|a| a.id == id)
-        .cloned()
+    state
+        .db
+        .get_asset(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }
@@ -220,12 +310,11 @@ async fn delete_asset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode> {
-    let mut assets = state.assets.write().await;
-    let pos = assets
-        .iter()
-        .position(|a| a.id == id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    assets.remove(pos);
+    state
+        .db
+        .delete_asset(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Remove asset directory
     let asset_dir = state.data_dir.join(id.to_string());
@@ -238,12 +327,14 @@ async fn get_tileset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<tiletopia_core::Tileset>, StatusCode> {
-    let tileset_path = state.data_dir.join(id.to_string()).join("tileset.json");
-    let data = tokio::fs::read_to_string(&tileset_path)
+    let key = format!("{}/tileset.json", id);
+    let data = state
+        .store
+        .get(&key)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
     let tileset: tiletopia_core::Tileset =
-        serde_json::from_str(&data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        serde_json::from_slice(&data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(tileset))
 }
 
@@ -255,86 +346,209 @@ async fn get_tile(
     if tile_path.contains("..") {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let file_path = state
-        .data_dir
-        .join(id.to_string())
-        .join("tiles")
-        .join(&tile_path);
-    tokio::fs::read(&file_path)
+    let key = format!("{}/tiles/{}", id, tile_path);
+    let data = state
+        .store
+        .get(&key)
         .await
-        .map_err(|_| StatusCode::NOT_FOUND)
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok(data.to_vec())
 }
 
 /// Start a tiling job for an uploaded asset.
 async fn start_tiling(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+) -> Result<(StatusCode, Json<db::JobRecord>), StatusCode> {
+    // Check asset exists
+    state
+        .db
+        .get_asset(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Find the input file
+    let input_dir = state.data_dir.join(id.to_string()).join("input");
+    let mut entries = tokio::fs::read_dir(&input_dir)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let input_path = entries
+        .next_entry()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?
+        .path()
+        .to_string_lossy()
+        .to_string();
+
+    let job = state
+        .job_queue
+        .submit(id, input_path)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+async fn get_job_status(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<db::JobRecord>, StatusCode> {
+    state
+        .db
+        .get_job(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+// ─── Annotation Endpoints ────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CreateAnnotation {
+    id: Option<String>,
+    text: String,
+    longitude: f64,
+    latitude: f64,
+    #[serde(default)]
+    height: f64,
+}
+
+async fn list_annotations(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<db::AnnotationRecord>>, StatusCode> {
+    let annotations = state
+        .db
+        .list_annotations(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(annotations))
+}
+
+async fn create_annotation(
+    State(state): State<Arc<AppState>>,
+    Path(asset_id): Path<Uuid>,
+    Json(body): Json<CreateAnnotation>,
+) -> Result<(StatusCode, Json<db::AnnotationRecord>), StatusCode> {
+    let ann = db::AnnotationRecord {
+        id: body
+            .id
+            .and_then(|s| Uuid::parse_str(&s).ok())
+            .unwrap_or_else(Uuid::new_v4),
+        asset_id,
+        text: body.text,
+        longitude: body.longitude,
+        latitude: body.latitude,
+        height: body.height,
+        created_at: chrono::Utc::now(),
+        created_by: None,
+    };
+    state
+        .db
+        .create_annotation(&ann)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((StatusCode::CREATED, Json(ann)))
+}
+
+async fn delete_annotation(
+    State(state): State<Arc<AppState>>,
+    Path((_asset_id, annotation_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, StatusCode> {
-    // Find the asset and update status
-    {
-        let mut assets = state.assets.write().await;
-        let asset = assets
-            .iter_mut()
-            .find(|a| a.id == id)
-            .ok_or(StatusCode::NOT_FOUND)?;
-        asset.status = AssetStatus::Tiling;
+    state
+        .db
+        .delete_annotation(annotation_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_thumbnail(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::header::HeaderName, &'static str); 1],
+        Vec<u8>,
+    ),
+    StatusCode,
+> {
+    let thumb_path = state.data_dir.join(id.to_string()).join("thumbnail.png");
+    let data = tokio::fs::read(&thumb_path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        data,
+    ))
+}
+
+/// Generate a simple top-down point cloud thumbnail (256×256 PNG).
+pub fn generate_point_cloud_thumbnail(
+    points: &[(f64, f64, f64)],
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    use image::{ImageBuffer, Rgba};
+
+    let mut img = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(width, height, Rgba([0, 0, 0, 255]));
+
+    if points.is_empty() {
+        let mut buf = Vec::new();
+        let encoder = image::codecs::png::PngEncoder::new(&mut buf);
+        image::ImageEncoder::write_image(
+            encoder,
+            img.as_raw(),
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap_or(());
+        return buf;
     }
 
-    // Spawn tiling job in background
-    let state_clone = Arc::clone(&state);
-    tokio::spawn(async move {
-        let asset_dir = state_clone.data_dir.join(id.to_string());
-        let input_dir = asset_dir.join("input");
-
-        // Find the input file
-        let mut entries = match tokio::fs::read_dir(&input_dir).await {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-        let input_path = match entries.next_entry().await {
-            Ok(Some(entry)) => entry.path(),
-            _ => return,
-        };
-
-        // Run tiling
-        let result = tokio::task::spawn_blocking(
-            move || -> Result<tiletopia_core::octree::OctreeStats, String> {
-                let points =
-                    tiletopia_ingest::read_point_cloud(&input_path).map_err(|e| e.to_string())?;
-                let octree_points: Vec<tiletopia_core::octree::OctreePoint> = points
-                    .into_iter()
-                    .map(|p| tiletopia_core::octree::OctreePoint {
-                        position: [p.x, p.y, p.z],
-                        color: [p.r, p.g, p.b],
-                        intensity: p.intensity,
-                        classification: p.classification,
-                    })
-                    .collect();
-
-                let config = tiletopia_core::tileset::TilingConfig::default();
-                tiletopia_core::tileset::tile_point_cloud(octree_points, &asset_dir, &config)
-                    .map_err(|e| e.to_string())
-            },
-        )
-        .await;
-
-        let mut assets = state_clone.assets.write().await;
-        if let Some(asset) = assets.iter_mut().find(|a| a.id == id) {
-            match result {
-                Ok(Ok(stats)) => {
-                    asset.status = AssetStatus::Ready;
-                    asset.tile_count = stats.total_nodes as u64;
-                    tracing::info!("Tiling complete for {}: {} nodes", id, stats.total_nodes);
-                    tracing::info!("metric: tiling_jobs_completed");
-                }
-                _ => {
-                    asset.status = AssetStatus::Error;
-                    tracing::error!("Tiling failed for {}", id);
-                    tracing::info!("metric: tiling_jobs_failed");
-                }
-            }
+    // Compute XY bounds
+    let (mut min_x, mut max_x) = (f64::MAX, f64::MIN);
+    let (mut min_y, mut max_y) = (f64::MAX, f64::MIN);
+    for &(x, y, _) in points {
+        if x < min_x {
+            min_x = x;
         }
-    });
+        if x > max_x {
+            max_x = x;
+        }
+        if y < min_y {
+            min_y = y;
+        }
+        if y > max_y {
+            max_y = y;
+        }
+    }
+    let range_x = (max_x - min_x).max(1e-6);
+    let range_y = (max_y - min_y).max(1e-6);
 
-    Ok(StatusCode::ACCEPTED)
+    for &(x, y, _) in points {
+        let px = ((x - min_x) / range_x * (width as f64 - 1.0)) as u32;
+        let py = ((y - min_y) / range_y * (height as f64 - 1.0)) as u32;
+        if px < width && py < height {
+            img.put_pixel(px, py, Rgba([255, 255, 255, 255]));
+        }
+    }
+
+    let mut buf = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut buf);
+    image::ImageEncoder::write_image(
+        encoder,
+        img.as_raw(),
+        width,
+        height,
+        image::ExtendedColorType::Rgba8,
+    )
+    .unwrap_or(());
+    buf
 }

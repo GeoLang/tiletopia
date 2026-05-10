@@ -1,7 +1,6 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[derive(Parser)]
 #[command(
@@ -133,12 +132,38 @@ async fn main() -> anyhow::Result<()> {
             host,
             port,
         } => {
+            std::fs::create_dir_all(&data_dir)?;
+
+            let db_url = format!(
+                "sqlite://{}?mode=rwc",
+                data_dir.join("tiletopia.db").display()
+            );
+            let db = Arc::new(
+                tiletopia_server::db::Database::new(&db_url)
+                    .await
+                    .expect("failed to open database"),
+            );
+            db.migrate().await.expect("failed to run migrations");
+
+            let store: Arc<dyn tiletopia_store::TileStore> =
+                Arc::new(tiletopia_store::LocalStore::new(data_dir.clone()));
+
+            let job_queue = Arc::new(tiletopia_server::job_queue::JobQueue::new(
+                Arc::clone(&db),
+                data_dir.clone(),
+                Arc::clone(&store),
+            ));
+            Arc::clone(&job_queue).start().await;
+
             let state = Arc::new(tiletopia_server::AppState {
-                assets: RwLock::new(vec![]),
+                db,
+                store,
                 data_dir,
+                job_queue,
                 realtime: tiletopia_server::realtime::RealtimeState::new(),
                 demo: tiletopia_server::demo::DemoState::new(),
                 catalog: tiletopia_server::catalog::OpenDataCatalog::new(),
+                started_at: std::time::Instant::now(),
             });
 
             let app = tiletopia_server::router(state);

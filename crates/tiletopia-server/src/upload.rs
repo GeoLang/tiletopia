@@ -68,9 +68,15 @@ pub async fn upload_asset(
         created_at: chrono::Utc::now(),
         tile_count: 0,
         size_bytes: file_data.len() as u64,
+        description: String::new(),
+        tags: vec![],
     };
 
-    state.assets.write().await.push(asset.clone());
+    state
+        .db
+        .create_asset(&asset)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     tracing::info!("Uploaded asset {} ({} bytes)", asset.id, file_data.len());
     tracing::info!("metric: assets_uploaded");

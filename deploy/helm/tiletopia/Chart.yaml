@@ -1,0 +1,13 @@
+apiVersion: v2
+name: tiletopia
+description: Fast open-source 3D Tiles server
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - 3d-tiles
+  - geospatial
+  - point-cloud
+  - terrain
+maintainers:
+  - name: tiletopia

@@ -2,6 +2,11 @@ import * as Cesium from 'cesium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
 import './style.css';
 import { setCesiumViewer, initRendererSelector, getRendererInfo } from './renderers.js';
+import { MeasurementTool } from './measurement.js';
+import { AnnotationTool } from './annotations.js';
+import { FeaturePicker, StyleEditor } from './feature-picker.js';
+import { StoryPlayer, fetchStories } from './stories.js';
+import { CollaborationPanel } from './collaboration.js';
 
 // API base URL (proxied in dev, same-origin in production)
 const API = '/api/v1';
@@ -32,6 +37,63 @@ const loadedTilesets = new Map();
 // Wire up multi-renderer
 setCesiumViewer(viewer);
 initRendererSelector();
+
+// ─── Viewer Tools ────────────────────────────────────────────────────────────
+
+const measureTool = new MeasurementTool(viewer);
+const annotationTool = new AnnotationTool(viewer);
+const featurePicker = new FeaturePicker(viewer);
+const styleEditor = new StyleEditor(viewer, null);
+const storyPlayer = new StoryPlayer(viewer);
+const collabPanel = new CollaborationPanel(viewer);
+
+// Toolbar button wiring
+function deactivateToolbar() {
+  document.querySelectorAll('.toolbar-btn').forEach(b => b.classList.remove('active'));
+  measureTool.clear();
+  annotationTool.disable();
+  featurePicker.disable();
+  styleEditor.hide();
+}
+
+document.getElementById('tb-distance').addEventListener('click', (e) => {
+  deactivateToolbar();
+  e.currentTarget.classList.add('active');
+  measureTool.startDistance();
+});
+
+document.getElementById('tb-area').addEventListener('click', (e) => {
+  deactivateToolbar();
+  e.currentTarget.classList.add('active');
+  measureTool.startArea();
+});
+
+document.getElementById('tb-height').addEventListener('click', (e) => {
+  deactivateToolbar();
+  e.currentTarget.classList.add('active');
+  measureTool.startHeight();
+});
+
+document.getElementById('tb-annotate').addEventListener('click', (e) => {
+  deactivateToolbar();
+  e.currentTarget.classList.add('active');
+  annotationTool.enable();
+});
+
+document.getElementById('tb-style').addEventListener('click', () => {
+  styleEditor.show();
+});
+
+document.getElementById('tb-featureinfo').addEventListener('click', (e) => {
+  deactivateToolbar();
+  e.currentTarget.classList.add('active');
+  featurePicker.enable();
+});
+
+document.getElementById('tb-clear').addEventListener('click', () => {
+  deactivateToolbar();
+  annotationTool.clearAll();
+});
 
 // Check server health
 async function checkHealth() {
@@ -84,6 +146,14 @@ async function loadTileset(assetId) {
     viewer.scene.primitives.add(tileset);
     loadedTilesets.set(assetId, tileset);
     viewer.flyTo(tileset);
+
+    // Connect style editor and annotations to the loaded tileset
+    styleEditor.setTileset(tileset);
+    annotationTool.setAsset(assetId);
+    annotationTool.fetchAnnotations();
+
+    // Connect collaboration panel for this asset
+    collabPanel.connect(assetId);
   } catch (e) {
     console.error('Failed to load tileset:', e);
   }
@@ -294,22 +364,38 @@ async function loadStories() {
   const panel = document.getElementById('panel-stories');
   panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading...</p></div>';
   try {
-    const res = await fetch(`${API}/demo/stories`);
-    const stories = await res.json();
+    let stories;
+    const apiRes = await fetch(`${API}/stories`);
+    if (apiRes.ok) {
+      stories = await apiRes.json();
+    } else {
+      const demoRes = await fetch(`${API}/demo/stories`);
+      stories = await demoRes.json();
+    }
     panel.innerHTML = `<div class="feature-panel">
       <h2>🎬 Narrated Presentations (Stories)</h2>
       <p class="subtitle">Cinematic 3D walkthroughs with camera paths and narration</p>
-      ${stories.map(s => `<div class="story-card">
+      ${stories.map((s, idx) => `<div class="story-card" data-story-idx="${idx}">
         <h3>${s.title}</h3>
-        <div class="meta">${s.description} · By ${s.author_id} · ${s.slides.length} slides · ${s.settings.transition_type}</div>
+        <div class="meta">${s.description} · ${(s.slides || []).length} slides</div>
         <div class="slide-list">
-          ${s.slides.map((sl,i) => `<span class="slide-chip">${i+1}. ${sl.title || 'Untitled'}</span>`).join('')}
+          ${(s.slides || []).map((sl,i) => `<span class="slide-chip">${i+1}. ${sl.title || 'Untitled'}</span>`).join('')}
         </div>
-        <div style="margin-top:12px;font-size:0.8rem;color:var(--muted)">
-          Auto-play: ${s.settings.auto_play ? 'Yes' : 'No'} · Loop: ${s.settings.loop_playback ? 'Yes' : 'No'} · Default duration: ${s.settings.default_slide_duration_secs}s
-        </div>
+        <button class="play-story-btn" data-story-idx="${idx}">▶ Play</button>
       </div>`).join('')}
     </div>`;
+
+    panel.querySelectorAll('.play-story-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const i = parseInt(btn.dataset.storyIdx);
+        storyPlayer.load(stories[i]);
+        storyPlayer.play();
+        // Switch back to viewer
+        document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+        document.getElementById('cesium-container').classList.add('active');
+      });
+    });
   } catch(e) {
     panel.innerHTML = `<div class="feature-panel"><p style="color:#f85149">Error: ${e.message}</p></div>`;
   }

@@ -3,6 +3,7 @@
 //! Generates quantized mesh terrain tiles from GeoTIFF/DTED/HGT heightmaps
 //! using Delaunay triangulation with geometric error-based simplification.
 
+pub mod dem_cache;
 pub mod global_dem;
 
 /// Heightmap grid (row-major, top-left origin).

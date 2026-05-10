@@ -70,7 +70,8 @@ async fn terrain_layer_info() -> impl IntoResponse {
 /// Serve a terrain tile as quantized-mesh binary.
 ///
 /// If local DEM data is available, generates high-quality terrain from it.
-/// Otherwise, returns a flat tile (elevation = 0) as placeholder.
+/// Falls back to downloading SRTM tiles via DemCache if no local data exists.
+/// Returns a flat tile as last resort.
 async fn serve_terrain_tile(
     State(state): State<Arc<AppState>>,
     Path((z, x, y)): Path<(u32, u32, u32)>,
@@ -85,7 +86,34 @@ async fn serve_terrain_tile(
     let bounds = coord.bounds();
 
     // Try to load DEM from data directory
-    let dem_tiles = load_dem_tiles_for_bounds(&state.data_dir, bounds);
+    let mut dem_tiles = load_dem_tiles_for_bounds(&state.data_dir, bounds);
+
+    // If no local DEM tiles, try downloading SRTM via DemCache
+    if dem_tiles.is_empty() {
+        let cache_dir = state.data_dir.join("dem_cache");
+        let cache = tiletopia_terrain::dem_cache::DemCache::new(cache_dir);
+        let required = tiletopia_terrain::dem_cache::required_srtm_tiles(
+            bounds[0], bounds[1], bounds[2], bounds[3],
+        );
+        for (lat, lon) in required {
+            match cache.get_srtm_tile(lat, lon).await {
+                Ok(hgt_path) => {
+                    if let Ok(hm) = tiletopia_ingest::hgt_reader::read(&hgt_path) {
+                        dem_tiles.push(DemTile {
+                            lat,
+                            lon,
+                            elevations: hm.elevations.iter().map(|&e| e as f32).collect(),
+                            samples: hm.width as u32,
+                            nodata: -9999.0,
+                        });
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("SRTM tile download failed for ({lat},{lon}): {e}");
+                }
+            }
+        }
+    }
 
     // Generate terrain mesh (uses flat elevation if no DEM tiles found)
     let grid_size = match z {

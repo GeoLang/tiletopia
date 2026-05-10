@@ -1,8 +1,10 @@
-//! 3D Tiles binary tile writers (.pnts format).
+//! 3D Tiles binary tile writers (.pnts and .glb formats).
 //!
-//! Implements the Point Cloud (pnts) tile format per the 3D Tiles spec.
+//! Implements the Point Cloud (pnts) tile format per the 3D Tiles spec
+//! and binary glTF (GLB) mesh tiles.
 //! See: https://github.com/CesiumGS/3d-tiles/tree/main/specification/TileFormats/PointCloud
 
+use crate::glb_writer::{self, GlbMesh};
 use crate::octree::OctreePoint;
 use std::io::{self, Write};
 
@@ -97,6 +99,22 @@ pub fn write_tileset_to_dir(
     write_node_tiles(root, &tiles_dir, &mut NodePath::new())
 }
 
+/// Tile format for output files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileFormat {
+    Pnts,
+    Glb,
+}
+
+impl TileFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            TileFormat::Pnts => "pnts",
+            TileFormat::Glb => "glb",
+        }
+    }
+}
+
 struct NodePath {
     segments: Vec<u8>,
 }
@@ -116,12 +134,13 @@ impl NodePath {
         self.segments.pop();
     }
 
-    fn to_filename(&self) -> String {
+    fn to_filename(&self, format: TileFormat) -> String {
+        let ext = format.extension();
         if self.segments.is_empty() {
-            "root.pnts".to_string()
+            format!("root.{ext}")
         } else {
             let s: String = self.segments.iter().map(|i| char::from(b'0' + i)).collect();
-            format!("{s}.pnts")
+            format!("{s}.{ext}")
         }
     }
 }
@@ -134,7 +153,7 @@ fn write_node_tiles(
     match node {
         crate::octree::OctreeNode::Leaf { points, .. } => {
             if !points.is_empty() {
-                let filename = path.to_filename();
+                let filename = path.to_filename(TileFormat::Pnts);
                 let mut file = std::fs::File::create(tiles_dir.join(&filename))?;
                 write_pnts(points, &mut file)?;
             }
@@ -145,7 +164,7 @@ fn write_node_tiles(
             ..
         } => {
             if !lod_points.is_empty() {
-                let filename = path.to_filename();
+                let filename = path.to_filename(TileFormat::Pnts);
                 let mut file = std::fs::File::create(tiles_dir.join(&filename))?;
                 write_pnts(lod_points, &mut file)?;
             }
@@ -159,4 +178,14 @@ fn write_node_tiles(
         }
     }
     Ok(())
+}
+
+/// Write a GLB mesh tile to the given writer.
+pub fn write_glb_tile<W: Write>(mesh: &GlbMesh, writer: &mut W) -> io::Result<()> {
+    glb_writer::write_glb(mesh, writer)
+}
+
+/// Write a GLB mesh tile to a file at the given path.
+pub fn write_glb_tile_file(mesh: &GlbMesh, path: &std::path::Path) -> io::Result<()> {
+    glb_writer::write_glb_file(mesh, path)
 }

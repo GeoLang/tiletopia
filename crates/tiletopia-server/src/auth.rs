@@ -23,7 +23,12 @@ pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, S
     };
 
     // Health endpoint is always public
-    if request.uri().path() == "/api/v1/health" || request.uri().path() == "/metrics" {
+    if request.uri().path() == "/api/v1/health"
+        || request.uri().path() == "/metrics"
+        || request.uri().path().starts_with("/api/v1/auth/")
+        || request.uri().path().starts_with("/api/v1/stories/share/")
+        || request.uri().path().starts_with("/v1/")
+    {
         return Ok(next.run(request).await);
     }
 

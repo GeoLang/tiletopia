@@ -4,25 +4,44 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use std::sync::Arc;
     use tiletopia_server::{AppState, router};
-    use tokio::sync::RwLock;
     use tower::ServiceExt;
 
-    fn test_state() -> Arc<AppState> {
+    async fn test_state() -> Arc<AppState> {
         let dir =
             std::env::temp_dir().join(format!("tiletopia_server_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();
+
+        let db = Arc::new(
+            tiletopia_server::db::Database::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        db.migrate().await.unwrap();
+
+        let store: Arc<dyn tiletopia_store::TileStore> =
+            Arc::new(tiletopia_store::LocalStore::new(dir.clone()));
+
+        let job_queue = Arc::new(tiletopia_server::job_queue::JobQueue::new(
+            Arc::clone(&db),
+            dir.clone(),
+            Arc::clone(&store),
+        ));
+
         Arc::new(AppState {
-            assets: RwLock::new(vec![]),
+            db,
+            store,
             data_dir: dir,
+            job_queue,
             realtime: tiletopia_server::realtime::RealtimeState::new(),
             demo: tiletopia_server::demo::DemoState::new(),
             catalog: tiletopia_server::catalog::OpenDataCatalog::new(),
+            started_at: std::time::Instant::now(),
         })
     }
 
     #[tokio::test]
     async fn health_endpoint() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -37,7 +56,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_assets_empty() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -52,7 +71,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_asset_not_found() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -67,7 +86,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_tileset_not_found() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -82,7 +101,7 @@ mod tests {
 
     #[tokio::test]
     async fn tile_path_traversal_blocked() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let response = app
             .oneshot(
                 Request::builder()

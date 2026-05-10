@@ -36,6 +36,19 @@ pub enum DatasetCategory {
     Weather,
 }
 
+impl DatasetCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Terrain => "terrain",
+            Self::Buildings => "buildings",
+            Self::Imagery => "imagery",
+            Self::PointCloud => "pointcloud",
+            Self::Vector => "vector",
+            Self::Weather => "weather",
+        }
+    }
+}
+
 /// Data format/protocol.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum DataFormat {
@@ -77,6 +90,12 @@ pub enum CoverageScope {
 /// The open data catalog store.
 pub struct OpenDataCatalog {
     datasets: Vec<CatalogDataset>,
+}
+
+impl CatalogDataset {
+    pub fn category_str(&self) -> String {
+        self.category.as_str().to_string()
+    }
 }
 
 impl Default for OpenDataCatalog {
@@ -343,9 +362,31 @@ pub fn catalog_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/catalog/{id}", get(get_dataset))
 }
 
+/// Additional catalog routes that need auth (dataset add triggers jobs).
+pub fn add_dataset_routes() -> Router<Arc<AppState>> {
+    Router::new().route(
+        "/api/v1/catalog/{dataset_id}/add",
+        axum::routing::post(add_dataset),
+    )
+}
+
 #[derive(Deserialize, Default)]
 struct CatalogQuery {
     category: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddDatasetRequest {
+    bounds: Bounds,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Bounds {
+    west: f64,
+    south: f64,
+    east: f64,
+    north: f64,
 }
 
 async fn list_datasets(
@@ -380,6 +421,89 @@ async fn get_dataset(
         .cloned()
         .map(Json)
         .ok_or(axum::http::StatusCode::NOT_FOUND)
+}
+
+/// Add a curated dataset to the user's workspace — creates an asset and starts a job.
+async fn add_dataset(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(dataset_id): axum::extract::Path<String>,
+    Json(req): Json<AddDatasetRequest>,
+) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), axum::http::StatusCode> {
+    let dataset = state
+        .catalog
+        .get(&dataset_id)
+        .cloned()
+        .ok_or(axum::http::StatusCode::NOT_FOUND)?;
+
+    let asset_type = match dataset.category {
+        DatasetCategory::Terrain => crate::AssetType::Terrain,
+        DatasetCategory::Imagery => crate::AssetType::Imagery,
+        DatasetCategory::PointCloud => crate::AssetType::PointCloud,
+        DatasetCategory::Buildings => crate::AssetType::Model,
+        _ => crate::AssetType::Model,
+    };
+
+    let asset_id = uuid::Uuid::new_v4();
+    let now = chrono::Utc::now();
+
+    let asset = crate::Asset {
+        id: asset_id,
+        name: req.name.clone(),
+        asset_type,
+        status: crate::AssetStatus::Tiling,
+        created_at: now,
+        tile_count: 0,
+        size_bytes: 0,
+        description: format!(
+            "From catalog: {} — bounds [{},{},{},{}]",
+            dataset.name, req.bounds.west, req.bounds.south, req.bounds.east, req.bounds.north
+        ),
+        tags: vec!["catalog".into(), dataset.category_str()],
+    };
+
+    state
+        .db
+        .create_asset(&asset)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let job_id = uuid::Uuid::new_v4();
+    let job = crate::db::JobRecord {
+        id: job_id,
+        asset_id,
+        status: crate::db::JobStatus::Queued,
+        progress: 0.0,
+        input_path: dataset.url.clone(),
+        output_format: format!("{:?}", dataset.format),
+        created_at: now,
+        started_at: None,
+        completed_at: None,
+        error: None,
+        points_processed: 0,
+        tiles_written: 0,
+    };
+
+    state
+        .db
+        .create_job(&job)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(serde_json::json!({
+            "asset_id": asset_id,
+            "job_id": job_id,
+            "dataset": dataset.name,
+            "bounds": {
+                "west": req.bounds.west,
+                "south": req.bounds.south,
+                "east": req.bounds.east,
+                "north": req.bounds.north,
+            },
+            "status": "queued"
+        })),
+    ))
 }
 
 #[cfg(test)]

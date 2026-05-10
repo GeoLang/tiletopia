@@ -12,11 +12,13 @@ services:
     environment:
       - RUST_LOG=info,tiletopia=debug
       - TILETOPIA_PORT=3000
+      - JWT_SECRET=change-me-in-production
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/health"]
       interval: 10s
       timeout: 5s
       retries: 3
+    restart: unless-stopped
 
   # Optional: local S3-compatible storage (MinIO)
   minio:
@@ -30,6 +32,7 @@ services:
     command: server /data --console-address ":9001"
     volumes:
       - minio-data:/data
+    restart: unless-stopped
 
 volumes:
   tile-data:

@@ -37,3 +37,12 @@ pub fn tile_point_cloud(
 
     Ok(stats)
 }
+
+/// Run the mesh tiling pipeline: partition meshes, generate LODs, and write tiles to disk.
+pub fn tile_meshes(
+    meshes: &[crate::mesh_tiler::MeshData],
+    output_dir: &Path,
+    config: &crate::mesh_tiler::MeshTilingConfig,
+) -> io::Result<crate::mesh_tiler::MeshTilingStats> {
+    crate::mesh_tiler::tile_meshes(meshes, output_dir, config)
+}
