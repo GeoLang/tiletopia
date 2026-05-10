@@ -12,6 +12,7 @@ env:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
@@ -24,7 +25,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --no-default-features
         if: runner.os == 'Windows'
 
       - name: Build (with cloud backends)
@@ -32,7 +33,7 @@ jobs:
         if: runner.os != 'Windows'
 
       - name: Test
-        run: cargo test --release
+        run: cargo test --release --no-default-features
         if: runner.os == 'Windows'
 
       - name: Test (with cloud backends)
@@ -40,7 +41,12 @@ jobs:
         if: runner.os != 'Windows'
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --no-default-features -- -D warnings
+        if: runner.os == 'Windows'
+
+      - name: Clippy (with cloud backends)
+        run: cargo clippy --features tiletopia-store/gcs,tiletopia-store/azure -- -D warnings
+        if: runner.os != 'Windows'
 
   fmt:
     runs-on: ubuntu-24.04

@@ -54,6 +54,7 @@ pub fn simplify_mesh(vertices: &[[f32; 3]], indices: &[u32], target_ratio: f32) 
 ///
 /// Uses Draco's point cloud compression for vertex positions and stores
 /// indices alongside the compressed data.
+#[cfg(feature = "draco")]
 pub fn draco_encode_mesh(vertices: &[[f32; 3]], indices: &[u32]) -> Result<Vec<u8>, String> {
     use draco_rs::pointcloud::PointCloudBuilder;
     use draco_rs::prelude::*;
@@ -90,6 +91,7 @@ pub fn draco_encode_mesh(vertices: &[[f32; 3]], indices: &[u32]) -> Result<Vec<u
 }
 
 /// Decode Draco compressed bytes back to mesh geometry (vertices + indices).
+#[cfg(feature = "draco")]
 pub fn draco_decode_mesh(data: &[u8]) -> Result<(Vec<[f32; 3]>, Vec<u32>), String> {
     use draco_rs::pointcloud::PointCloud;
     use draco_rs::prelude::*;
@@ -155,6 +157,7 @@ mod tests {
         assert_eq!(verts.len(), 3);
     }
 
+    #[cfg(feature = "draco")]
     #[test]
     fn test_draco_roundtrip() {
         let vertices = vec![
