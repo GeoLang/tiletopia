@@ -10,7 +10,7 @@ name = "tiletopia"
 path = "src/main.rs"
 
 [dependencies]
-tiletopia-core = { path = "../tiletopia-core" }
+tiletopia-core = { path = "../tiletopia-core", default-features = false }
 tiletopia-server = { path = "../tiletopia-server" }
 tiletopia-worker = { path = "../tiletopia-worker" }
 tiletopia-ingest = { path = "../tiletopia-ingest" }

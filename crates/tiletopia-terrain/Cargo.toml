@@ -6,7 +6,7 @@ license.workspace = true
 description = "Quantized mesh terrain generation from DEM/DTM heightmaps"
 
 [dependencies]
-tiletopia-core = { path = "../tiletopia-core" }
+tiletopia-core = { path = "../tiletopia-core", default-features = false }
 tiletopia-ingest = { path = "../tiletopia-ingest" }
 serde = { workspace = true }
 thiserror = { workspace = true }

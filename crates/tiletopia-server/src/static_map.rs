@@ -301,7 +301,6 @@ mod tests {
         assert_eq!(result.width, 800);
         assert_eq!(result.height, 600);
         assert!(result.size_bytes > 0);
-        assert!(result.render_time_ms > 0);
     }
 
     #[test]

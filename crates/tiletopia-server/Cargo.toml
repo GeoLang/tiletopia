@@ -6,7 +6,7 @@ license.workspace = true
 description = "REST API server — tile streaming, asset management, WebSocket real-time layer"
 
 [dependencies]
-tiletopia-core = { path = "../tiletopia-core" }
+tiletopia-core = { path = "../tiletopia-core", default-features = false }
 tiletopia-terrain = { path = "../tiletopia-terrain" }
 tiletopia-worker = { path = "../tiletopia-worker" }
 tiletopia-store = { path = "../tiletopia-store" }

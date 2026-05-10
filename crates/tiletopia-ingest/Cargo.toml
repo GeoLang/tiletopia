@@ -6,7 +6,7 @@ license.workspace = true
 description = "Format readers — LAS/LAZ, CityGML, GeoTIFF, glTF, OBJ, Shapefile"
 
 [dependencies]
-tiletopia-core = { path = "../tiletopia-core" }
+tiletopia-core = { path = "../tiletopia-core", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

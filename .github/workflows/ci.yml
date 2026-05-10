@@ -29,7 +29,7 @@ jobs:
         if: runner.os == 'Windows'
 
       - name: Build (with cloud backends)
-        run: cargo build --release --features tiletopia-store/gcs,tiletopia-store/azure
+        run: cargo build --release --features tiletopia-core/draco,tiletopia-store/gcs,tiletopia-store/azure
         if: runner.os != 'Windows'
 
       - name: Test
@@ -37,7 +37,7 @@ jobs:
         if: runner.os == 'Windows'
 
       - name: Test (with cloud backends)
-        run: cargo test --release --features tiletopia-store/gcs,tiletopia-store/azure
+        run: cargo test --release --features tiletopia-core/draco,tiletopia-store/gcs,tiletopia-store/azure
         if: runner.os != 'Windows'
 
       - name: Clippy
@@ -45,7 +45,7 @@ jobs:
         if: runner.os == 'Windows'
 
       - name: Clippy (with cloud backends)
-        run: cargo clippy --features tiletopia-store/gcs,tiletopia-store/azure -- -D warnings
+        run: cargo clippy --features tiletopia-core/draco,tiletopia-store/gcs,tiletopia-store/azure -- -D warnings
         if: runner.os != 'Windows'
 
   fmt:
