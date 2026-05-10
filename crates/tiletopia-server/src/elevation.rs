@@ -101,10 +101,7 @@ impl DemStore {
         self.grids
             .iter()
             .filter(|g| {
-                lon >= g.bounds[0]
-                    && lon <= g.bounds[2]
-                    && lat >= g.bounds[1]
-                    && lat <= g.bounds[3]
+                lon >= g.bounds[0] && lon <= g.bounds[2] && lat >= g.bounds[1] && lat <= g.bounds[3]
             })
             .min_by(|a, b| {
                 let res_a = a.cell_size_x * a.cell_size_y;
@@ -297,9 +294,7 @@ mod tests {
             cell_size_x: 1.0,
             cell_size_y: 1.0,
             elevations: vec![
-                100.0, -9999.0, 300.0,
-                400.0, 500.0, 600.0,
-                700.0, 800.0, 900.0,
+                100.0, -9999.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0, 900.0,
             ],
             nodata: -9999.0,
         };

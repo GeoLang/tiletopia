@@ -31,7 +31,10 @@ impl HybridStore {
         let data = self.cold.get(key).await?;
         self.hot.put(key, data).await?;
         self.cold.delete(key).await?;
-        self.access_log.write().await.insert(key.to_string(), Instant::now());
+        self.access_log
+            .write()
+            .await
+            .insert(key.to_string(), Instant::now());
         Ok(())
     }
 
@@ -73,7 +76,10 @@ impl HybridStore {
     }
 
     async fn touch(&self, key: &str) {
-        self.access_log.write().await.insert(key.to_string(), Instant::now());
+        self.access_log
+            .write()
+            .await
+            .insert(key.to_string(), Instant::now());
     }
 }
 
@@ -149,7 +155,12 @@ mod tests {
     use crate::LocalStore;
     use tempfile::tempdir;
 
-    fn make_stores() -> (Arc<dyn TileStore>, Arc<dyn TileStore>, tempfile::TempDir, tempfile::TempDir) {
+    fn make_stores() -> (
+        Arc<dyn TileStore>,
+        Arc<dyn TileStore>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
         let hot_dir = tempdir().unwrap();
         let cold_dir = tempdir().unwrap();
         let hot: Arc<dyn TileStore> = Arc::new(LocalStore::new(hot_dir.path().to_path_buf()));

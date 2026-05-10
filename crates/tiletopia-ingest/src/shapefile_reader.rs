@@ -56,10 +56,16 @@ fn convert_shape(shape: shapefile::Shape) -> Result<VectorGeometry, IngestError>
             mp.points().iter().map(|p| (p.x, p.y)).collect(),
         )),
         shapefile::Shape::Polyline(pl) => Ok(VectorGeometry::MultiLineString(
-            pl.parts().iter().map(|part| part.iter().map(|p| (p.x, p.y)).collect()).collect(),
+            pl.parts()
+                .iter()
+                .map(|part| part.iter().map(|p| (p.x, p.y)).collect())
+                .collect(),
         )),
         shapefile::Shape::PolylineZ(pl) => Ok(VectorGeometry::MultiLineString(
-            pl.parts().iter().map(|part| part.iter().map(|p| (p.x, p.y)).collect()).collect(),
+            pl.parts()
+                .iter()
+                .map(|part| part.iter().map(|p| (p.x, p.y)).collect())
+                .collect(),
         )),
         shapefile::Shape::Polygon(pg) => Ok(VectorGeometry::Polygon(
             pg.rings()

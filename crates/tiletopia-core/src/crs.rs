@@ -325,11 +325,18 @@ mod tests {
     fn test_transform_proj4_returns_error_for_unsupported_init() {
         // proj4rs 0.1 does not ship an EPSG database, so +init=epsg:XXXX
         // should return a Proj4 error rather than panicking.
-        let coords = vec![Coord3D { x: 9.0, y: 48.0, z: 0.0 }];
+        let coords = vec![Coord3D {
+            x: 9.0,
+            y: 48.0,
+            z: 0.0,
+        }];
         let result = transform_proj4(4326, 32632, &coords);
         assert!(result.is_err());
         match result.unwrap_err() {
-            ReprojError::Proj4(msg) => assert!(msg.contains("EPSG:4326"), "error should mention EPSG: {msg}"),
+            ReprojError::Proj4(msg) => assert!(
+                msg.contains("EPSG:4326"),
+                "error should mention EPSG: {msg}"
+            ),
             other => panic!("expected Proj4 error, got: {other:?}"),
         }
     }
@@ -339,7 +346,11 @@ mod tests {
         // Use the hand-coded Transformer path for UTM→WGS84 roundtrip
         let fwd = Transformer::new(CrsDef::Epsg(4326), CrsDef::Epsg(32632));
         let inv = Transformer::new(CrsDef::Epsg(32632), CrsDef::Epsg(4326));
-        let c = Coord3D { x: 9.0, y: 48.0, z: 100.0 };
+        let c = Coord3D {
+            x: 9.0,
+            y: 48.0,
+            z: 100.0,
+        };
         let utm = fwd.transform(c).unwrap();
         assert!((utm.x - 500_000.0).abs() < 1.0);
         let back = inv.transform(utm).unwrap();

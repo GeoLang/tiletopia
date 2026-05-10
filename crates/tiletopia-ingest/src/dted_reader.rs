@@ -35,19 +35,15 @@ pub fn read(path: &Path) -> Result<Heightmap, IngestError> {
     let origin_lat = parse_dted_lat(&uhl[12..20])?;
 
     // Longitude/latitude intervals in tenths of arc-seconds
-    let lon_interval =
-        parse_uhl_int(&uhl[20..24])? as f64 / 36000.0; // degrees
-    let lat_interval =
-        parse_uhl_int(&uhl[24..28])? as f64 / 36000.0; // degrees
+    let lon_interval = parse_uhl_int(&uhl[20..24])? as f64 / 36000.0; // degrees
+    let lat_interval = parse_uhl_int(&uhl[24..28])? as f64 / 36000.0; // degrees
 
     // Number of longitude and latitude lines
     let num_lon_lines = parse_uhl_int(&uhl[47..51])?;
     let num_lat_points = parse_uhl_int(&uhl[51..55])?;
 
     if num_lon_lines == 0 || num_lat_points == 0 {
-        return Err(IngestError::ParseError(
-            "DTED: zero dimensions".to_string(),
-        ));
+        return Err(IngestError::ParseError("DTED: zero dimensions".to_string()));
     }
 
     let width = num_lon_lines;
@@ -64,9 +60,7 @@ pub fn read(path: &Path) -> Result<Heightmap, IngestError> {
     for col in 0..width {
         let mut col_buf = vec![0u8; col_data_len];
         file.read_exact(&mut col_buf).map_err(|e| {
-            IngestError::ParseError(format!(
-                "DTED: failed to read column {col}: {e}"
-            ))
+            IngestError::ParseError(format!("DTED: failed to read column {col}: {e}"))
         })?;
 
         // First byte should be data record sentinel (0xAA)

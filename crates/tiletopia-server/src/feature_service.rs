@@ -227,7 +227,11 @@ impl FeatureServiceEngine {
     /// Delete a feature.
     pub fn delete_feature(&mut self, id: Uuid) -> bool {
         let before = self.features.len();
-        let layer_id = self.features.iter().find(|f| f.id == id).map(|f| f.layer_id);
+        let layer_id = self
+            .features
+            .iter()
+            .find(|f| f.id == id)
+            .map(|f| f.layer_id);
         self.features.retain(|f| f.id != id);
         if let Some(lid) = layer_id {
             if let Some(layer) = self.layers.iter_mut().find(|l| l.id == lid) {
@@ -555,9 +559,7 @@ mod tests {
             geom_type: "Point".into(),
             coordinates: serde_json::json!([-122.41, 37.78]),
         };
-        let feature = engine
-            .add_feature(layer_id, geom, HashMap::new())
-            .unwrap();
+        let feature = engine.add_feature(layer_id, geom, HashMap::new()).unwrap();
         assert_eq!(engine.feature_count(layer_id), 3);
 
         assert!(engine.delete_feature(feature.id));

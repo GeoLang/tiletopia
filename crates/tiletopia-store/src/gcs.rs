@@ -14,8 +14,7 @@ pub struct GcsStore {
 impl GcsStore {
     /// Create a new GCS store. Uses default application credentials.
     pub fn new(bucket: String, prefix: String) -> Result<Self, StoreError> {
-        let client =
-            Client::default();
+        let client = Client::default();
         Ok(Self {
             client,
             bucket,
@@ -81,10 +80,13 @@ impl TileStore for GcsStore {
         let objects = self
             .client
             .object()
-            .list(&self.bucket, cloud_storage::ListRequest {
-                prefix: Some(full_prefix.clone()),
-                ..Default::default()
-            })
+            .list(
+                &self.bucket,
+                cloud_storage::ListRequest {
+                    prefix: Some(full_prefix.clone()),
+                    ..Default::default()
+                },
+            )
             .await
             .map_err(|e| StoreError::Other(format!("GCS list error: {e}")))?;
 
@@ -92,8 +94,7 @@ impl TileStore for GcsStore {
         let mut keys = Vec::new();
         tokio::pin!(objects);
         while let Some(result) = objects.next().await {
-            let page = result
-                .map_err(|e| StoreError::Other(format!("GCS list error: {e}")))?;
+            let page = result.map_err(|e| StoreError::Other(format!("GCS list error: {e}")))?;
             for obj in page.items {
                 let name = obj
                     .name

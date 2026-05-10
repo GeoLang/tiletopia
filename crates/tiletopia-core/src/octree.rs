@@ -147,9 +147,8 @@ fn build_node(
         })
         .collect();
 
-    let children: [Option<Box<OctreeNode>>; 8] = children_vec
-        .try_into()
-        .expect("always exactly 8 elements");
+    let children: [Option<Box<OctreeNode>>; 8] =
+        children_vec.try_into().expect("always exactly 8 elements");
 
     OctreeNode::Internal {
         bounds,

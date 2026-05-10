@@ -291,12 +291,7 @@ fn is_inside(point: &[f64; 2], edge_start: &[f64; 2], edge_end: &[f64; 2]) -> bo
 }
 
 /// Find the intersection point of two line segments (p1-p2 and p3-p4).
-fn line_intersect(
-    p1: &[f64; 2],
-    p2: &[f64; 2],
-    p3: &[f64; 2],
-    p4: &[f64; 2],
-) -> Option<[f64; 2]> {
+fn line_intersect(p1: &[f64; 2], p2: &[f64; 2], p3: &[f64; 2], p4: &[f64; 2]) -> Option<[f64; 2]> {
     let x1 = p1[0];
     let y1 = p1[1];
     let x2 = p2[0];

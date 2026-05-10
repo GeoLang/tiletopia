@@ -1,8 +1,8 @@
 //! KML vector reader.
 
 use crate::{IngestError, VectorFeature, VectorGeometry};
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -76,9 +76,7 @@ pub fn read(path: &Path) -> Result<Vec<VectorFeature>, IngestError> {
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                return Err(IngestError::ParseError(format!(
-                    "KML XML parse error: {e}"
-                )));
+                return Err(IngestError::ParseError(format!("KML XML parse error: {e}")));
             }
             _ => {}
         }
@@ -112,9 +110,7 @@ fn parse_coordinates(text: &str, parent: &str) -> Option<VectorGeometry> {
     match parent {
         "Point" => coords.first().map(|&(x, y)| VectorGeometry::Point(x, y)),
         "LineString" => Some(VectorGeometry::LineString(coords)),
-        "LinearRing" | "Polygon" | "outerBoundaryIs" => {
-            Some(VectorGeometry::Polygon(vec![coords]))
-        }
+        "LinearRing" | "Polygon" | "outerBoundaryIs" => Some(VectorGeometry::Polygon(vec![coords])),
         _ => {
             // Default: if single coordinate, point; if multiple, line string
             if coords.len() == 1 {

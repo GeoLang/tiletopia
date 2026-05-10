@@ -1,7 +1,7 @@
 //! IFC geometry reader.
 
 use crate::{IngestError, MeshData};
-use ifc_lite_core::{build_entity_index, EntityDecoder, EntityScanner, IfcSchema};
+use ifc_lite_core::{EntityDecoder, EntityScanner, IfcSchema, build_entity_index};
 use ifc_lite_geometry::GeometryRouter;
 use std::path::Path;
 
@@ -53,10 +53,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             })
             .collect();
 
-        let name = entity
-            .get_string(2)
-            .unwrap_or("ifc_element")
-            .to_string();
+        let name = entity.get_string(2).unwrap_or("ifc_element").to_string();
 
         meshes.push(MeshData {
             positions,

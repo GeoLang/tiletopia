@@ -20,7 +20,8 @@ pub fn read(path: &Path) -> Result<Vec<Point3D>, IngestError> {
             let p = p.map_err(|e| IngestError::ParseError(format!("E57 point error: {e}")))?;
 
             let (x, y, z) = match p.cartesian {
-                CartesianCoordinate::Valid { x, y, z } | CartesianCoordinate::Direction { x, y, z } => (x, y, z),
+                CartesianCoordinate::Valid { x, y, z }
+                | CartesianCoordinate::Direction { x, y, z } => (x, y, z),
                 CartesianCoordinate::Invalid => continue,
             };
 

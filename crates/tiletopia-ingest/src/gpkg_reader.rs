@@ -102,11 +102,7 @@ pub fn read(path: &Path) -> Result<Vec<VectorFeature>, IngestError> {
         }
     }
 
-    tracing::info!(
-        "Read {} features from {}",
-        features.len(),
-        path.display(),
-    );
+    tracing::info!("Read {} features from {}", features.len(), path.display(),);
 
     Ok(features)
 }
@@ -132,11 +128,11 @@ fn parse_gpkg_geometry(data: &[u8]) -> Option<VectorGeometry> {
     let flags = data[3];
     let envelope_indicator = (flags >> 1) & 0x07;
     let envelope_size = match envelope_indicator {
-        0 => 0,       // no envelope
-        1 => 32,      // [minx, maxx, miny, maxy]
-        2 => 48,      // + [minz, maxz]
-        3 => 48,      // + [minm, maxm]
-        4 => 64,      // + [minz, maxz, minm, maxm]
+        0 => 0,  // no envelope
+        1 => 32, // [minx, maxx, miny, maxy]
+        2 => 48, // + [minz, maxz]
+        3 => 48, // + [minm, maxm]
+        4 => 64, // + [minz, maxz, minm, maxm]
         _ => return None,
     };
 

@@ -203,7 +203,10 @@ async fn query_peer(
         req = req.query(&[("q", q.as_str())]);
     }
     if let Some(bounds) = &query.bounds {
-        req = req.query(&[("bbox", &format!("{},{},{},{}", bounds[0], bounds[1], bounds[2], bounds[3]))]);
+        req = req.query(&[(
+            "bbox",
+            &format!("{},{},{},{}", bounds[0], bounds[1], bounds[2], bounds[3]),
+        )]);
     }
     if let Some(limit) = query.limit {
         req = req.query(&[("limit", &limit.to_string())]);

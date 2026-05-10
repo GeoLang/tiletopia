@@ -1,8 +1,8 @@
 //! CityGML mesh reader.
 
 use crate::{IngestError, MeshData};
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 use std::path::Path;
 
 /// Read meshes from a CityGML (GML) file.
@@ -28,8 +28,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             }
             Ok(Event::Text(ref e)) => {
                 if in_pos_list {
-                    current_text
-                        .push_str(&e.decode().unwrap_or_default());
+                    current_text.push_str(&e.decode().unwrap_or_default());
                 }
             }
             Ok(Event::End(ref e)) => {

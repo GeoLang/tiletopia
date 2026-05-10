@@ -7,8 +7,9 @@ use std::path::Path;
 /// Read a GeoJSON file into vector features.
 pub fn read(path: &Path) -> Result<Vec<VectorFeature>, IngestError> {
     let data = std::fs::read_to_string(path)?;
-    let geojson: geojson::GeoJson =
-        data.parse().map_err(|e| IngestError::ParseError(format!("GeoJSON parse error: {e}")))?;
+    let geojson: geojson::GeoJson = data
+        .parse()
+        .map_err(|e| IngestError::ParseError(format!("GeoJSON parse error: {e}")))?;
 
     let features = match geojson {
         geojson::GeoJson::FeatureCollection(fc) => fc.features,
@@ -91,9 +92,9 @@ fn convert_geometry(value: geojson::GeometryValue) -> Result<VectorGeometry, Ing
                 .collect();
             Ok(VectorGeometry::MultiPolygon(polys))
         }
-        geojson::GeometryValue::GeometryCollection { .. } => {
-            Err(IngestError::UnsupportedFormat("GeometryCollection".to_string()))
-        }
+        geojson::GeometryValue::GeometryCollection { .. } => Err(IngestError::UnsupportedFormat(
+            "GeometryCollection".to_string(),
+        )),
     }
 }
 

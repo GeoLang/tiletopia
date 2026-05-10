@@ -1,8 +1,8 @@
 //! Encryption at rest — AES-256 with customer-managed keys.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
 };
 use rand::RngCore;
 use std::collections::HashMap;

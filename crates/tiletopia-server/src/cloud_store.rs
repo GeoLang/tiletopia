@@ -135,8 +135,8 @@ impl S3Store {
 
     /// Build AWS SDK config, honoring custom endpoint if set.
     async fn aws_config(&self) -> aws_config::SdkConfig {
-        let mut loader =
-            aws_config::defaults(aws_config::BehaviorVersion::latest()).region(aws_config::Region::new(self.region.clone()));
+        let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new(self.region.clone()));
         if let Some(ep) = &self.endpoint {
             loader = loader.endpoint_url(ep);
         }
@@ -204,13 +204,7 @@ impl TileStore for S3Store {
         rt.block_on(async {
             let config = self.aws_config().await;
             let client = aws_sdk_s3::Client::new(&config);
-            match client
-                .head_object()
-                .bucket(&bucket)
-                .key(&key)
-                .send()
-                .await
-            {
+            match client.head_object().bucket(&bucket).key(&key).send().await {
                 Ok(_) => Ok(true),
                 Err(e) => {
                     let msg = e.to_string();

@@ -52,12 +52,7 @@ pub fn read(path: &Path) -> Result<Heightmap, IngestError> {
     }
 
     // HGT data is stored north-to-south, west-to-east — already row-major.
-    let bounds = [
-        lon as f64,
-        lat as f64,
-        lon as f64 + 1.0,
-        lat as f64 + 1.0,
-    ];
+    let bounds = [lon as f64, lat as f64, lon as f64 + 1.0, lat as f64 + 1.0];
 
     tracing::info!(
         "Read {}×{} HGT heightmap from {}",

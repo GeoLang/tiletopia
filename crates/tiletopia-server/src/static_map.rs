@@ -104,11 +104,18 @@ pub fn render_static_map(request: &StaticMapRequest) -> StaticMapResult {
     });
 
     let start = std::time::Instant::now();
-    let mut img: RgbImage = ImageBuffer::from_pixel(request.width, request.height, Rgb([230, 230, 230]));
+    let mut img: RgbImage =
+        ImageBuffer::from_pixel(request.width, request.height, Rgb([230, 230, 230]));
 
     // Draw markers
     for marker in &request.markers {
-        let (px, py) = lonlat_to_pixel(marker.longitude, marker.latitude, &bbox, request.width, request.height);
+        let (px, py) = lonlat_to_pixel(
+            marker.longitude,
+            marker.latitude,
+            &bbox,
+            request.width,
+            request.height,
+        );
         let radius = match marker.size {
             MarkerSize::Small => 4i32,
             MarkerSize::Medium => 8,

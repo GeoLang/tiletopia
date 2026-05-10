@@ -147,7 +147,9 @@ pub fn read_mesh(path: &std::path::Path) -> Result<Vec<MeshData>, IngestError> {
                 // Re-read via the CityJSON reader (it re-reads the file, but keeps the API clean)
                 cityjson_reader::read(path)
             } else {
-                Err(IngestError::UnsupportedFormat("json (not CityJSON)".to_string()))
+                Err(IngestError::UnsupportedFormat(
+                    "json (not CityJSON)".to_string(),
+                ))
             }
         }
         Some(ext) => Err(IngestError::UnsupportedFormat(ext.to_string())),

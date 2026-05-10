@@ -6,8 +6,8 @@ use std::path::Path;
 /// Read meshes from a CityJSON file.
 pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
     let data = std::fs::read_to_string(path)?;
-    let root: serde_json::Value =
-        serde_json::from_str(&data).map_err(|e| IngestError::ParseError(format!("CityJSON parse error: {e}")))?;
+    let root: serde_json::Value = serde_json::from_str(&data)
+        .map_err(|e| IngestError::ParseError(format!("CityJSON parse error: {e}")))?;
 
     let doc_type = root.get("type").and_then(|v| v.as_str()).unwrap_or("");
     if doc_type != "CityJSON" {

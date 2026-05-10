@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
 /// A collaboration session (room).
@@ -269,9 +269,9 @@ impl CollaborationEngine {
         };
         session.participants.push(participant.clone());
         session.last_activity_at = Utc::now();
-        let _ = self.event_tx.send(
-            serde_json::to_string(&CollabEvent::UserJoined(participant)).unwrap_or_default(),
-        );
+        let _ = self
+            .event_tx
+            .send(serde_json::to_string(&CollabEvent::UserJoined(participant)).unwrap_or_default());
         Some(session.clone())
     }
 
@@ -286,9 +286,9 @@ impl CollaborationEngine {
             {
                 p.is_online = false;
             }
-            let _ = self
-                .event_tx
-                .send(serde_json::to_string(&CollabEvent::UserLeft { user_id }).unwrap_or_default());
+            let _ = self.event_tx.send(
+                serde_json::to_string(&CollabEvent::UserLeft { user_id }).unwrap_or_default(),
+            );
         }
     }
 
@@ -513,9 +513,7 @@ mod tests {
             direction: [0.0, 0.0, -1.0],
             timestamp_ms: 999,
         };
-        engine
-            .update_cursor(session_id, user_id, cursor)
-            .await;
+        engine.update_cursor(session_id, user_id, cursor).await;
 
         let event_str = rx.try_recv().unwrap();
         assert!(event_str.contains("CursorMoved"));

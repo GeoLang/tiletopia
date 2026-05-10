@@ -13,9 +13,8 @@ use std::path::Path;
 /// - Record A (1024 chars): metadata (name, corners, units, resolution, dimensions)
 /// - Record B (1024 chars each): one elevation profile per column
 pub fn read(path: &Path) -> Result<Heightmap, IngestError> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        IngestError::ParseError(format!("USGS DEM: cannot read file: {e}"))
-    })?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| IngestError::ParseError(format!("USGS DEM: cannot read file: {e}")))?;
 
     if content.len() < 1024 {
         return Err(IngestError::ParseError(
@@ -114,7 +113,10 @@ fn parse_float_field(record: &str, start: usize, end: usize) -> Option<f64> {
     if start >= end {
         return None;
     }
-    let s = record[start..end].trim().replace('D', "E").replace('d', "e");
+    let s = record[start..end]
+        .trim()
+        .replace('D', "E")
+        .replace('d', "e");
     s.parse().ok()
 }
 
@@ -147,7 +149,10 @@ fn parse_dimensions(record_a: &str) -> Result<(usize, usize), IngestError> {
 }
 
 /// Parse a Record B elevation profile, returning (num_rows, elevation_values, bytes_consumed).
-fn parse_record_b(data: &str, expected_rows: usize) -> Result<(usize, Vec<f64>, usize), IngestError> {
+fn parse_record_b(
+    data: &str,
+    expected_rows: usize,
+) -> Result<(usize, Vec<f64>, usize), IngestError> {
     // Record B values are space-separated integers.
     // First 6 values: row_id, col_id, num_m, num_n, x_gp, y_gp
     // Then min_elev, max_elev, followed by elevation values.

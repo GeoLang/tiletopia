@@ -217,8 +217,12 @@ pub fn match_trace_hmm(request: &MapMatchRequest, network: &RoadNetwork) -> MapM
                 let curr_snap_pt = curr_cands[j].2;
 
                 // Route distance approximated by great-circle between snapped points
-                let route_dist =
-                    haversine(prev_snap_pt[1], prev_snap_pt[0], curr_snap_pt[1], curr_snap_pt[0]);
+                let route_dist = haversine(
+                    prev_snap_pt[1],
+                    prev_snap_pt[0],
+                    curr_snap_pt[1],
+                    curr_snap_pt[0],
+                );
 
                 let transition = transition_log_prob(route_dist, gps_dist, beta);
 
@@ -244,9 +248,7 @@ pub fn match_trace_hmm(request: &MapMatchRequest, network: &RoadNetwork) -> MapM
     let mut best_sequence: Vec<Option<usize>> = vec![None; n_points];
 
     // Find best final state
-    let last_valid = (0..n_points)
-        .rev()
-        .find(|&t| !viterbi_prob[t].is_empty());
+    let last_valid = (0..n_points).rev().find(|&t| !viterbi_prob[t].is_empty());
     if let Some(last_t) = last_valid {
         let mut best_j = 0;
         let mut best_p = f64::NEG_INFINITY;

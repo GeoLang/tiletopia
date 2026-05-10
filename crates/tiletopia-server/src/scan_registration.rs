@@ -258,10 +258,8 @@ fn svd_3x3(h: &[[f64; 3]; 3]) -> ([[f64; 3]; 3], [f64; 3], [[f64; 3]; 3]) {
 /// Compose a 4x4 transform from a 3x3 rotation and translation.
 fn compose_4x4(rot: &[[f64; 3]; 3], t: &[f64; 3]) -> [f64; 16] {
     [
-        rot[0][0], rot[0][1], rot[0][2], t[0],
-        rot[1][0], rot[1][1], rot[1][2], t[1],
-        rot[2][0], rot[2][1], rot[2][2], t[2],
-        0.0,       0.0,       0.0,       1.0,
+        rot[0][0], rot[0][1], rot[0][2], t[0], rot[1][0], rot[1][1], rot[1][2], t[1], rot[2][0],
+        rot[2][1], rot[2][2], t[2], 0.0, 0.0, 0.0, 1.0,
     ]
 }
 
@@ -286,10 +284,7 @@ pub fn icp_align(
 ) -> RegistrationResult {
     let start = std::time::Instant::now();
     let mut accumulated = [
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        0.0, 0.0, 0.0, 1.0,
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ];
 
     let mut src_pts: Vec<[f64; 3]> = source.points.clone();
@@ -409,7 +404,9 @@ pub fn icp_align(
     RegistrationResult {
         transforms: vec![ScanTransform {
             scan_id: Uuid::nil(),
-            transform: Transform3D { matrix: accumulated },
+            transform: Transform3D {
+                matrix: accumulated,
+            },
             residual_m: final_rmse,
         }],
         fitness_score: fitness.min(1.0),

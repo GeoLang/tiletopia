@@ -2,8 +2,8 @@
 
 use crate::{IngestError, MeshData};
 use fbxcel_dom::any::AnyDocument;
-use fbxcel_dom::v7400::object::geometry::TypedGeometryHandle;
 use fbxcel_dom::v7400::object::TypedObjectHandle;
+use fbxcel_dom::v7400::object::geometry::TypedGeometryHandle;
 use std::io::BufReader;
 use std::path::Path;
 

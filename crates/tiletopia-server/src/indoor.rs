@@ -375,8 +375,14 @@ pub fn find_route(
                 adjacency.entry(node.id).or_default();
             }
             for edge in &graph.edges {
-                adjacency.entry(edge.from).or_default().push((edge.to, edge.distance_m));
-                adjacency.entry(edge.to).or_default().push((edge.from, edge.distance_m));
+                adjacency
+                    .entry(edge.from)
+                    .or_default()
+                    .push((edge.to, edge.distance_m));
+                adjacency
+                    .entry(edge.to)
+                    .or_default()
+                    .push((edge.from, edge.distance_m));
             }
         }
     }
@@ -397,8 +403,14 @@ pub fn find_route(
             let floor_diff = (a.floor_level as i16 - b.floor_level as i16).unsigned_abs();
             if floor_diff == 1 && dist_2d(&a.position, &b.position) < 3.0 {
                 let vertical_dist = 4.0; // approximate floor height in metres
-                adjacency.entry(a.id).or_default().push((b.id, vertical_dist));
-                adjacency.entry(b.id).or_default().push((a.id, vertical_dist));
+                adjacency
+                    .entry(a.id)
+                    .or_default()
+                    .push((b.id, vertical_dist));
+                adjacency
+                    .entry(b.id)
+                    .or_default()
+                    .push((a.id, vertical_dist));
             }
         }
     }

@@ -32,11 +32,7 @@ pub fn optimize_mesh(vertices: &mut Vec<[f32; 3]>, indices: &mut Vec<u32>) {
 /// Simplify a mesh by reducing triangle count while preserving shape.
 ///
 /// `target_ratio` is the fraction of triangles to keep (0.0–1.0).
-pub fn simplify_mesh(
-    vertices: &[[f32; 3]],
-    indices: &[u32],
-    target_ratio: f32,
-) -> Vec<u32> {
+pub fn simplify_mesh(vertices: &[[f32; 3]], indices: &[u32], target_ratio: f32) -> Vec<u32> {
     let target_count = ((indices.len() / 3) as f32 * target_ratio) as usize * 3;
     let vertex_adapter = meshopt::VertexDataAdapter::new(
         bytemuck::cast_slice(vertices),
@@ -44,7 +40,14 @@ pub fn simplify_mesh(
         0,
     )
     .expect("valid vertex layout");
-    meshopt::simplify(indices, &vertex_adapter, target_count, 1e-2, meshopt::SimplifyOptions::None, None)
+    meshopt::simplify(
+        indices,
+        &vertex_adapter,
+        target_count,
+        1e-2,
+        meshopt::SimplifyOptions::None,
+        None,
+    )
 }
 
 /// Encode mesh geometry (vertices + indices) to Draco compressed bytes.
@@ -165,8 +168,7 @@ mod tests {
         let encoded = draco_encode_mesh(&vertices, &indices).expect("encode should succeed");
         assert!(!encoded.is_empty());
 
-        let (dec_verts, dec_indices) =
-            draco_decode_mesh(&encoded).expect("decode should succeed");
+        let (dec_verts, dec_indices) = draco_decode_mesh(&encoded).expect("decode should succeed");
         assert_eq!(dec_verts.len(), vertices.len());
         assert_eq!(dec_indices.len(), indices.len());
     }

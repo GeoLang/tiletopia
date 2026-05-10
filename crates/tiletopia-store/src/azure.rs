@@ -19,10 +19,8 @@ impl AzureStore {
         container: &str,
         prefix: String,
     ) -> Result<Self, StoreError> {
-        let credentials =
-            StorageCredentials::access_key(account, access_key.to_string());
-        let client = BlobServiceClient::new(account, credentials)
-            .container_client(container);
+        let credentials = StorageCredentials::access_key(account, access_key.to_string());
+        let client = BlobServiceClient::new(account, credentials).container_client(container);
 
         Ok(Self { client, prefix })
     }
@@ -40,17 +38,14 @@ impl AzureStore {
 impl TileStore for AzureStore {
     async fn get(&self, key: &str) -> Result<Bytes, StoreError> {
         let blob = self.client.blob_client(&self.key(key));
-        let response = blob
-            .get_content()
-            .await
-            .map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("BlobNotFound") || msg.contains("404") {
-                    StoreError::NotFound(key.to_string())
-                } else {
-                    StoreError::Other(format!("Azure get error: {e}"))
-                }
-            })?;
+        let response = blob.get_content().await.map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("BlobNotFound") || msg.contains("404") {
+                StoreError::NotFound(key.to_string())
+            } else {
+                StoreError::Other(format!("Azure get error: {e}"))
+            }
+        })?;
 
         Ok(Bytes::from(response))
     }
@@ -76,12 +71,15 @@ impl TileStore for AzureStore {
     async fn list(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
         let full_prefix = self.key(prefix);
         let mut keys = Vec::new();
-        let mut stream = self.client.list_blobs().prefix(full_prefix.clone()).into_stream();
+        let mut stream = self
+            .client
+            .list_blobs()
+            .prefix(full_prefix.clone())
+            .into_stream();
 
         use futures::StreamExt;
         while let Some(result) = stream.next().await {
-            let page = result
-                .map_err(|e| StoreError::Other(format!("Azure list error: {e}")))?;
+            let page = result.map_err(|e| StoreError::Other(format!("Azure list error: {e}")))?;
             for blob in page.blobs.blobs() {
                 let name = blob
                     .name
