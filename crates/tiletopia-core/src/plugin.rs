@@ -62,6 +62,8 @@ pub enum PluginError {
 pub struct PluginRegistry {
     ingest_plugins: Vec<Box<dyn IngestPlugin>>,
     export_plugins: Vec<Box<dyn ExportPlugin>>,
+    #[cfg(feature = "plugin-dylib")]
+    loaded_libraries: Vec<libloading::Library>,
 }
 
 impl PluginRegistry {
@@ -97,16 +99,36 @@ impl PluginRegistry {
         self.export_plugins.iter().map(|p| p.info()).collect()
     }
 
-    /// Load a plugin from a shared library path.
+    /// Load an ingest plugin from a shared library path.
+    ///
+    /// The library must export a `tiletopia_plugin_create` symbol with signature
+    /// `fn() -> Box<dyn IngestPlugin>`. The loaded library is kept alive for the
+    /// lifetime of this registry.
     ///
     /// # Safety
-    /// Loading shared libraries is inherently unsafe. Only load trusted plugins.
+    ///
+    /// Loading shared libraries is inherently unsafe:
+    /// - The library must be compiled with the same Rust compiler version and ABI.
+    /// - The `tiletopia_plugin_create` symbol must return a valid `Box<dyn IngestPlugin>`.
+    /// - Only load trusted plugins — a malicious library can execute arbitrary code.
     #[cfg(feature = "plugin-dylib")]
-    pub unsafe fn load_dylib(&mut self, _path: &Path) -> Result<(), PluginError> {
-        // Placeholder: would use libloading to load .so/.dylib/.dll
-        Err(PluginError::LoadError(
-            "dylib loading not yet implemented".into(),
-        ))
+    pub unsafe fn load_dylib(&mut self, path: &Path) -> Result<(), PluginError> {
+        let lib = unsafe { libloading::Library::new(path) }
+            .map_err(|e| PluginError::LoadError(format!("failed to load library: {e}")))?;
+
+        let plugin: Box<dyn IngestPlugin> = unsafe {
+            let create_fn: libloading::Symbol<unsafe fn() -> Box<dyn IngestPlugin>> =
+                lib.get(b"tiletopia_plugin_create").map_err(|e| {
+                    PluginError::LoadError(format!(
+                        "symbol 'tiletopia_plugin_create' not found: {e}"
+                    ))
+                })?;
+            create_fn()
+        };
+
+        self.register_ingest(plugin);
+        self.loaded_libraries.push(lib);
+        Ok(())
     }
 }
 
@@ -147,5 +169,19 @@ mod tests {
         assert_eq!(reg.list_ingest().len(), 1);
         assert!(reg.find_ingest(Path::new("test.xyz")).is_some());
         assert!(reg.find_ingest(Path::new("test.las")).is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "plugin-dylib")]
+    fn test_load_dylib_nonexistent_path() {
+        let mut reg = PluginRegistry::new();
+        let result = unsafe { reg.load_dylib(Path::new("/nonexistent/plugin.so")) };
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PluginError::LoadError(msg) => {
+                assert!(msg.contains("failed to load library"));
+            }
+            other => panic!("expected LoadError, got {other:?}"),
+        }
     }
 }
