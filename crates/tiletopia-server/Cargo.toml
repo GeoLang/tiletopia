@@ -33,6 +33,9 @@ rand = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 geo-types = { workspace = true }
+tiff = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+aws-config = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

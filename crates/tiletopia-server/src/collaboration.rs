@@ -5,12 +5,14 @@
 //! - Shared annotations (draw, measure, pin in 3D space)
 //! - Operational transform for concurrent edits
 //! - Room-based sessions with role permissions
+//! - WebSocket-based event broadcasting
 
+use axum::extract::ws::{Message, WebSocket};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
 /// A collaboration session (room).
@@ -158,6 +160,7 @@ pub enum CollabEvent {
 /// Collaboration state.
 pub struct CollaborationEngine {
     sessions: Arc<RwLock<HashMap<Uuid, Session>>>,
+    event_tx: broadcast::Sender<String>,
 }
 
 impl Default for CollaborationEngine {
@@ -171,9 +174,21 @@ impl CollaborationEngine {
         let mut sessions = HashMap::new();
         let demo = Self::demo_session();
         sessions.insert(demo.id, demo);
+        let (event_tx, _) = broadcast::channel(256);
         Self {
             sessions: Arc::new(RwLock::new(sessions)),
+            event_tx,
         }
+    }
+
+    /// Get broadcast sender for event distribution.
+    pub fn event_sender(&self) -> &broadcast::Sender<String> {
+        &self.event_tx
+    }
+
+    /// Subscribe to events (for WebSocket handler).
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.event_tx.subscribe()
     }
 
     /// Create a new collaboration session.
@@ -230,6 +245,82 @@ impl CollaborationEngine {
             .flat_map(|s| &s.participants)
             .filter(|p| p.is_online)
             .count()
+    }
+
+    /// Join a session (add participant, broadcast UserJoined event).
+    pub async fn join_session(
+        &self,
+        session_id: Uuid,
+        user_id: Uuid,
+        display_name: String,
+    ) -> Option<Session> {
+        let mut sessions = self.sessions.write().await;
+        let session = sessions.get_mut(&session_id)?;
+        let participant = Participant {
+            user_id,
+            display_name,
+            avatar_color: format!("#{:06x}", rand::random::<u32>() & 0xFFFFFF),
+            role: SessionRole::Editor,
+            cursor: None,
+            viewport: None,
+            joined_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            is_online: true,
+        };
+        session.participants.push(participant.clone());
+        session.last_activity_at = Utc::now();
+        let _ = self.event_tx.send(
+            serde_json::to_string(&CollabEvent::UserJoined(participant)).unwrap_or_default(),
+        );
+        Some(session.clone())
+    }
+
+    /// Leave a session (mark participant offline, broadcast UserLeft event).
+    pub async fn leave_session(&self, session_id: Uuid, user_id: Uuid) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            if let Some(p) = session
+                .participants
+                .iter_mut()
+                .find(|p| p.user_id == user_id)
+            {
+                p.is_online = false;
+            }
+            let _ = self
+                .event_tx
+                .send(serde_json::to_string(&CollabEvent::UserLeft { user_id }).unwrap_or_default());
+        }
+    }
+
+    /// Update a user's cursor position.
+    pub async fn update_cursor(&self, session_id: Uuid, user_id: Uuid, cursor: Cursor3D) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            if let Some(p) = session
+                .participants
+                .iter_mut()
+                .find(|p| p.user_id == user_id)
+            {
+                p.cursor = Some(cursor.clone());
+                p.last_seen_at = Utc::now();
+            }
+            let _ = self.event_tx.send(
+                serde_json::to_string(&CollabEvent::CursorMoved { user_id, cursor })
+                    .unwrap_or_default(),
+            );
+        }
+    }
+
+    /// Add an annotation to a session.
+    pub async fn add_annotation(&self, session_id: Uuid, annotation: Annotation) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            let _ = self.event_tx.send(
+                serde_json::to_string(&CollabEvent::AnnotationCreated(annotation.clone()))
+                    .unwrap_or_default(),
+            );
+            session.annotations.push(annotation);
+        }
     }
 
     fn demo_session() -> Session {
@@ -315,6 +406,33 @@ impl CollaborationEngine {
     }
 }
 
+/// WebSocket handler for collaboration sessions.
+pub async fn handle_ws(mut socket: WebSocket, engine: Arc<CollaborationEngine>) {
+    let mut rx = engine.subscribe();
+
+    loop {
+        tokio::select! {
+            // Forward broadcast events to client
+            Ok(msg) = rx.recv() => {
+                if socket.send(Message::Text(msg.into())).await.is_err() {
+                    break;
+                }
+            }
+            // Receive client messages
+            Some(Ok(msg)) = socket.recv() => {
+                match msg {
+                    Message::Text(text) => {
+                        tracing::debug!("WS received: {}", text);
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            else => break,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +465,94 @@ mod tests {
         let engine = CollaborationEngine::new();
         let count = engine.active_users().await;
         assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_join_and_leave_session() {
+        let engine = CollaborationEngine::new();
+        let sessions = engine.list_sessions().await;
+        let session_id = sessions[0].id;
+        let user_id = Uuid::new_v4();
+
+        // Subscribe to events before joining (so broadcast has a receiver)
+        let mut rx = engine.subscribe();
+
+        let session = engine
+            .join_session(session_id, user_id, "New User".into())
+            .await
+            .unwrap();
+        assert_eq!(session.participants.len(), 4);
+
+        // Should have received a UserJoined event
+        let event_str = rx.try_recv().unwrap();
+        assert!(event_str.contains("UserJoined"));
+
+        engine.leave_session(session_id, user_id).await;
+        let event_str = rx.try_recv().unwrap();
+        assert!(event_str.contains("UserLeft"));
+
+        let updated = engine.get_session(session_id).await.unwrap();
+        let participant = updated
+            .participants
+            .iter()
+            .find(|p| p.user_id == user_id)
+            .unwrap();
+        assert!(!participant.is_online);
+    }
+
+    #[tokio::test]
+    async fn test_update_cursor() {
+        let engine = CollaborationEngine::new();
+        let sessions = engine.list_sessions().await;
+        let session_id = sessions[0].id;
+        let user_id = sessions[0].participants[0].user_id;
+
+        let mut rx = engine.subscribe();
+        let cursor = Cursor3D {
+            position: [1.0, 2.0, 3.0],
+            direction: [0.0, 0.0, -1.0],
+            timestamp_ms: 999,
+        };
+        engine
+            .update_cursor(session_id, user_id, cursor)
+            .await;
+
+        let event_str = rx.try_recv().unwrap();
+        assert!(event_str.contains("CursorMoved"));
+    }
+
+    #[tokio::test]
+    async fn test_add_annotation() {
+        let engine = CollaborationEngine::new();
+        let sessions = engine.list_sessions().await;
+        let session_id = sessions[0].id;
+
+        let mut rx = engine.subscribe();
+        let annotation = Annotation {
+            id: Uuid::new_v4(),
+            author_id: Uuid::new_v4(),
+            author_name: "Tester".into(),
+            annotation_type: AnnotationType::Pin,
+            position: [0.0, 0.0, 0.0],
+            content: AnnotationContent {
+                text: "Test pin".into(),
+                points: vec![],
+                color: "#000000".into(),
+                attachments: vec![],
+                tags: vec![],
+                priority: None,
+            },
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            resolved: false,
+            replies: vec![],
+        };
+        engine.add_annotation(session_id, annotation).await;
+
+        let event_str = rx.try_recv().unwrap();
+        assert!(event_str.contains("AnnotationCreated"));
+
+        let session = engine.get_session(session_id).await.unwrap();
+        assert_eq!(session.annotations.len(), 2);
     }
 }

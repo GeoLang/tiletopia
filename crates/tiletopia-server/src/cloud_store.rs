@@ -132,50 +132,138 @@ impl S3Store {
     pub fn endpoint(&self) -> Option<&str> {
         self.endpoint.as_deref()
     }
+
+    /// Build AWS SDK config, honoring custom endpoint if set.
+    async fn aws_config(&self) -> aws_config::SdkConfig {
+        let mut loader =
+            aws_config::defaults(aws_config::BehaviorVersion::latest()).region(aws_config::Region::new(self.region.clone()));
+        if let Some(ep) = &self.endpoint {
+            loader = loader.endpoint_url(ep);
+        }
+        loader.load().await
+    }
 }
 
 impl TileStore for S3Store {
-    fn put(&self, key: &str, _data: &[u8]) -> Result<(), StoreError> {
-        // In production, this would use aws-sdk-s3 or rusoto
-        // For now, shell out to AWS CLI or use reqwest with SigV4
-        tracing::info!(bucket = %self.bucket, key, "S3 PUT");
-        // TODO: Implement with aws-sdk-s3 crate
-        Err(StoreError::S3(format!(
-            "S3 PUT not yet implemented (bucket={}, key={})",
-            self.bucket, key
-        )))
+    fn put(&self, key: &str, data: &[u8]) -> Result<(), StoreError> {
+        let rt = tokio::runtime::Handle::current();
+        let bucket = self.bucket.clone();
+        let key = key.to_string();
+        let body = data.to_vec();
+        rt.block_on(async {
+            let config = self.aws_config().await;
+            let client = aws_sdk_s3::Client::new(&config);
+            client
+                .put_object()
+                .bucket(&bucket)
+                .key(&key)
+                .body(body.into())
+                .send()
+                .await
+                .map_err(|e| StoreError::S3(e.to_string()))?;
+            Ok(())
+        })
     }
 
     fn get(&self, key: &str) -> Result<Vec<u8>, StoreError> {
-        tracing::info!(bucket = %self.bucket, key, "S3 GET");
-        Err(StoreError::S3(format!(
-            "S3 GET not yet implemented (bucket={}, key={})",
-            self.bucket, key
-        )))
+        let rt = tokio::runtime::Handle::current();
+        let bucket = self.bucket.clone();
+        let key = key.to_string();
+        rt.block_on(async {
+            let config = self.aws_config().await;
+            let client = aws_sdk_s3::Client::new(&config);
+            let resp = client
+                .get_object()
+                .bucket(&bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    if msg.contains("NoSuchKey") || msg.contains("not found") {
+                        StoreError::NotFound(key.clone())
+                    } else {
+                        StoreError::S3(msg)
+                    }
+                })?;
+            let data = resp
+                .body
+                .collect()
+                .await
+                .map_err(|e| StoreError::S3(e.to_string()))?
+                .into_bytes()
+                .to_vec();
+            Ok(data)
+        })
     }
 
     fn exists(&self, key: &str) -> Result<bool, StoreError> {
-        tracing::info!(bucket = %self.bucket, key, "S3 HEAD");
-        Err(StoreError::S3(format!(
-            "S3 HEAD not yet implemented (bucket={}, key={})",
-            self.bucket, key
-        )))
+        let rt = tokio::runtime::Handle::current();
+        let bucket = self.bucket.clone();
+        let key = key.to_string();
+        rt.block_on(async {
+            let config = self.aws_config().await;
+            let client = aws_sdk_s3::Client::new(&config);
+            match client
+                .head_object()
+                .bucket(&bucket)
+                .key(&key)
+                .send()
+                .await
+            {
+                Ok(_) => Ok(true),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("NotFound") || msg.contains("404") || msg.contains("NoSuchKey")
+                    {
+                        Ok(false)
+                    } else {
+                        Err(StoreError::S3(msg))
+                    }
+                }
+            }
+        })
     }
 
     fn delete(&self, key: &str) -> Result<(), StoreError> {
-        tracing::info!(bucket = %self.bucket, key, "S3 DELETE");
-        Err(StoreError::S3(format!(
-            "S3 DELETE not yet implemented (bucket={}, key={})",
-            self.bucket, key
-        )))
+        let rt = tokio::runtime::Handle::current();
+        let bucket = self.bucket.clone();
+        let key = key.to_string();
+        rt.block_on(async {
+            let config = self.aws_config().await;
+            let client = aws_sdk_s3::Client::new(&config);
+            client
+                .delete_object()
+                .bucket(&bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(|e| StoreError::S3(e.to_string()))?;
+            Ok(())
+        })
     }
 
     fn list(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
-        tracing::info!(bucket = %self.bucket, prefix, "S3 LIST");
-        Err(StoreError::S3(format!(
-            "S3 LIST not yet implemented (bucket={}, prefix={})",
-            self.bucket, prefix
-        )))
+        let rt = tokio::runtime::Handle::current();
+        let bucket = self.bucket.clone();
+        let prefix = prefix.to_string();
+        rt.block_on(async {
+            let config = self.aws_config().await;
+            let client = aws_sdk_s3::Client::new(&config);
+            let resp = client
+                .list_objects_v2()
+                .bucket(&bucket)
+                .prefix(&prefix)
+                .send()
+                .await
+                .map_err(|e| StoreError::S3(e.to_string()))?;
+            let keys: Vec<String> = resp
+                .contents()
+                .iter()
+                .filter_map(|obj| obj.key().map(|k| k.to_string()))
+                .collect();
+            Ok(keys)
+        })
     }
 }
 

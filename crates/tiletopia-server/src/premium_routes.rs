@@ -565,13 +565,15 @@ pub fn elevation_routes() -> Router<Arc<AppState>> {
 }
 
 async fn elevation_point() -> Json<serde_json::Value> {
-    let elev = elevation::get_elevation(37.7749, -122.4194);
+    let dem = elevation::DemStore::new();
+    let elev = elevation::get_elevation(37.7749, -122.4194, &dem);
     Json(serde_json::json!(elev))
 }
 
 async fn elevation_profile_demo() -> Json<serde_json::Value> {
     let path = vec![[-122.42, 37.77], [-122.41, 37.78], [-122.40, 37.79]];
-    let profile = elevation::get_profile(&path);
+    let dem = elevation::DemStore::new();
+    let profile = elevation::get_profile(&path, &dem);
     Json(serde_json::json!(profile))
 }
 

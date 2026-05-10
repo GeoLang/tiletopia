@@ -238,6 +238,136 @@ pub fn available_operations() -> Vec<&'static str> {
     ]
 }
 
+/// Clip subject polygon by convex clip polygon (Sutherland-Hodgman algorithm).
+pub fn polygon_intersection(subject: &[[f64; 2]], clip: &[[f64; 2]]) -> Vec<[f64; 2]> {
+    let mut output = subject.to_vec();
+
+    let clip_len = if clip.len() > 1 && clip.first() == clip.last() {
+        clip.len() - 1 // skip closing vertex for edge iteration
+    } else {
+        clip.len()
+    };
+
+    for i in 0..clip_len {
+        if output.is_empty() {
+            break;
+        }
+        let edge_start = clip[i];
+        let edge_end = clip[(i + 1) % clip_len];
+
+        let input = output.clone();
+        output.clear();
+
+        let n = input.len();
+        for j in 0..n {
+            let current = input[j];
+            let previous = input[(j + n - 1) % n];
+
+            let curr_inside = is_inside(&current, &edge_start, &edge_end);
+            let prev_inside = is_inside(&previous, &edge_start, &edge_end);
+
+            if curr_inside {
+                if !prev_inside {
+                    if let Some(p) = line_intersect(&previous, &current, &edge_start, &edge_end) {
+                        output.push(p);
+                    }
+                }
+                output.push(current);
+            } else if prev_inside {
+                if let Some(p) = line_intersect(&previous, &current, &edge_start, &edge_end) {
+                    output.push(p);
+                }
+            }
+        }
+    }
+    output
+}
+
+/// Test if a point is on the inside (left side) of a directed edge.
+fn is_inside(point: &[f64; 2], edge_start: &[f64; 2], edge_end: &[f64; 2]) -> bool {
+    (edge_end[0] - edge_start[0]) * (point[1] - edge_start[1])
+        - (edge_end[1] - edge_start[1]) * (point[0] - edge_start[0])
+        >= 0.0
+}
+
+/// Find the intersection point of two line segments (p1-p2 and p3-p4).
+fn line_intersect(
+    p1: &[f64; 2],
+    p2: &[f64; 2],
+    p3: &[f64; 2],
+    p4: &[f64; 2],
+) -> Option<[f64; 2]> {
+    let x1 = p1[0];
+    let y1 = p1[1];
+    let x2 = p2[0];
+    let y2 = p2[1];
+    let x3 = p3[0];
+    let y3 = p3[1];
+    let x4 = p4[0];
+    let y4 = p4[1];
+    let denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+    if denom.abs() < 1e-10 {
+        return None;
+    }
+    let t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom;
+    Some([x1 + t * (x2 - x1), y1 + t * (y2 - y1)])
+}
+
+/// Union two polygons (approximation: convex hull of all vertices).
+pub fn polygon_union(a: &[[f64; 2]], b: &[[f64; 2]]) -> Vec<[f64; 2]> {
+    let mut all_points: Vec<[f64; 2]> = a.to_vec();
+    all_points.extend_from_slice(b);
+    convex_hull(&all_points)
+}
+
+/// Compute difference A - B (vertices of A not inside B, plus intersection boundary points).
+pub fn polygon_difference(a: &[[f64; 2]], b: &[[f64; 2]]) -> Vec<[f64; 2]> {
+    let mut result = Vec::new();
+    for point in a {
+        if !point_in_polygon(point, b) {
+            result.push(*point);
+        }
+    }
+    // Add intersection points along A's edges with B's edges
+    let a_len = a.len();
+    let b_len = b.len();
+    for i in 0..a_len {
+        let a1 = a[i];
+        let a2 = a[(i + 1) % a_len];
+        for j in 0..b_len {
+            let b1 = b[j];
+            let b2 = b[(j + 1) % b_len];
+            if let Some(p) = line_intersect(&a1, &a2, &b1, &b2) {
+                result.push(p);
+            }
+        }
+    }
+    if result.len() >= 3 {
+        convex_hull(&result)
+    } else {
+        result
+    }
+}
+
+/// Ray-casting point-in-polygon test.
+fn point_in_polygon(point: &[f64; 2], polygon: &[[f64; 2]]) -> bool {
+    let mut inside = false;
+    let n = polygon.len();
+    let mut j = n - 1;
+    for i in 0..n {
+        if ((polygon[i][1] > point[1]) != (polygon[j][1] > point[1]))
+            && (point[0]
+                < (polygon[j][0] - polygon[i][0]) * (point[1] - polygon[i][1])
+                    / (polygon[j][1] - polygon[i][1])
+                    + polygon[i][0])
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +423,46 @@ mod tests {
         let ops = available_operations();
         assert_eq!(ops.len(), 10);
         assert!(ops.contains(&"Buffer"));
+    }
+
+    #[test]
+    fn test_polygon_intersection() {
+        // Two overlapping squares
+        let subject = vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
+        let clip = vec![[1.0, 1.0], [3.0, 1.0], [3.0, 3.0], [1.0, 3.0]];
+        let result = polygon_intersection(&subject, &clip);
+        assert!(result.len() >= 3, "intersection should produce a polygon");
+        // All result points should be within both input bboxes' overlap: [1,1] to [2,2]
+        for p in &result {
+            assert!(p[0] >= 1.0 - 1e-9 && p[0] <= 2.0 + 1e-9);
+            assert!(p[1] >= 1.0 - 1e-9 && p[1] <= 2.0 + 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_polygon_union() {
+        let a = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let b = vec![[2.0, 0.0], [3.0, 0.0], [3.0, 1.0], [2.0, 1.0]];
+        let result = polygon_union(&a, &b);
+        // Convex hull should contain all input points
+        assert!(result.len() >= 4);
+    }
+
+    #[test]
+    fn test_polygon_difference() {
+        let a = vec![[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]];
+        let b = vec![[2.0, 2.0], [6.0, 2.0], [6.0, 6.0], [2.0, 6.0]];
+        let result = polygon_difference(&a, &b);
+        // Should retain points of A that are outside B
+        assert!(!result.is_empty());
+        // [0,0], [4,0], [0,4] are outside B, [4,4] is inside B
+        assert!(result.iter().any(|p| p[0] < 1.0 && p[1] < 1.0));
+    }
+
+    #[test]
+    fn test_point_in_polygon() {
+        let poly = vec![[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]];
+        assert!(point_in_polygon(&[2.0, 2.0], &poly));
+        assert!(!point_in_polygon(&[5.0, 5.0], &poly));
     }
 }

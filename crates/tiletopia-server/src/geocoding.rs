@@ -2,6 +2,7 @@
 //!
 //! Provides forward geocoding (address → coordinates) and
 //! reverse geocoding (coordinates → address) using open data sources.
+//! Includes both offline demo lookups and async Nominatim API integration.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -184,6 +185,179 @@ pub fn batch_geocode(queries: &[String]) -> Vec<GeocodingResult> {
     queries.iter().map(|q| geocode(q)).collect()
 }
 
+/// Geocoding errors for async API calls.
+#[derive(Debug, thiserror::Error)]
+pub enum GeocodingError {
+    #[error("network error: {0}")]
+    Network(String),
+    #[error("parse error: {0}")]
+    Parse(String),
+}
+
+/// Nominatim API response item.
+#[derive(Debug, Deserialize)]
+struct NominatimResult {
+    place_id: u64,
+    display_name: String,
+    lat: String,
+    lon: String,
+    #[serde(rename = "type")]
+    place_type: String,
+    #[serde(default)]
+    importance: f64,
+    boundingbox: Option<Vec<String>>,
+    address: Option<NominatimAddress>,
+}
+
+/// Address components from Nominatim.
+#[derive(Debug, Deserialize)]
+struct NominatimAddress {
+    house_number: Option<String>,
+    road: Option<String>,
+    city: Option<String>,
+    town: Option<String>,
+    village: Option<String>,
+    state: Option<String>,
+    postcode: Option<String>,
+    country: Option<String>,
+    country_code: Option<String>,
+}
+
+impl NominatimResult {
+    fn to_geocoded_place(&self) -> GeocodedPlace {
+        let lat: f64 = self.lat.parse().unwrap_or(0.0);
+        let lon: f64 = self.lon.parse().unwrap_or(0.0);
+
+        let bbox = self.boundingbox.as_ref().and_then(|bb| {
+            if bb.len() == 4 {
+                Some([
+                    bb[0].parse().unwrap_or(0.0), // south
+                    bb[1].parse().unwrap_or(0.0), // north
+                    bb[2].parse().unwrap_or(0.0), // west
+                    bb[3].parse().unwrap_or(0.0), // east
+                ])
+            } else {
+                None
+            }
+        });
+
+        let addr = self.address.as_ref();
+        let city = addr.and_then(|a| {
+            a.city
+                .clone()
+                .or_else(|| a.town.clone())
+                .or_else(|| a.village.clone())
+        });
+
+        GeocodedPlace {
+            place_id: format!("osm_{}", self.place_id),
+            display_name: self.display_name.clone(),
+            latitude: lat,
+            longitude: lon,
+            place_type: classify_place_type(&self.place_type),
+            confidence: self.importance as f32,
+            bounding_box: bbox,
+            address: Address {
+                house_number: addr.and_then(|a| a.house_number.clone()),
+                street: addr.and_then(|a| a.road.clone()),
+                city,
+                state: addr.and_then(|a| a.state.clone()),
+                postal_code: addr.and_then(|a| a.postcode.clone()),
+                country: addr.and_then(|a| a.country.clone()),
+                country_code: addr.and_then(|a| a.country_code.clone()),
+            },
+        }
+    }
+}
+
+fn classify_place_type(osm_type: &str) -> PlaceType {
+    match osm_type {
+        "house" | "building" | "residential" => PlaceType::Address,
+        "road" | "street" | "highway" | "path" => PlaceType::Street,
+        "suburb" | "neighbourhood" | "quarter" => PlaceType::Neighborhood,
+        "city" | "town" | "village" | "hamlet" => PlaceType::City,
+        "state" | "province" | "region" => PlaceType::State,
+        "country" => PlaceType::Country,
+        "aerodrome" | "aeroway" => PlaceType::Airport,
+        "station" | "halt" | "stop" => PlaceType::Station,
+        _ => PlaceType::Poi,
+    }
+}
+
+/// Forward geocode using the Nominatim OpenStreetMap API.
+pub async fn geocode_nominatim(query: &str) -> Result<GeocodingResult, GeocodingError> {
+    let client = reqwest::Client::builder()
+        .user_agent("tiletopia/0.3.0")
+        .build()
+        .map_err(|e| GeocodingError::Network(e.to_string()))?;
+
+    let resp = client
+        .get("https://nominatim.openstreetmap.org/search")
+        .query(&[
+            ("q", query),
+            ("format", "jsonv2"),
+            ("limit", "5"),
+            ("addressdetails", "1"),
+        ])
+        .send()
+        .await
+        .map_err(|e| GeocodingError::Network(e.to_string()))?;
+
+    let items: Vec<NominatimResult> = resp
+        .json()
+        .await
+        .map_err(|e| GeocodingError::Parse(e.to_string()))?;
+
+    let results: Vec<GeocodedPlace> = items.iter().map(|r| r.to_geocoded_place()).collect();
+
+    Ok(GeocodingResult {
+        id: Uuid::new_v4(),
+        query: query.to_string(),
+        results,
+        provider: GeoProvider::Osm,
+    })
+}
+
+/// Reverse geocode using the Nominatim OpenStreetMap API.
+pub async fn reverse_geocode_nominatim(
+    latitude: f64,
+    longitude: f64,
+) -> Result<GeocodedPlace, GeocodingError> {
+    let client = reqwest::Client::builder()
+        .user_agent("tiletopia/0.3.0")
+        .build()
+        .map_err(|e| GeocodingError::Network(e.to_string()))?;
+
+    let lat_str = latitude.to_string();
+    let lon_str = longitude.to_string();
+
+    let resp = client
+        .get("https://nominatim.openstreetmap.org/reverse")
+        .query(&[
+            ("lat", lat_str.as_str()),
+            ("lon", lon_str.as_str()),
+            ("format", "jsonv2"),
+            ("addressdetails", "1"),
+        ])
+        .send()
+        .await
+        .map_err(|e| GeocodingError::Network(e.to_string()))?;
+
+    let item: NominatimResult = resp
+        .json()
+        .await
+        .map_err(|e| GeocodingError::Parse(e.to_string()))?;
+
+    Ok(item.to_geocoded_place())
+}
+
+/// Parse a Nominatim JSON response into geocoded places (useful for testing with mock data).
+pub fn parse_nominatim_response(json: &str) -> Result<Vec<GeocodedPlace>, GeocodingError> {
+    let items: Vec<NominatimResult> =
+        serde_json::from_str(json).map_err(|e| GeocodingError::Parse(e.to_string()))?;
+    Ok(items.iter().map(|r| r.to_geocoded_place()).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +381,54 @@ mod tests {
         let queries = vec!["Eiffel Tower".into(), "Times Square".into()];
         let results = batch_geocode(&queries);
         assert_eq!(results.len(), 2);
+    }
+
+    /// Parse a mock Nominatim JSON response without making network calls.
+    #[test]
+    fn test_parse_nominatim_response() {
+        let json = r#"[
+            {
+                "place_id": 12345,
+                "display_name": "Golden Gate Bridge, San Francisco, CA, USA",
+                "lat": "37.8199",
+                "lon": "-122.4783",
+                "type": "attraction",
+                "importance": 0.85,
+                "boundingbox": ["37.8080", "37.8320", "-122.4840", "-122.4700"],
+                "address": {
+                    "road": "Golden Gate Bridge",
+                    "city": "San Francisco",
+                    "state": "California",
+                    "postcode": "94129",
+                    "country": "United States",
+                    "country_code": "us"
+                }
+            }
+        ]"#;
+
+        let places = parse_nominatim_response(json).unwrap();
+        assert_eq!(places.len(), 1);
+        let p = &places[0];
+        assert_eq!(p.place_id, "osm_12345");
+        assert!((p.latitude - 37.8199).abs() < 0.001);
+        assert!((p.longitude - (-122.4783)).abs() < 0.001);
+        assert_eq!(p.address.city.as_deref(), Some("San Francisco"));
+        assert_eq!(p.address.country_code.as_deref(), Some("us"));
+        assert_eq!(p.place_type, PlaceType::Poi);
+    }
+
+    #[test]
+    fn test_parse_nominatim_empty() {
+        let places = parse_nominatim_response("[]").unwrap();
+        assert!(places.is_empty());
+    }
+
+    #[test]
+    fn test_classify_place_types() {
+        assert_eq!(classify_place_type("city"), PlaceType::City);
+        assert_eq!(classify_place_type("road"), PlaceType::Street);
+        assert_eq!(classify_place_type("country"), PlaceType::Country);
+        assert_eq!(classify_place_type("aerodrome"), PlaceType::Airport);
+        assert_eq!(classify_place_type("something_else"), PlaceType::Poi);
     }
 }

@@ -6245,6 +6245,8 @@ name = "tiletopia-server"
 version = "0.3.0"
 dependencies = [
  "aes-gcm",
+ "aws-config",
+ "aws-sdk-s3",
  "axum",
  "axum-extra",
  "bytes",
@@ -6262,6 +6264,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
+ "tiff 0.9.1",
  "tiletopia-core",
  "tiletopia-ingest",
  "tiletopia-store",
