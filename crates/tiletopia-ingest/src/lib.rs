@@ -21,6 +21,7 @@ pub mod photogrammetry;
 pub mod ply_reader;
 pub mod shapefile_reader;
 pub mod tiff_reader;
+pub mod usgs_dem_reader;
 
 use thiserror::Error;
 
@@ -125,6 +126,7 @@ pub fn read_heightmap(path: &std::path::Path) -> Result<Heightmap, IngestError> 
         Some("tif" | "tiff") => tiff_reader::read(path),
         Some("dt0" | "dt1" | "dt2") => dted_reader::read(path),
         Some("hgt") => hgt_reader::read(path),
+        Some("dem") => usgs_dem_reader::read(path),
         Some(ext) => Err(IngestError::UnsupportedFormat(ext.to_string())),
         None => Err(IngestError::UnsupportedFormat("unknown".to_string())),
     }

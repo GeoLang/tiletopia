@@ -27,3 +27,6 @@ rusqlite = { workspace = true }
 fbxcel-dom = { workspace = true }
 ifc-lite-core = { workspace = true }
 ifc-lite-geometry = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

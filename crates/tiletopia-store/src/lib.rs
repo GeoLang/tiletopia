@@ -3,6 +3,9 @@
 //! Abstraction over local filesystem, S3, GCS, and Azure Blob storage
 //! for reading/writing tiles and assets.
 
+pub mod azure;
+pub mod gcs;
+pub mod hybrid;
 pub mod s3;
 
 use bytes::Bytes;

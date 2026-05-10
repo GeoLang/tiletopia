@@ -16,6 +16,10 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 aws-sdk-s3 = { workspace = true }
 aws-config = { workspace = true }
+cloud-storage = { workspace = true }
+azure_storage = { workspace = true }
+azure_storage_blobs = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
