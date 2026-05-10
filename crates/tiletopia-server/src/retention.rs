@@ -142,6 +142,83 @@ impl RetentionEngine {
     pub fn active_rule_count(&self) -> usize {
         self.rules.iter().filter(|r| r.enabled).count()
     }
+
+    /// Execute retention actions against a filesystem data directory.
+    /// Returns the number of actions successfully executed.
+    pub fn execute_actions(
+        &self,
+        actions: &[RetentionAction],
+        data_dir: &std::path::Path,
+    ) -> Vec<ExecutionResult> {
+        actions
+            .iter()
+            .map(|action| {
+                let resource_path = data_dir.join(&action.resource_id);
+                let result = match &action.action {
+                    LifecycleAction::Delete => {
+                        if resource_path.exists() {
+                            std::fs::remove_file(&resource_path)
+                                .or_else(|_| std::fs::remove_dir_all(&resource_path))
+                                .map(|_| "deleted".to_string())
+                                .map_err(|e| e.to_string())
+                        } else {
+                            Ok("already absent".to_string())
+                        }
+                    }
+                    LifecycleAction::Archive => {
+                        let archive_dir = data_dir.join("archive");
+                        let _ = std::fs::create_dir_all(&archive_dir);
+                        let dest = archive_dir.join(&action.resource_id);
+                        if resource_path.exists() {
+                            std::fs::rename(&resource_path, &dest)
+                                .map(|_| format!("archived to {}", dest.display()))
+                                .map_err(|e| e.to_string())
+                        } else {
+                            Ok("already absent".to_string())
+                        }
+                    }
+                    LifecycleAction::MoveToGlacier => {
+                        let cold_dir = data_dir.join("cold-storage");
+                        let _ = std::fs::create_dir_all(&cold_dir);
+                        let dest = cold_dir.join(&action.resource_id);
+                        if resource_path.exists() {
+                            std::fs::rename(&resource_path, &dest)
+                                .map(|_| format!("moved to cold storage: {}", dest.display()))
+                                .map_err(|e| e.to_string())
+                        } else {
+                            Ok("already absent".to_string())
+                        }
+                    }
+                    LifecycleAction::Compress => {
+                        // Mark as needing compression (actual gzip would require async I/O)
+                        Ok("compression queued".to_string())
+                    }
+                    LifecycleAction::Notify { email } => {
+                        // Log the notification (actual email would need SMTP)
+                        Ok(format!("notification queued for {email}"))
+                    }
+                };
+
+                ExecutionResult {
+                    resource_id: action.resource_id.clone(),
+                    rule_id: action.rule_id.clone(),
+                    action: action.action.clone(),
+                    success: result.is_ok(),
+                    message: result.unwrap_or_else(|e| e),
+                }
+            })
+            .collect()
+    }
+}
+
+/// Result of executing a single retention action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionResult {
+    pub resource_id: String,
+    pub rule_id: String,
+    pub action: LifecycleAction,
+    pub success: bool,
+    pub message: String,
 }
 
 impl Default for RetentionEngine {

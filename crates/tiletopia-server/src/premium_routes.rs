@@ -2,7 +2,8 @@
 //!
 //! Wires up all premium modules into axum routers.
 
-use axum::{Json, Router, routing::get};
+use axum::{Json, Router, extract::Query, routing::get};
+use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -333,14 +334,39 @@ pub fn geocoding_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/geocoding/reverse", get(geocode_reverse))
 }
 
-async fn geocode_search() -> Json<serde_json::Value> {
-    let result = geocoding::geocode("Golden Gate Bridge");
-    Json(serde_json::json!(result))
+#[derive(Deserialize)]
+struct GeocodeQuery {
+    q: Option<String>,
 }
 
-async fn geocode_reverse() -> Json<serde_json::Value> {
-    let place = geocoding::reverse_geocode(37.7749, -122.4194);
-    Json(serde_json::json!(place))
+#[derive(Deserialize)]
+struct ReverseGeocodeQuery {
+    lat: Option<f64>,
+    lon: Option<f64>,
+}
+
+async fn geocode_search(Query(params): Query<GeocodeQuery>) -> Json<serde_json::Value> {
+    let query = params.q.unwrap_or_else(|| "Golden Gate Bridge".into());
+    // Try live Nominatim first, fall back to demo
+    match geocoding::geocode_nominatim(&query).await {
+        Ok(result) => Json(serde_json::json!(result)),
+        Err(_) => {
+            let result = geocoding::geocode(&query);
+            Json(serde_json::json!(result))
+        }
+    }
+}
+
+async fn geocode_reverse(Query(params): Query<ReverseGeocodeQuery>) -> Json<serde_json::Value> {
+    let lat = params.lat.unwrap_or(37.7749);
+    let lon = params.lon.unwrap_or(-122.4194);
+    match geocoding::reverse_geocode_nominatim(lat, lon).await {
+        Ok(place) => Json(serde_json::json!(place)),
+        Err(_) => {
+            let place = geocoding::reverse_geocode(lat, lon);
+            Json(serde_json::json!(place))
+        }
+    }
 }
 
 /// Routes for STAC catalog.
@@ -403,7 +429,7 @@ async fn cog_stats() -> Json<serde_json::Value> {
 pub fn routing_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/routing/stats", get(routing_stats))
-        .route("/api/v1/routing/route", get(compute_demo_route))
+        .route("/api/v1/routing/route", get(compute_route))
 }
 
 async fn routing_stats() -> Json<routing::RoutingStats> {
@@ -411,12 +437,32 @@ async fn routing_stats() -> Json<routing::RoutingStats> {
     Json(engine.stats())
 }
 
-async fn compute_demo_route() -> Json<serde_json::Value> {
+#[derive(Deserialize)]
+struct RouteQuery {
+    origin_lon: Option<f64>,
+    origin_lat: Option<f64>,
+    dest_lon: Option<f64>,
+    dest_lat: Option<f64>,
+    profile: Option<String>,
+}
+
+async fn compute_route(Query(params): Query<RouteQuery>) -> Json<serde_json::Value> {
     let engine = routing::RoutingEngine::new();
+    let profile = match params.profile.as_deref() {
+        Some("walking") => routing::RoutingProfile::Walking,
+        Some("cycling") => routing::RoutingProfile::Cycling,
+        _ => routing::RoutingProfile::Driving,
+    };
     let req = routing::RouteRequest {
-        origin: [-122.4194, 37.7749],
-        destination: [-122.4100, 37.7800],
-        profile: routing::RoutingProfile::Driving,
+        origin: [
+            params.origin_lon.unwrap_or(-122.4194),
+            params.origin_lat.unwrap_or(37.7749),
+        ],
+        destination: [
+            params.dest_lon.unwrap_or(-122.4100),
+            params.dest_lat.unwrap_or(37.7800),
+        ],
+        profile,
         alternatives: false,
     };
     match engine.compute_route(&req) {
@@ -472,15 +518,37 @@ async fn list_vector_layers() -> Json<serde_json::Value> {
 /// Routes for isochrone/travel-time analysis.
 pub fn isochrone_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/v1/isochrone/compute", get(compute_isochrone_demo))
+        .route("/api/v1/isochrone/compute", get(compute_isochrone))
         .route("/api/v1/isochrone/profiles", get(isochrone_profiles))
 }
 
-async fn compute_isochrone_demo() -> Json<serde_json::Value> {
+#[derive(Deserialize)]
+struct IsochroneQuery {
+    lon: Option<f64>,
+    lat: Option<f64>,
+    minutes: Option<String>, // comma-separated: "5,10,15"
+    profile: Option<String>,
+}
+
+async fn compute_isochrone(Query(params): Query<IsochroneQuery>) -> Json<serde_json::Value> {
+    let contours: Vec<u32> = params
+        .minutes
+        .unwrap_or_else(|| "5,10,15".into())
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    let profile = match params.profile.as_deref() {
+        Some("walking") => isochrone::TravelProfile::Walking,
+        Some("cycling") => isochrone::TravelProfile::Cycling,
+        _ => isochrone::TravelProfile::Driving,
+    };
     let request = isochrone::IsochroneRequest {
-        origin: [-122.4194, 37.7749],
-        profile: isochrone::TravelProfile::Driving,
-        contours_minutes: vec![5, 10, 15],
+        origin: [
+            params.lon.unwrap_or(-122.4194),
+            params.lat.unwrap_or(37.7749),
+        ],
+        profile,
+        contours_minutes: contours,
         denoise: 0.5,
     };
     let result = isochrone::compute_isochrone(&request);
@@ -528,7 +596,7 @@ async fn geoprocessing_demo() -> Json<serde_json::Value> {
 pub fn feature_service_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/features/layers", get(list_feature_layers))
-        .route("/api/v1/features/query", get(query_features_demo))
+        .route("/api/v1/features/query", get(query_features))
 }
 
 async fn list_feature_layers() -> Json<serde_json::Value> {
@@ -537,17 +605,40 @@ async fn list_feature_layers() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "layers": layers }))
 }
 
-async fn query_features_demo() -> Json<serde_json::Value> {
+#[derive(Deserialize)]
+struct FeatureQuery {
+    layer: Option<String>,
+    bbox: Option<String>, // "minx,miny,maxx,maxy"
+    limit: Option<usize>,
+    offset: Option<usize>,
+    #[serde(rename = "where")]
+    where_clause: Option<String>,
+}
+
+async fn query_features(Query(params): Query<FeatureQuery>) -> Json<serde_json::Value> {
     let engine = feature_service::FeatureServiceEngine::new();
     let layers = engine.list_layers();
-    if let Some(layer) = layers.first() {
+    let layer = if let Some(name) = &params.layer {
+        layers.iter().find(|l| l.name == *name)
+    } else {
+        layers.first()
+    };
+    if let Some(layer) = layer {
+        let bbox = params.bbox.and_then(|b| {
+            let parts: Vec<f64> = b.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            if parts.len() == 4 {
+                Some([parts[0], parts[1], parts[2], parts[3]])
+            } else {
+                None
+            }
+        });
         let query = feature_service::SpatialQuery {
-            bbox: None,
+            bbox,
             intersects: None,
             within_distance_m: None,
-            where_clause: None,
-            limit: 100,
-            offset: 0,
+            where_clause: params.where_clause,
+            limit: params.limit.unwrap_or(100),
+            offset: params.offset.unwrap_or(0),
             order_by: None,
         };
         let features = engine.query_features(layer.id, &query);
@@ -564,9 +655,17 @@ pub fn elevation_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/elevation/profile", get(elevation_profile_demo))
 }
 
-async fn elevation_point() -> Json<serde_json::Value> {
+#[derive(Deserialize)]
+struct ElevationQuery {
+    lat: Option<f64>,
+    lon: Option<f64>,
+}
+
+async fn elevation_point(Query(params): Query<ElevationQuery>) -> Json<serde_json::Value> {
     let dem = elevation::DemStore::new();
-    let elev = elevation::get_elevation(37.7749, -122.4194, &dem);
+    let lat = params.lat.unwrap_or(37.7749);
+    let lon = params.lon.unwrap_or(-122.4194);
+    let elev = elevation::get_elevation(lat, lon, &dem);
     Json(serde_json::json!(elev))
 }
 
@@ -628,18 +727,38 @@ async fn map_match_demo() -> Json<serde_json::Value> {
 /// Routes for static map rendering.
 pub fn static_map_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/v1/static-map/render", get(static_map_info))
+        .route("/api/v1/static-map/render", get(static_map_render))
         .route("/api/v1/static-map/formats", get(static_map_formats))
 }
 
-async fn static_map_info() -> Json<serde_json::Value> {
+#[derive(Deserialize)]
+struct StaticMapQuery {
+    lon: Option<f64>,
+    lat: Option<f64>,
+    zoom: Option<f64>,
+    width: Option<u32>,
+    height: Option<u32>,
+    format: Option<String>,
+}
+
+async fn static_map_render(Query(params): Query<StaticMapQuery>) -> Json<serde_json::Value> {
+    let format = match params.format.as_deref() {
+        Some("jpeg") | Some("jpg") => static_map::ImageFormat::Jpeg,
+        Some("webp") => static_map::ImageFormat::Webp,
+        Some("svg") => static_map::ImageFormat::Svg,
+        Some("pdf") => static_map::ImageFormat::Pdf,
+        _ => static_map::ImageFormat::Png,
+    };
     let req = static_map::StaticMapRequest {
-        center: Some([-122.4194, 37.7749]),
-        zoom: Some(14.0),
+        center: Some([
+            params.lon.unwrap_or(-122.4194),
+            params.lat.unwrap_or(37.7749),
+        ]),
+        zoom: Some(params.zoom.unwrap_or(14.0)),
         bbox: None,
-        width: 800,
-        height: 600,
-        format: static_map::ImageFormat::Png,
+        width: params.width.unwrap_or(800),
+        height: params.height.unwrap_or(600),
+        format,
         style_id: None,
         markers: vec![],
         overlays: vec![],
@@ -861,12 +980,18 @@ async fn multispectral_demo() -> Json<serde_json::Value> {
     let red = vec![0.1, 0.2, 0.3, 0.05, 0.15, 0.25, 0.08, 0.12, 0.18];
     let nir = vec![0.5, 0.4, 0.3, 0.8, 0.6, 0.35, 0.7, 0.55, 0.45];
     let ndvi = multispectral::compute_ndvi(&red, &nir);
+    let blue = [0.05; 9];
+    let evi = multispectral::compute_evi(&nir, &red, &blue);
     let classification = multispectral::classify_ndvi(&ndvi, 0.25);
     Json(serde_json::json!({
         "ndvi_values": ndvi,
+        "evi_values": evi,
         "classification": classification,
-        "min": ndvi.iter().cloned().fold(f64::INFINITY, f64::min),
-        "max": ndvi.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        "statistics": {
+            "ndvi_min": ndvi.iter().cloned().fold(f64::INFINITY, f64::min),
+            "ndvi_max": ndvi.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+            "ndvi_mean": ndvi.iter().sum::<f64>() / ndvi.len() as f64,
+        }
     }))
 }
 

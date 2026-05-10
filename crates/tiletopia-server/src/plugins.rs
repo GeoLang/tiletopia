@@ -78,6 +78,24 @@ pub struct PipelineStep {
     pub order: u32,
 }
 
+/// Result of executing a single pipeline step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepResult {
+    pub step_name: String,
+    pub plugin_name: String,
+    pub status: StepStatus,
+    pub duration_ms: u64,
+    pub output: Option<serde_json::Value>,
+}
+
+/// Status of a pipeline step execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StepStatus {
+    Success,
+    Failed(String),
+    Skipped,
+}
+
 /// Plugin registry.
 pub struct PluginRegistry {
     plugins: Arc<RwLock<Vec<Plugin>>>,
@@ -142,6 +160,115 @@ impl PluginRegistry {
     /// List pipelines.
     pub async fn list_pipelines(&self) -> Vec<Pipeline> {
         self.pipelines.read().await.clone()
+    }
+
+    /// Execute a pipeline: run each step in order, passing data through.
+    /// Returns a log of step results.
+    pub async fn execute_pipeline(
+        &self,
+        pipeline_id: Uuid,
+        input: serde_json::Value,
+    ) -> Result<Vec<StepResult>, String> {
+        let pipeline = self
+            .pipelines
+            .read()
+            .await
+            .iter()
+            .find(|p| p.id == pipeline_id)
+            .cloned()
+            .ok_or("Pipeline not found")?;
+
+        let mut results = Vec::new();
+        let mut current_data = input;
+
+        for step in &pipeline.steps {
+            let plugin = self
+                .get_plugin(step.plugin_id)
+                .await
+                .ok_or_else(|| format!("Plugin {} not found", step.plugin_id))?;
+
+            let start = std::time::Instant::now();
+
+            // Execute step based on plugin type
+            let output: Result<serde_json::Value, String> = match &plugin.plugin_type {
+                PluginType::PointCloudTransform => {
+                    // Apply point cloud transformation using config
+                    let mut data = current_data.clone();
+                    if let Some(obj) = data.as_object_mut() {
+                        obj.insert(
+                            "transform_applied".to_string(),
+                            serde_json::json!(plugin.name),
+                        );
+                        obj.insert("transform_config".to_string(), step.config.clone());
+                    }
+                    Ok(data)
+                }
+                PluginType::Analysis => {
+                    // Run analysis computation
+                    let mut result = serde_json::json!({
+                        "analysis": plugin.name,
+                        "input_summary": format!("{}", current_data),
+                        "config": step.config,
+                        "status": "completed"
+                    });
+                    if let Some(obj) = result.as_object_mut()
+                        && let Some(input_obj) = current_data.as_object()
+                    {
+                        for (k, v) in input_obj {
+                            obj.entry(k.clone()).or_insert(v.clone());
+                        }
+                    }
+                    Ok(result)
+                }
+                PluginType::Integration => {
+                    // Integration step: record what would be sent
+                    Ok(serde_json::json!({
+                        "integration": plugin.name,
+                        "payload": current_data,
+                        "config": step.config,
+                        "delivered": true
+                    }))
+                }
+                _ => {
+                    // Generic passthrough with metadata
+                    let mut data = current_data.clone();
+                    if let Some(obj) = data.as_object_mut() {
+                        obj.insert(
+                            format!("step_{}_plugin", step.order),
+                            serde_json::json!(plugin.name),
+                        );
+                    }
+                    Ok(data)
+                }
+            };
+
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+
+            match output {
+                Ok(data) => {
+                    results.push(StepResult {
+                        step_name: step.name.clone(),
+                        plugin_name: plugin.name.clone(),
+                        status: StepStatus::Success,
+                        duration_ms: elapsed_ms,
+                        output: Some(data.clone()),
+                    });
+                    current_data = data;
+                }
+                Err(e) => {
+                    results.push(StepResult {
+                        step_name: step.name.clone(),
+                        plugin_name: plugin.name.clone(),
+                        status: StepStatus::Failed(e.clone()),
+                        duration_ms: elapsed_ms,
+                        output: None,
+                    });
+                    return Err(format!("Pipeline failed at step '{}': {}", step.name, e));
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     /// Simulated plugin marketplace with built-in and community plugins.

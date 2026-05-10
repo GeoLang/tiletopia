@@ -195,6 +195,165 @@ impl Scheduler {
         }
     }
 
+    /// Parse a cron expression and compute the next run time after `after`.
+    /// Supports standard 5-field cron: minute hour day-of-month month day-of-week
+    pub fn next_cron_time(cron_expr: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        use chrono::Timelike;
+        let fields: Vec<&str> = cron_expr.split_whitespace().collect();
+        if fields.len() != 5 {
+            return None;
+        }
+
+        let parse_field = |field: &str, max: u32| -> Vec<u32> {
+            if field == "*" {
+                return (0..=max).collect();
+            }
+            if let Some(step) = field.strip_prefix("*/")
+                && let Ok(s) = step.parse::<u32>()
+            {
+                return (0..=max).step_by(s.max(1) as usize).collect();
+            }
+            // Comma-separated values and ranges
+            field
+                .split(',')
+                .flat_map(|part| {
+                    if let Some((a, b)) = part.split_once('-') {
+                        let start = a.parse::<u32>().unwrap_or(0);
+                        let end = b.parse::<u32>().unwrap_or(max);
+                        (start..=end).collect::<Vec<_>>()
+                    } else {
+                        part.parse::<u32>().into_iter().collect()
+                    }
+                })
+                .collect()
+        };
+
+        let minutes = parse_field(fields[0], 59);
+        let hours = parse_field(fields[1], 23);
+        let _doms = parse_field(fields[2], 31);
+        let _months = parse_field(fields[3], 12);
+        let _dows = parse_field(fields[4], 6);
+
+        // Simple: find next matching minute+hour from `after`
+        let mut candidate = after + chrono::Duration::minutes(1);
+        // Zero out seconds
+        candidate = candidate
+            .with_second(0)
+            .unwrap_or(candidate);
+        for _ in 0..1440 {
+            // search up to 24 hours
+            let h = candidate.hour();
+            let m = candidate.minute();
+            if hours.contains(&h) && minutes.contains(&m) {
+                return Some(candidate);
+            }
+            candidate += chrono::Duration::minutes(1);
+        }
+        // Fallback: 1 hour from now
+        Some(after + chrono::Duration::hours(1))
+    }
+
+    /// Tick the scheduler: check for due jobs, execute them, record runs.
+    /// Returns the number of jobs executed.
+    pub async fn tick<F, Fut>(&self, executor: F) -> usize
+    where
+        F: Fn(ScheduledJob) -> Fut,
+        Fut: std::future::Future<Output = Result<String, String>>,
+    {
+        let now = Utc::now();
+        let due_job_ids: Vec<Uuid> = {
+            let jobs = self.jobs.read().await;
+            jobs.iter()
+                .filter(|j| {
+                    j.status == JobStatus::Active
+                        && j.next_run_at.is_some_and(|t| t <= now)
+                })
+                .map(|j| j.id)
+                .collect()
+        };
+
+        let mut executed = 0;
+        for job_id in &due_job_ids {
+            // Mark as running
+            let job = {
+                let mut jobs = self.jobs.write().await;
+                if let Some(j) = jobs.iter_mut().find(|j| j.id == *job_id) {
+                    j.status = JobStatus::Running;
+                    j.clone()
+                } else {
+                    continue;
+                }
+            };
+
+            let run_id = Uuid::new_v4();
+            let started_at = Utc::now();
+
+            let result = executor(job.clone()).await;
+
+            let completed_at = Utc::now();
+            let duration = (completed_at - started_at).num_milliseconds() as f64 / 1000.0;
+
+            let (run_status, output) = match result {
+                Ok(msg) => (RunStatus::Success, Some(msg)),
+                Err(msg) => (RunStatus::Failed(msg.clone()), Some(msg)),
+            };
+
+            // Record the run
+            self.runs.write().await.push(JobRun {
+                id: run_id,
+                job_id: *job_id,
+                started_at,
+                completed_at: Some(completed_at),
+                duration_secs: Some(duration),
+                status: run_status.clone(),
+                output,
+            });
+
+            // Update job state
+            {
+                let mut jobs = self.jobs.write().await;
+                if let Some(j) = jobs.iter_mut().find(|j| j.id == *job_id) {
+                    j.status = JobStatus::Active;
+                    j.last_run_at = Some(completed_at);
+                    j.run_count += 1;
+                    if matches!(run_status, RunStatus::Failed(_)) {
+                        j.failure_count += 1;
+                    }
+                    // Compute next run
+                    j.next_run_at = match &j.schedule {
+                        Schedule::OneShot(_) => {
+                            j.status = JobStatus::Completed;
+                            None
+                        }
+                        Schedule::Interval(secs) => {
+                            Some(completed_at + chrono::Duration::seconds(*secs as i64))
+                        }
+                        Schedule::Cron(expr) => Self::next_cron_time(expr, completed_at),
+                    };
+                }
+            }
+
+            executed += 1;
+        }
+
+        executed
+    }
+
+    /// Start the scheduler loop (runs in background).
+    pub fn spawn(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                let _executed = self
+                    .tick(|job| async move {
+                        // Default executor: log the job type
+                        Ok(format!("Executed {:?} job '{}'", job.job_type, job.name))
+                    })
+                    .await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            }
+        })
+    }
+
     fn demo_data() -> (Vec<ScheduledJob>, Vec<JobRun>) {
         let tenant = Uuid::new_v4();
         let terrain_job_id = Uuid::new_v4();

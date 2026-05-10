@@ -292,6 +292,80 @@ impl MapTileEngine {
             "center": [0.0, 0.0, source.min_zoom],
         }))
     }
+
+    /// Fetch a tile from the upstream source, caching it locally.
+    /// Returns the tile bytes and content type.
+    pub async fn fetch_tile(
+        &mut self,
+        source_id: Uuid,
+        coord: TileCoord,
+        cache_dir: &std::path::Path,
+    ) -> Result<(Vec<u8>, String), String> {
+        let cache_key = format!("{source_id}/{}/{}/{}", coord.z, coord.x, coord.y);
+        let cache_path = cache_dir.join(&cache_key);
+
+        // Check local cache
+        if cache_path.exists() {
+            let bytes = std::fs::read(&cache_path).map_err(|e| e.to_string())?;
+            self.cache_stats.hit_count += 1;
+            let content_type = self.content_type_for_source(source_id);
+            return Ok((bytes, content_type));
+        }
+
+        self.cache_stats.miss_count += 1;
+
+        // Fetch from upstream
+        let url = self
+            .resolve_tile_url(source_id, coord)
+            .ok_or("Source not found")?;
+
+        let client = reqwest::Client::builder()
+            .user_agent("tiletopia/0.3.0")
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Upstream fetch failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("Upstream returned {}", resp.status()));
+        }
+
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+
+        let bytes = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
+
+        // Write to cache
+        if let Some(parent) = cache_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&cache_path, &bytes);
+
+        self.cache_stats.total_entries += 1;
+        self.cache_stats.total_size_bytes += bytes.len() as u64;
+
+        Ok((bytes, content_type))
+    }
+
+    fn content_type_for_source(&self, source_id: Uuid) -> String {
+        self.get_source(source_id)
+            .map(|s| match s.format {
+                TileFormat::Png => "image/png",
+                TileFormat::Jpeg => "image/jpeg",
+                TileFormat::Webp => "image/webp",
+                TileFormat::Pbf | TileFormat::Mvt => "application/x-protobuf",
+            })
+            .unwrap_or("application/octet-stream")
+            .to_string()
+    }
 }
 
 impl Default for MapTileEngine {

@@ -108,6 +108,154 @@ impl IssueTracker {
         }
     }
 
+    /// Create a new issue.
+    pub fn create_issue(
+        &mut self,
+        title: String,
+        description: String,
+        issue_type: IssueType,
+        severity: Severity,
+        location: IssueLocation,
+        reporter: String,
+    ) -> &Issue {
+        let now = Utc::now();
+        let issue = Issue {
+            id: Uuid::new_v4(),
+            title,
+            description,
+            issue_type,
+            severity,
+            status: IssueStatus::Open,
+            location,
+            assignee: None,
+            reporter,
+            tags: Vec::new(),
+            attachments: Vec::new(),
+            comments: Vec::new(),
+            due_date: None,
+            created_at: now,
+            updated_at: now,
+            resolved_at: None,
+        };
+        self.issues.push(issue);
+        self.issues.last().unwrap()
+    }
+
+    /// Transition issue status following valid workflow rules.
+    pub fn transition_status(
+        &mut self,
+        id: Uuid,
+        new_status: IssueStatus,
+    ) -> Result<(), String> {
+        let issue = self
+            .issues
+            .iter_mut()
+            .find(|i| i.id == id)
+            .ok_or_else(|| "Issue not found".to_string())?;
+
+        let valid = matches!(
+            (&issue.status, &new_status),
+            (IssueStatus::Open, IssueStatus::InProgress)
+                | (IssueStatus::Open, IssueStatus::Wontfix)
+                | (IssueStatus::InProgress, IssueStatus::UnderReview)
+                | (IssueStatus::InProgress, IssueStatus::Open)
+                | (IssueStatus::UnderReview, IssueStatus::Resolved)
+                | (IssueStatus::UnderReview, IssueStatus::InProgress)
+                | (IssueStatus::Resolved, IssueStatus::Closed)
+                | (IssueStatus::Resolved, IssueStatus::Reopened)
+                | (IssueStatus::Closed, IssueStatus::Reopened)
+                | (IssueStatus::Reopened, IssueStatus::InProgress)
+        );
+
+        if !valid {
+            return Err(format!(
+                "Invalid transition: {:?} → {:?}",
+                issue.status, new_status
+            ));
+        }
+
+        if new_status == IssueStatus::Resolved {
+            issue.resolved_at = Some(Utc::now());
+        }
+        issue.status = new_status;
+        issue.updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Assign an issue.
+    pub fn assign(&mut self, id: Uuid, assignee: String) -> Result<(), String> {
+        let issue = self
+            .issues
+            .iter_mut()
+            .find(|i| i.id == id)
+            .ok_or_else(|| "Issue not found".to_string())?;
+        issue.assignee = Some(assignee);
+        issue.updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Add a comment to an issue.
+    pub fn add_comment(
+        &mut self,
+        id: Uuid,
+        author: String,
+        text: String,
+    ) -> Result<Uuid, String> {
+        let issue = self
+            .issues
+            .iter_mut()
+            .find(|i| i.id == id)
+            .ok_or_else(|| "Issue not found".to_string())?;
+        let comment_id = Uuid::new_v4();
+        issue.comments.push(Comment {
+            id: comment_id,
+            author,
+            text,
+            created_at: Utc::now(),
+        });
+        issue.updated_at = Utc::now();
+        Ok(comment_id)
+    }
+
+    /// Add attachment metadata.
+    pub fn add_attachment(
+        &mut self,
+        id: Uuid,
+        filename: String,
+        mime_type: String,
+        size_bytes: u64,
+        url: String,
+    ) -> Result<Uuid, String> {
+        let issue = self
+            .issues
+            .iter_mut()
+            .find(|i| i.id == id)
+            .ok_or_else(|| "Issue not found".to_string())?;
+        let att_id = Uuid::new_v4();
+        issue.attachments.push(Attachment {
+            id: att_id,
+            filename,
+            mime_type,
+            size_bytes,
+            url,
+        });
+        issue.updated_at = Utc::now();
+        Ok(att_id)
+    }
+
+    /// Search issues by text (title + description).
+    pub fn search(&self, query: &str) -> Vec<&Issue> {
+        let q = query.to_lowercase();
+        self.issues
+            .iter()
+            .filter(|i| {
+                i.title.to_lowercase().contains(&q)
+                    || i.description.to_lowercase().contains(&q)
+                    || i.tags.iter().any(|t| t.to_lowercase().contains(&q))
+            })
+            .collect()
+    }
+
     /// List all issues with optional filter.
     pub fn list_issues(&self, status: Option<&IssueStatus>) -> Vec<&Issue> {
         match status {

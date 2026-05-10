@@ -180,6 +180,139 @@ impl StoryPlayer {
             false
         }
     }
+
+    /// Interpolate camera position between current and next slide.
+    /// `t` is normalized progress [0.0, 1.0] through the transition.
+    pub fn interpolate_camera(
+        from: &CameraPosition,
+        to: &CameraPosition,
+        t: f64,
+        transition: &TransitionType,
+    ) -> CameraPosition {
+        let t = t.clamp(0.0, 1.0);
+        let eased = match transition {
+            TransitionType::Cut => {
+                if t < 1.0 {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
+            TransitionType::Fly => {
+                // Smooth ease-in-out (cubic)
+                if t < 0.5 {
+                    4.0 * t * t * t
+                } else {
+                    1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+                }
+            }
+            TransitionType::Orbit => {
+                // Sinusoidal ease for orbital motion
+                -(std::f64::consts::PI * t).cos() / 2.0 + 0.5
+            }
+            TransitionType::Dolly => {
+                // Linear for dolly
+                t
+            }
+            TransitionType::Custom { easing, .. } => match easing.as_str() {
+                "ease-in" => t * t,
+                "ease-out" => t * (2.0 - t),
+                "ease-in-out" => {
+                    if t < 0.5 {
+                        2.0 * t * t
+                    } else {
+                        -1.0 + (4.0 - 2.0 * t) * t
+                    }
+                }
+                _ => t,
+            },
+        };
+
+        let lerp = |a: f64, b: f64| a + (b - a) * eased;
+
+        // Shortest-path heading interpolation (handle 0°/360° wrap)
+        let mut dh = to.heading - from.heading;
+        if dh > 180.0 {
+            dh -= 360.0;
+        } else if dh < -180.0 {
+            dh += 360.0;
+        }
+        let heading = from.heading + dh * eased;
+
+        CameraPosition {
+            longitude: lerp(from.longitude, to.longitude),
+            latitude: lerp(from.latitude, to.latitude),
+            height: lerp(from.height, to.height),
+            heading: heading.rem_euclid(360.0),
+            pitch: lerp(from.pitch, to.pitch),
+            roll: lerp(from.roll, to.roll),
+        }
+    }
+
+    /// Generate all interpolated camera frames for a transition at a given FPS.
+    pub fn generate_transition_frames(
+        from: &CameraPosition,
+        to: &CameraPosition,
+        duration_secs: f64,
+        fps: f64,
+        transition: &TransitionType,
+    ) -> Vec<CameraPosition> {
+        let frame_count = (duration_secs * fps).ceil() as usize;
+        if frame_count == 0 {
+            return vec![from.clone()];
+        }
+        (0..=frame_count)
+            .map(|i| {
+                let t = i as f64 / frame_count as f64;
+                Self::interpolate_camera(from, to, t, transition)
+            })
+            .collect()
+    }
+
+    /// Advance time and return current interpolated camera.
+    pub fn tick(
+        &mut self,
+        story: &Story,
+        delta_secs: f64,
+    ) -> Option<CameraPosition> {
+        if !self.playing || self.current_slide >= story.slides.len() {
+            return None;
+        }
+
+        self.elapsed_secs += delta_secs;
+        let slide = &story.slides[self.current_slide];
+        let duration = slide
+            .duration_secs
+            .unwrap_or(story.settings.default_slide_duration_secs);
+
+        if self.elapsed_secs >= duration {
+            // Move to next slide
+            if !self.next_slide(story.slides.len()) {
+                if story.settings.loop_playback {
+                    self.current_slide = 0;
+                    self.elapsed_secs = 0.0;
+                } else {
+                    self.playing = false;
+                    return None;
+                }
+            }
+        }
+
+        // Interpolate between current and next slide camera
+        let current = &story.slides[self.current_slide].camera;
+        if self.current_slide + 1 < story.slides.len() {
+            let next = &story.slides[self.current_slide + 1].camera;
+            let t = self.elapsed_secs / duration;
+            Some(Self::interpolate_camera(
+                current,
+                next,
+                t,
+                &story.settings.transition_type,
+            ))
+        } else {
+            Some(current.clone())
+        }
+    }
 }
 
 /// Store for managing stories.
