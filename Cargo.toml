@@ -59,6 +59,16 @@ proj4rs = "0.1"
 # Mesh compression
 meshopt = "0.6"
 bytemuck = { version = "1", features = ["derive"] }
+draco-rs = "0.1"
+
+# OBJ loading
+tobj = "4"
+
+# XML parsing (CityGML, KML)
+quick-xml = "0.39"
+
+# GeoPackage (SQLite)
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # HTTP client (federation, webhooks, geocoding)
 reqwest = { version = "0.12", features = ["json"] }

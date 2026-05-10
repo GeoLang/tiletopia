@@ -24,3 +24,4 @@ pollster = { version = "0.4", optional = true }
 proj4rs = { workspace = true }
 meshopt = { workspace = true }
 bytemuck = { workspace = true }
+draco-rs = { workspace = true }

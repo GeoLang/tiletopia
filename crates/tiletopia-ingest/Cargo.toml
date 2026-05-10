@@ -21,3 +21,6 @@ ply-rs = { workspace = true }
 geojson = { workspace = true }
 shapefile = { workspace = true }
 geo-types = { workspace = true }
+tobj = { workspace = true }
+quick-xml = { workspace = true }
+rusqlite = { workspace = true }
