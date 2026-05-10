@@ -7,8 +7,10 @@
 //! - Indoor positioning reference points (BLE beacons, WiFi)
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::HashMap;
 use uuid::Uuid;
+use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::algo::dijkstra;
 
 /// An indoor-mapped building.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,31 +255,6 @@ pub fn demo_buildings() -> Vec<IndoorBuilding> {
     }]
 }
 
-/// Dijkstra priority queue state.
-#[derive(PartialEq)]
-struct DijkstraState {
-    cost: f64,
-    node_id: Uuid,
-}
-
-impl Eq for DijkstraState {}
-
-impl PartialOrd for DijkstraState {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for DijkstraState {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // min-heap: reverse ordering
-        other
-            .cost
-            .partial_cmp(&self.cost)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    }
-}
-
 /// Compute the centroid of a room polygon.
 fn room_centroid(polygon: &[[f64; 2]]) -> [f64; 2] {
     if polygon.is_empty() {
@@ -338,7 +315,7 @@ fn describe_step(from: &NavNode, to: &NavNode, distance: f64) -> String {
     }
 }
 
-/// Find shortest path using Dijkstra on the building's navigation graphs.
+/// Find shortest path using petgraph's Dijkstra on the building's navigation graphs.
 pub fn find_route(
     building: &IndoorBuilding,
     from_room: Uuid,
@@ -362,27 +339,31 @@ pub fn find_route(
     let (from_level, from_centroid) = from_info?;
     let (to_level, to_centroid) = to_info?;
 
-    // 1. Collect all nodes and edges across all floors
-    let mut all_nodes: Vec<(Uuid, &NavNode)> = Vec::new();
-    let mut adjacency: HashMap<Uuid, Vec<(Uuid, f64)>> = HashMap::new();
+    // 1. Build a petgraph graph from all navigation nodes/edges
+    let mut graph = DiGraph::<Uuid, f64>::new();
+    let mut uuid_to_idx: HashMap<Uuid, NodeIndex> = HashMap::new();
     let mut node_map: HashMap<Uuid, &NavNode> = HashMap::new();
+    let mut all_nodes: Vec<(Uuid, &NavNode)> = Vec::new();
 
     for floor in &building.floors {
-        if let Some(graph) = &floor.navigation_graph {
-            for node in &graph.nodes {
-                all_nodes.push((node.id, node));
+        if let Some(nav) = &floor.navigation_graph {
+            for node in &nav.nodes {
+                let idx = *uuid_to_idx
+                    .entry(node.id)
+                    .or_insert_with(|| graph.add_node(node.id));
+                let _ = idx;
                 node_map.insert(node.id, node);
-                adjacency.entry(node.id).or_default();
+                all_nodes.push((node.id, node));
             }
-            for edge in &graph.edges {
-                adjacency
+            for edge in &nav.edges {
+                let from_idx = *uuid_to_idx
                     .entry(edge.from)
-                    .or_default()
-                    .push((edge.to, edge.distance_m));
-                adjacency
+                    .or_insert_with(|| graph.add_node(edge.from));
+                let to_idx = *uuid_to_idx
                     .entry(edge.to)
-                    .or_default()
-                    .push((edge.from, edge.distance_m));
+                    .or_insert_with(|| graph.add_node(edge.to));
+                graph.add_edge(from_idx, to_idx, edge.distance_m);
+                graph.add_edge(to_idx, from_idx, edge.distance_m); // bidirectional
             }
         }
     }
@@ -399,18 +380,13 @@ pub fn find_route(
             if a.node_type != b.node_type {
                 continue;
             }
-            // Connect transport nodes of same type on adjacent floors with similar position
             let floor_diff = (a.floor_level as i16 - b.floor_level as i16).unsigned_abs();
             if floor_diff == 1 && dist_2d(&a.position, &b.position) < 3.0 {
-                let vertical_dist = 4.0; // approximate floor height in metres
-                adjacency
-                    .entry(a.id)
-                    .or_default()
-                    .push((b.id, vertical_dist));
-                adjacency
-                    .entry(b.id)
-                    .or_default()
-                    .push((a.id, vertical_dist));
+                let vertical_dist = 4.0;
+                let a_idx = uuid_to_idx[&a.id];
+                let b_idx = uuid_to_idx[&b.id];
+                graph.add_edge(a_idx, b_idx, vertical_dist);
+                graph.add_edge(b_idx, a_idx, vertical_dist);
             }
         }
     }
@@ -419,51 +395,42 @@ pub fn find_route(
     let source_id = nearest_node_on_floor(&all_nodes, &from_centroid, from_level)?;
     let target_id = nearest_node_on_floor(&all_nodes, &to_centroid, to_level)?;
 
-    // 4. Run Dijkstra
-    let mut dist: HashMap<Uuid, f64> = HashMap::new();
-    let mut prev: HashMap<Uuid, Uuid> = HashMap::new();
-    let mut heap = BinaryHeap::new();
+    let source_idx = *uuid_to_idx.get(&source_id)?;
+    let target_idx = *uuid_to_idx.get(&target_id)?;
 
-    dist.insert(source_id, 0.0);
-    heap.push(DijkstraState {
-        cost: 0.0,
-        node_id: source_id,
-    });
+    // 4. Run Dijkstra via petgraph
+    let costs = dijkstra(&graph, source_idx, Some(target_idx), |e| *e.weight());
 
-    while let Some(DijkstraState { cost, node_id }) = heap.pop() {
-        if node_id == target_id {
-            break;
-        }
-        if cost > *dist.get(&node_id).unwrap_or(&f64::INFINITY) {
-            continue;
-        }
-        if let Some(neighbors) = adjacency.get(&node_id) {
-            for &(next, edge_dist) in neighbors {
-                let new_cost = cost + edge_dist;
-                if new_cost < *dist.get(&next).unwrap_or(&f64::INFINITY) {
-                    dist.insert(next, new_cost);
-                    prev.insert(next, node_id);
-                    heap.push(DijkstraState {
-                        cost: new_cost,
-                        node_id: next,
-                    });
-                }
-            }
-        }
-    }
-
-    // 5. Reconstruct path
-    if !dist.contains_key(&target_id) {
+    if !costs.contains_key(&target_idx) {
         return None;
     }
 
-    let mut path = vec![target_id];
-    let mut current = target_id;
-    while let Some(&p) = prev.get(&current) {
-        path.push(p);
-        current = p;
+    // 5. Reconstruct path by backtracking through lowest-cost neighbors
+    let mut path = vec![target_idx];
+    let mut current = target_idx;
+    while current != source_idx {
+        let current_cost = costs[&current];
+        let prev = graph
+            .neighbors_directed(current, petgraph::Direction::Incoming)
+            .filter(|n| costs.contains_key(n))
+            .min_by(|a, b| {
+                costs[a]
+                    .partial_cmp(&costs[b])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        match prev {
+            Some(p) if costs[&p] < current_cost => {
+                path.push(p);
+                current = p;
+            }
+            _ => break,
+        }
     }
     path.reverse();
+
+    if path.len() < 2 {
+        return None;
+    }
 
     // 6. Build route steps with real distances and instructions
     let mut steps = Vec::new();
@@ -472,18 +439,16 @@ pub fn find_route(
     let mut uses_elevator = false;
 
     for window in path.windows(2) {
-        let from_node = node_map.get(&window[0])?;
-        let to_node = node_map.get(&window[1])?;
+        let from_uuid = graph[window[0]];
+        let to_uuid = graph[window[1]];
+        let from_node = node_map.get(&from_uuid)?;
+        let to_node = node_map.get(&to_uuid)?;
 
-        // Find the edge distance
-        let edge_dist = adjacency
-            .get(&window[0])
-            .and_then(|edges| {
-                edges
-                    .iter()
-                    .find(|(id, _)| *id == window[1])
-                    .map(|(_, d)| *d)
-            })
+        // Find the edge weight
+        let edge_dist = graph
+            .edges_connecting(window[0], window[1])
+            .next()
+            .map(|e| *e.weight())
             .unwrap_or_else(|| dist_2d(&from_node.position, &to_node.position));
 
         total_distance += edge_dist;

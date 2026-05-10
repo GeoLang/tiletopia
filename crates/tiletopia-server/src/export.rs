@@ -173,19 +173,29 @@ impl ExportEngine {
                 path
             }
             ExportFormat::Glb => {
-                // Write a minimal valid GLB (empty scene)
+                // Write a valid GLB using the gltf crate's JSON types
                 let path = output_dir.join("export.glb");
-                let json = serde_json::json!({
-                    "asset": {"version": "2.0", "generator": "tiletopia"},
-                    "scene": 0,
-                    "scenes": [{"nodes": []}],
-                    "nodes": []
-                });
-                let json_bytes = serde_json::to_vec(&json).unwrap();
+                let root = gltf::json::Root {
+                    asset: gltf::json::Asset {
+                        version: "2.0".into(),
+                        generator: Some("tiletopia".into()),
+                        ..Default::default()
+                    },
+                    scene: Some(gltf::json::Index::new(0)),
+                    scenes: vec![gltf::json::Scene {
+                        name: Some(format!("Asset {}", job.asset_id)),
+                        nodes: vec![],
+                        extensions: Default::default(),
+                        extras: Default::default(),
+                    }],
+                    ..Default::default()
+                };
+                let json_bytes = gltf::json::serialize::to_vec(&root)
+                    .map_err(|e| format!("glTF serialize error: {e}"))?;
                 let json_padded_len = (json_bytes.len() + 3) & !3;
                 let total_len = 12 + 8 + json_padded_len;
                 let mut glb = Vec::with_capacity(total_len);
-                // Header
+                // GLB header
                 glb.extend_from_slice(b"glTF");
                 glb.extend_from_slice(&2u32.to_le_bytes());
                 glb.extend_from_slice(&(total_len as u32).to_le_bytes());

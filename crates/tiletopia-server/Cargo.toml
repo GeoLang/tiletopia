@@ -37,6 +37,23 @@ tiff = { workspace = true }
 aws-sdk-s3 = { workspace = true }
 aws-config = { workspace = true }
 sqlx = { workspace = true }
+gltf = { workspace = true }
+petgraph = { workspace = true }
+cron = { workspace = true }
+printpdf = { workspace = true }
+casbin = { workspace = true }
+openraft = { workspace = true, optional = true }
+wasmtime = { workspace = true, optional = true }
+video-rs = { workspace = true, optional = true }
+martin-core = { workspace = true, optional = true }
+martin-tile-utils = { workspace = true, optional = true }
+
+[features]
+default = []
+raft = ["openraft"]
+wasm-plugins = ["wasmtime"]
+video = ["video-rs"]
+martin = ["martin-core", "martin-tile-utils"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

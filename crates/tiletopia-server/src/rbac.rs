@@ -1,4 +1,6 @@
 //! Role-Based Access Control (RBAC) with OIDC/SAML support.
+//!
+//! Uses the casbin policy engine for flexible ACL/RBAC/ABAC models.
 
 use std::collections::{HashMap, HashSet};
 
@@ -218,6 +220,42 @@ pub struct OidcClaims {
     pub email: String,
     pub issuer: String,
 }
+
+/// Create a casbin enforcer from an RBAC model string and policy CSV string.
+///
+/// Model defines request/policy/role/matchers definitions.
+/// Policy defines concrete role-permission assignments as CSV lines.
+pub async fn create_enforcer(
+    model_text: &str,
+    policy_csv: &str,
+) -> Result<casbin::Enforcer, String> {
+    use casbin::prelude::*;
+    let model = DefaultModel::from_str(model_text)
+        .await
+        .map_err(|e| format!("Invalid casbin model: {e}"))?;
+    let adapter = StringAdapter::new(policy_csv.to_string());
+    Enforcer::new(model, adapter)
+        .await
+        .map_err(|e| format!("Failed to create enforcer: {e}"))
+}
+
+/// Default RBAC model for TileTopia.
+pub const RBAC_MODEL: &str = r#"
+[request_definition]
+r = sub, obj, act
+
+[policy_definition]
+p = sub, obj, act
+
+[role_definition]
+g = _, _
+
+[policy_effect]
+e = some(where (p.eft == allow))
+
+[matchers]
+m = g(r.sub, p.sub) && r.obj == p.obj && r.act == p.act
+"#;
 
 #[cfg(test)]
 mod tests {

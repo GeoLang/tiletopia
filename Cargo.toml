@@ -94,3 +94,28 @@ rand = "0.9"
 # HMAC signatures (webhooks)
 hmac = "0.12"
 sha2 = "0.10"
+
+# Graph algorithms (indoor routing)
+petgraph = "0.7"
+
+# Cron parsing (scheduler)
+cron = "0.15"
+
+# PDF generation (reports)
+printpdf = "0.8"
+
+# RBAC policy engine
+casbin = "2"
+
+# Raft consensus (cluster feature)
+openraft = { version = "0.9", features = ["serde"] }
+
+# WASM plugin runtime (wasm-plugins feature)
+wasmtime = "30"
+
+# Video encoding (video feature, requires system FFmpeg)
+video-rs = { version = "0.11", features = ["ndarray"] }
+
+# Martin tile serving (martin feature — MBTiles, PMTiles, PostGIS tile sources)
+martin-core = { version = "0.5", default-features = false, features = ["mbtiles", "pmtiles"] }
+martin-tile-utils = "0.7"

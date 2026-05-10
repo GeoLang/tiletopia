@@ -6,7 +6,8 @@
 //! - Visualization layers (custom renderers)
 //! - Integrations (Slack, Teams, custom webhooks)
 //!
-//! Plugins are defined as WASM modules or JSON pipeline configs.
+//! Plugins are defined as WASM modules (when `wasm-plugins` feature is enabled)
+//! or JSON pipeline configs.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -397,6 +398,86 @@ impl PluginRegistry {
                 rating: 4.7,
             },
         ]
+    }
+}
+
+// ─── WASM plugin execution (feature-gated) ──────────────────────────────────
+
+/// WASM module execution engine using wasmtime.
+///
+/// When the `wasm-plugins` feature is enabled, plugins can be loaded as
+/// compiled WASM modules that export a `process(input: &[u8]) -> Vec<u8>` function.
+#[cfg(feature = "wasm-plugins")]
+pub mod wasm {
+    use std::path::Path;
+
+    /// A compiled WASM plugin module.
+    pub struct WasmPlugin {
+        engine: wasmtime::Engine,
+        module: wasmtime::Module,
+        pub name: String,
+    }
+
+    impl WasmPlugin {
+        /// Load a WASM plugin from a file.
+        pub fn from_file(name: &str, path: &Path) -> Result<Self, String> {
+            let engine = wasmtime::Engine::default();
+            let module = wasmtime::Module::from_file(&engine, path)
+                .map_err(|e| format!("Failed to load WASM module: {e}"))?;
+            Ok(Self {
+                engine,
+                module,
+                name: name.to_string(),
+            })
+        }
+
+        /// Load a WASM plugin from bytes.
+        pub fn from_bytes(name: &str, bytes: &[u8]) -> Result<Self, String> {
+            let engine = wasmtime::Engine::default();
+            let module = wasmtime::Module::new(&engine, bytes)
+                .map_err(|e| format!("Failed to compile WASM module: {e}"))?;
+            Ok(Self {
+                engine,
+                module,
+                name: name.to_string(),
+            })
+        }
+
+        /// Execute the plugin's `process` function with JSON input, returning JSON output.
+        pub fn execute(&self, input_json: &[u8]) -> Result<Vec<u8>, String> {
+            let mut store = wasmtime::Store::new(&self.engine, ());
+            let instance = wasmtime::Instance::new(&mut store, &self.module, &[])
+                .map_err(|e| format!("WASM instantiation error: {e}"))?;
+
+            // Get the module's memory
+            let memory = instance
+                .get_memory(&mut store, "memory")
+                .ok_or("WASM module has no exported memory")?;
+
+            // Write input to WASM memory at offset 0
+            let input_len = input_json.len();
+            memory
+                .write(&mut store, 0, input_json)
+                .map_err(|e| format!("Memory write error: {e}"))?;
+
+            // Call the process function: process(input_ptr, input_len) -> output_len
+            let process_fn = instance
+                .get_typed_func::<(i32, i32), i32>(&mut store, "process")
+                .map_err(|e| format!("Missing 'process' export: {e}"))?;
+
+            let output_len = process_fn
+                .call(&mut store, (0, input_len as i32))
+                .map_err(|e| format!("WASM execution error: {e}"))?;
+
+            // Read output from memory (written after input)
+            let output_offset = input_len;
+            let mut output = vec![0u8; output_len as usize];
+            memory
+                .read(&store, output_offset, &mut output)
+                .map_err(|e| format!("Memory read error: {e}"))?;
+
+            Ok(output)
+        }
     }
 }
 

@@ -196,61 +196,15 @@ impl Scheduler {
     }
 
     /// Parse a cron expression and compute the next run time after `after`.
-    /// Supports standard 5-field cron: minute hour day-of-month month day-of-week
+    /// Uses the `cron` crate for robust standard cron expression parsing.
     pub fn next_cron_time(cron_expr: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        use chrono::Timelike;
-        let fields: Vec<&str> = cron_expr.split_whitespace().collect();
-        if fields.len() != 5 {
-            return None;
-        }
-
-        let parse_field = |field: &str, max: u32| -> Vec<u32> {
-            if field == "*" {
-                return (0..=max).collect();
-            }
-            if let Some(step) = field.strip_prefix("*/")
-                && let Ok(s) = step.parse::<u32>()
-            {
-                return (0..=max).step_by(s.max(1) as usize).collect();
-            }
-            // Comma-separated values and ranges
-            field
-                .split(',')
-                .flat_map(|part| {
-                    if let Some((a, b)) = part.split_once('-') {
-                        let start = a.parse::<u32>().unwrap_or(0);
-                        let end = b.parse::<u32>().unwrap_or(max);
-                        (start..=end).collect::<Vec<_>>()
-                    } else {
-                        part.parse::<u32>().into_iter().collect()
-                    }
-                })
-                .collect()
-        };
-
-        let minutes = parse_field(fields[0], 59);
-        let hours = parse_field(fields[1], 23);
-        let _doms = parse_field(fields[2], 31);
-        let _months = parse_field(fields[3], 12);
-        let _dows = parse_field(fields[4], 6);
-
-        // Simple: find next matching minute+hour from `after`
-        let mut candidate = after + chrono::Duration::minutes(1);
-        // Zero out seconds
-        candidate = candidate
-            .with_second(0)
-            .unwrap_or(candidate);
-        for _ in 0..1440 {
-            // search up to 24 hours
-            let h = candidate.hour();
-            let m = candidate.minute();
-            if hours.contains(&h) && minutes.contains(&m) {
-                return Some(candidate);
-            }
-            candidate += chrono::Duration::minutes(1);
-        }
-        // Fallback: 1 hour from now
-        Some(after + chrono::Duration::hours(1))
+        use std::str::FromStr;
+        // The cron crate expects 7-field expressions (sec min hour dom month dow year)
+        // Convert standard 5-field (min hour dom month dow) by prepending "0" (seconds)
+        // and appending "*" (year).
+        let full_expr = format!("0 {} *", cron_expr);
+        let schedule = cron::Schedule::from_str(&full_expr).ok()?;
+        schedule.after(&after).next()
     }
 
     /// Tick the scheduler: check for due jobs, execute them, record runs.

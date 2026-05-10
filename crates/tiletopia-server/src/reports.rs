@@ -1,4 +1,6 @@
 //! PDF/Report generation — automated site reports with measurements.
+//!
+//! Supports both HTML and PDF output using the printpdf crate.
 
 use serde::{Deserialize, Serialize};
 
@@ -220,6 +222,243 @@ pub fn generate_site_report(
     }
 }
 
+/// Generate a PDF report using printpdf.
+///
+/// Returns the raw PDF bytes that can be written to a file or sent as a response.
+pub fn generate_pdf_report(report: &Report) -> Result<Vec<u8>, String> {
+    use printpdf::*;
+
+    let mut ops: Vec<Op> = Vec::new();
+    let font = BuiltinFont::Helvetica;
+    let font_bold = BuiltinFont::HelveticaBold;
+
+    // Title
+    ops.push(Op::StartTextSection);
+    ops.push(Op::SetFontSizeBuiltinFont {
+        size: Pt(18.0),
+        font: font_bold,
+    });
+    ops.push(Op::SetTextCursor {
+        pos: Point {
+            x: Mm(20.0).into(),
+            y: Mm(275.0).into(),
+        },
+    });
+    ops.push(Op::SetLineHeight { lh: Pt(20.0) });
+    ops.push(Op::WriteTextBuiltinFont {
+        items: vec![TextItem::Text(report.metadata.title.clone())],
+        font: font_bold,
+    });
+    ops.push(Op::EndTextSection);
+
+    let mut y_pos = 265.0_f32;
+
+    // Subtitle
+    if let Some(ref subtitle) = report.metadata.subtitle {
+        ops.push(Op::StartTextSection);
+        ops.push(Op::SetFontSizeBuiltinFont {
+            size: Pt(12.0),
+            font,
+        });
+        ops.push(Op::SetTextCursor {
+            pos: Point {
+                x: Mm(20.0).into(),
+                y: Mm(y_pos).into(),
+            },
+        });
+        ops.push(Op::WriteTextBuiltinFont {
+            items: vec![TextItem::Text(subtitle.clone())],
+            font,
+        });
+        ops.push(Op::EndTextSection);
+        y_pos -= 8.0;
+    }
+
+    // Author / Date / Project
+    let meta_line = format!(
+        "Author: {} | Date: {} | Project: {}",
+        report.metadata.author, report.metadata.date, report.metadata.project_name
+    );
+    ops.push(Op::StartTextSection);
+    ops.push(Op::SetFontSizeBuiltinFont {
+        size: Pt(9.0),
+        font,
+    });
+    ops.push(Op::SetTextCursor {
+        pos: Point {
+            x: Mm(20.0).into(),
+            y: Mm(y_pos).into(),
+        },
+    });
+    ops.push(Op::WriteTextBuiltinFont {
+        items: vec![TextItem::Text(meta_line)],
+        font,
+    });
+    ops.push(Op::EndTextSection);
+    y_pos -= 6.0;
+
+    if report.metadata.confidential {
+        ops.push(Op::StartTextSection);
+        ops.push(Op::SetFontSizeBuiltinFont {
+            size: Pt(10.0),
+            font: font_bold,
+        });
+        ops.push(Op::SetTextCursor {
+            pos: Point {
+                x: Mm(20.0).into(),
+                y: Mm(y_pos).into(),
+            },
+        });
+        ops.push(Op::WriteTextBuiltinFont {
+            items: vec![TextItem::Text("CONFIDENTIAL".into())],
+            font: font_bold,
+        });
+        ops.push(Op::EndTextSection);
+        y_pos -= 6.0;
+    }
+
+    y_pos -= 10.0;
+
+    // Sections
+    for section in &report.sections {
+        if y_pos < 30.0 {
+            break;
+        }
+
+        ops.push(Op::StartTextSection);
+        ops.push(Op::SetFontSizeBuiltinFont {
+            size: Pt(12.0),
+            font: font_bold,
+        });
+        ops.push(Op::SetTextCursor {
+            pos: Point {
+                x: Mm(20.0).into(),
+                y: Mm(y_pos).into(),
+            },
+        });
+        ops.push(Op::WriteTextBuiltinFont {
+            items: vec![TextItem::Text(section.title.clone())],
+            font: font_bold,
+        });
+        ops.push(Op::EndTextSection);
+        y_pos -= 7.0;
+
+        match &section.content {
+            SectionContent::Text(text) => {
+                ops.push(Op::StartTextSection);
+                ops.push(Op::SetFontSizeBuiltinFont {
+                    size: Pt(9.0),
+                    font,
+                });
+                ops.push(Op::SetTextCursor {
+                    pos: Point {
+                        x: Mm(20.0).into(),
+                        y: Mm(y_pos).into(),
+                    },
+                });
+                ops.push(Op::SetLineHeight { lh: Pt(12.0) });
+                ops.push(Op::WriteTextBuiltinFont {
+                    items: vec![TextItem::Text(text.clone())],
+                    font,
+                });
+                ops.push(Op::EndTextSection);
+                y_pos -= 5.0;
+            }
+            SectionContent::KeyValueList(items) => {
+                for (key, value) in items {
+                    let line = format!("{}: {}", key, value);
+                    ops.push(Op::StartTextSection);
+                    ops.push(Op::SetFontSizeBuiltinFont {
+                        size: Pt(9.0),
+                        font,
+                    });
+                    ops.push(Op::SetTextCursor {
+                        pos: Point {
+                            x: Mm(25.0).into(),
+                            y: Mm(y_pos).into(),
+                        },
+                    });
+                    ops.push(Op::WriteTextBuiltinFont {
+                        items: vec![TextItem::Text(line)],
+                        font,
+                    });
+                    ops.push(Op::EndTextSection);
+                    y_pos -= 5.0;
+                }
+            }
+            SectionContent::Table { headers, rows } => {
+                let header_line = headers.join(" | ");
+                ops.push(Op::StartTextSection);
+                ops.push(Op::SetFontSizeBuiltinFont {
+                    size: Pt(9.0),
+                    font: font_bold,
+                });
+                ops.push(Op::SetTextCursor {
+                    pos: Point {
+                        x: Mm(25.0).into(),
+                        y: Mm(y_pos).into(),
+                    },
+                });
+                ops.push(Op::WriteTextBuiltinFont {
+                    items: vec![TextItem::Text(header_line)],
+                    font: font_bold,
+                });
+                ops.push(Op::EndTextSection);
+                y_pos -= 5.0;
+                for row in rows {
+                    let row_line = row.join(" | ");
+                    ops.push(Op::StartTextSection);
+                    ops.push(Op::SetFontSizeBuiltinFont {
+                        size: Pt(9.0),
+                        font,
+                    });
+                    ops.push(Op::SetTextCursor {
+                        pos: Point {
+                            x: Mm(25.0).into(),
+                            y: Mm(y_pos).into(),
+                        },
+                    });
+                    ops.push(Op::WriteTextBuiltinFont {
+                        items: vec![TextItem::Text(row_line)],
+                        font,
+                    });
+                    ops.push(Op::EndTextSection);
+                    y_pos -= 5.0;
+                }
+            }
+            _ => {
+                y_pos -= 5.0;
+            }
+        }
+        y_pos -= 5.0;
+    }
+
+    // Footer
+    ops.push(Op::StartTextSection);
+    ops.push(Op::SetFontSizeBuiltinFont {
+        size: Pt(8.0),
+        font,
+    });
+    ops.push(Op::SetTextCursor {
+        pos: Point {
+            x: Mm(20.0).into(),
+            y: Mm(15.0).into(),
+        },
+    });
+    ops.push(Op::WriteTextBuiltinFont {
+        items: vec![TextItem::Text(report.footer_text.clone())],
+        font,
+    });
+    ops.push(Op::EndTextSection);
+
+    let page = PdfPage::new(Mm(210.0), Mm(297.0), ops);
+    let mut doc = PdfDocument::new(&report.metadata.title);
+    doc.with_pages(vec![page]);
+
+    let mut warnings = Vec::new();
+    Ok(doc.save(&PdfSaveOptions::default(), &mut warnings))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +561,14 @@ mod tests {
         };
         let html = generate_html_report(&report);
         assert!(html.contains("CONFIDENTIAL"));
+    }
+
+    #[test]
+    fn test_generate_pdf_report() {
+        let report = generate_site_report("PDF Test", "Author", 3, 50_000, 1.2, &[]);
+        let pdf_bytes = generate_pdf_report(&report).unwrap();
+        // Valid PDF starts with %PDF
+        assert!(pdf_bytes.starts_with(b"%PDF"));
+        assert!(pdf_bytes.len() > 100);
     }
 }

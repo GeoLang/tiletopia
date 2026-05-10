@@ -664,3 +664,91 @@ mod tests {
         assert!(stats.total_entries > 0);
     }
 }
+
+// ─── Martin-core integration ────────────────────────────────────────────────
+
+/// Martin-core backed tile serving: production-grade MBTiles, PMTiles, COG,
+/// and PostGIS tile sources via the same engine that powers MapLibre Martin.
+///
+/// Enable with `--features martin`.
+#[cfg(feature = "martin")]
+pub mod martin_backend {
+    use martin_core::tiles::mbtiles::MbtSource;
+    use martin_core::tiles::BoxedSource;
+    use martin_core::CacheZoomRange;
+    use martin_tile_utils::TileCoord as MartinTileCoord;
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    /// Thread-safe registry of martin-core tile sources.
+    #[derive(Clone)]
+    pub struct MartinTileBackend {
+        sources: Arc<RwLock<HashMap<String, BoxedSource>>>,
+    }
+
+    impl MartinTileBackend {
+        pub fn new() -> Self {
+            Self {
+                sources: Arc::new(RwLock::new(HashMap::new())),
+            }
+        }
+
+        /// Register an MBTiles file as a tile source.
+        pub async fn add_mbtiles(
+            &self,
+            id: impl Into<String>,
+            path: impl AsRef<Path>,
+        ) -> Result<(), String> {
+            let id = id.into();
+            let source = MbtSource::new(
+                id.clone(),
+                path.as_ref().to_path_buf(),
+                CacheZoomRange::default(),
+            )
+            .await
+            .map_err(|e| format!("Failed to open MBTiles {}: {e}", path.as_ref().display()))?;
+            self.sources.write().await.insert(id, Box::new(source));
+            Ok(())
+        }
+
+        /// List all registered source IDs.
+        pub async fn list_source_ids(&self) -> Vec<String> {
+            self.sources.read().await.keys().cloned().collect()
+        }
+
+        /// Get TileJSON metadata for a source.
+        pub async fn tilejson(&self, source_id: &str) -> Option<serde_json::Value> {
+            let sources = self.sources.read().await;
+            let source = sources.get(source_id)?;
+            let tj = source.get_tilejson();
+            Some(serde_json::to_value(tj).unwrap_or_default())
+        }
+
+        /// Fetch a tile from a martin-core source.
+        pub async fn get_tile(
+            &self,
+            source_id: &str,
+            z: u8,
+            x: u32,
+            y: u32,
+        ) -> Result<Vec<u8>, String> {
+            let sources = self.sources.read().await;
+            let source = sources.get(source_id).ok_or("Source not found")?;
+
+            let coord = MartinTileCoord { z, x, y };
+            let data = source
+                .get_tile(coord, None)
+                .await
+                .map_err(|e| format!("Tile fetch failed: {e}"))?;
+            Ok(data)
+        }
+    }
+
+    impl Default for MartinTileBackend {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+}

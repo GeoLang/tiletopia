@@ -1,4 +1,8 @@
 //! High-availability clustering with Raft-based leader election.
+//!
+//! When the `raft` feature is enabled, uses the openraft crate for production-grade
+//! Raft consensus. Otherwise, uses a built-in single-process implementation for
+//! development and testing.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -237,6 +241,53 @@ impl RaftNode {
     /// Check if this node is the leader.
     pub fn is_leader(&self) -> bool {
         self.state == NodeState::Leader
+    }
+}
+
+// ─── openraft integration ────────────────────────────────────────────────────
+
+/// openraft type configuration for TileTopia's Raft cluster.
+///
+/// When the `raft` feature is enabled, this defines the concrete types
+/// used by openraft for node IDs, log entries, and responses.
+#[cfg(feature = "raft")]
+pub mod raft_types {
+    use serde::{Deserialize, Serialize};
+
+    /// Node identifier in the openraft cluster.
+    pub type NodeId = u64;
+
+    /// Node address/info for network communication.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+    pub struct NodeInfo {
+        pub addr: String,
+    }
+
+    impl std::fmt::Display for NodeInfo {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.addr)
+        }
+    }
+
+    openraft::declare_raft_types!(
+        /// TileTopia Raft type configuration.
+        pub TypeConfig:
+            D = Request,
+            R = Response,
+    );
+
+    /// A client request to be replicated through Raft.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub enum Request {
+        Set { key: String, value: Vec<u8> },
+        Delete { key: String },
+    }
+
+    /// Response to a client request.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub enum Response {
+        Ok,
+        Value(Option<Vec<u8>>),
     }
 }
 
