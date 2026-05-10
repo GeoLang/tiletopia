@@ -37,7 +37,7 @@ impl AzureStore {
 #[async_trait::async_trait]
 impl TileStore for AzureStore {
     async fn get(&self, key: &str) -> Result<Bytes, StoreError> {
-        let blob = self.client.blob_client(&self.key(key));
+        let blob = self.client.blob_client(self.key(key));
         let response = blob.get_content().await.map_err(|e| {
             let msg = e.to_string();
             if msg.contains("BlobNotFound") || msg.contains("404") {
@@ -51,7 +51,7 @@ impl TileStore for AzureStore {
     }
 
     async fn put(&self, key: &str, data: Bytes) -> Result<(), StoreError> {
-        let blob = self.client.blob_client(&self.key(key));
+        let blob = self.client.blob_client(self.key(key));
         blob.put_block_blob(data)
             .await
             .map_err(|e| StoreError::Other(format!("Azure put error: {e}")))?;
@@ -60,7 +60,7 @@ impl TileStore for AzureStore {
     }
 
     async fn delete(&self, key: &str) -> Result<(), StoreError> {
-        let blob = self.client.blob_client(&self.key(key));
+        let blob = self.client.blob_client(self.key(key));
         blob.delete()
             .await
             .map_err(|e| StoreError::Other(format!("Azure delete error: {e}")))?;
@@ -94,7 +94,7 @@ impl TileStore for AzureStore {
     }
 
     async fn exists(&self, key: &str) -> Result<bool, StoreError> {
-        let blob = self.client.blob_client(&self.key(key));
+        let blob = self.client.blob_client(self.key(key));
         match blob.get_properties().await {
             Ok(_) => Ok(true),
             Err(e) => {

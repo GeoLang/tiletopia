@@ -26,11 +26,10 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
                     current_text.clear();
                 }
             }
-            Ok(Event::Text(ref e)) => {
-                if in_pos_list {
+            Ok(Event::Text(ref e))
+                if in_pos_list => {
                     current_text.push_str(&e.decode().unwrap_or_default());
                 }
-            }
             Ok(Event::End(ref e)) => {
                 let qname = e.name();
                 let local = local_name(qname.as_ref());
