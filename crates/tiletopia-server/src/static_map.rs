@@ -3,6 +3,7 @@
 //! Generates map images at specified bounds/center/zoom without
 //! needing a browser. Useful for reports, thumbnails, and print.
 
+use image::{ImageBuffer, Rgb, RgbImage};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -80,9 +81,12 @@ pub struct StaticMapResult {
     pub zoom: f64,
     pub bbox: [f64; 4],
     pub render_time_ms: u32,
+    /// The rendered image bytes.
+    #[serde(skip)]
+    pub image_bytes: Vec<u8>,
 }
 
-/// Render a static map (returns metadata; actual bytes would be in response body).
+/// Render a static map to image bytes.
 pub fn render_static_map(request: &StaticMapRequest) -> StaticMapResult {
     let center = request.center.unwrap_or([-122.4194, 37.7749]);
     let zoom = request.zoom.unwrap_or(12.0);
@@ -99,25 +103,133 @@ pub fn render_static_map(request: &StaticMapRequest) -> StaticMapResult {
         ]
     });
 
-    // Estimate file size based on dimensions and format
-    let pixels = request.width as u64 * request.height as u64;
-    let size_bytes = match request.format {
-        ImageFormat::Png => pixels * 3, // ~3 bytes/pixel compressed
-        ImageFormat::Jpeg | ImageFormat::Webp => pixels, // ~1 byte/pixel
-        ImageFormat::Pdf => pixels * 4 + 10000, // overhead
-        ImageFormat::Svg => pixels / 10, // vector is smaller
-    };
+    let start = std::time::Instant::now();
+    let mut img: RgbImage = ImageBuffer::from_pixel(request.width, request.height, Rgb([230, 230, 230]));
+
+    // Draw markers
+    for marker in &request.markers {
+        let (px, py) = lonlat_to_pixel(marker.longitude, marker.latitude, &bbox, request.width, request.height);
+        let radius = match marker.size {
+            MarkerSize::Small => 4i32,
+            MarkerSize::Medium => 8,
+            MarkerSize::Large => 12,
+        };
+        let color = parse_hex_color(&marker.color);
+        draw_filled_circle(&mut img, px, py, radius, color);
+    }
+
+    // Draw overlays
+    for overlay in &request.overlays {
+        let color = parse_hex_color(&overlay.stroke_color);
+        let pixels: Vec<(i32, i32)> = overlay
+            .coordinates
+            .iter()
+            .map(|c| lonlat_to_pixel(c[0], c[1], &bbox, request.width, request.height))
+            .collect();
+
+        for pair in pixels.windows(2) {
+            draw_line(&mut img, pair[0].0, pair[0].1, pair[1].0, pair[1].1, color);
+        }
+
+        if overlay.overlay_type == OverlayType::Polygon {
+            if let (Some(first), Some(last)) = (pixels.first(), pixels.last()) {
+                draw_line(&mut img, last.0, last.1, first.0, first.1, color);
+            }
+        }
+    }
+
+    let render_time_ms = start.elapsed().as_millis() as u32;
+
+    // Encode to the requested format
+    let mut buf = std::io::Cursor::new(Vec::new());
+    match request.format {
+        ImageFormat::Png => {
+            img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        }
+        ImageFormat::Jpeg | ImageFormat::Webp => {
+            img.write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
+        }
+        ImageFormat::Pdf | ImageFormat::Svg => {
+            // Fall back to PNG for formats the image crate doesn't support
+            img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        }
+    }
+
+    let bytes = buf.into_inner();
 
     StaticMapResult {
         id: Uuid::new_v4(),
         width: request.width,
         height: request.height,
         format: request.format.clone(),
-        size_bytes,
+        size_bytes: bytes.len() as u64,
         center,
         zoom,
         bbox,
-        render_time_ms: (pixels / 100000) as u32 + 50, // simulated render time
+        render_time_ms,
+        image_bytes: bytes,
+    }
+}
+
+fn lonlat_to_pixel(lon: f64, lat: f64, bbox: &[f64; 4], w: u32, h: u32) -> (i32, i32) {
+    let px = ((lon - bbox[0]) / (bbox[2] - bbox[0]) * w as f64) as i32;
+    let py = ((bbox[3] - lat) / (bbox[3] - bbox[1]) * h as f64) as i32;
+    (px, py)
+}
+
+fn parse_hex_color(hex: &str) -> Rgb<u8> {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() >= 6 {
+        let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(128);
+        let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(128);
+        let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(128);
+        Rgb([r, g, b])
+    } else {
+        Rgb([128, 128, 128])
+    }
+}
+
+fn draw_filled_circle(img: &mut RgbImage, cx: i32, cy: i32, radius: i32, color: Rgb<u8>) {
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx * dx + dy * dy <= radius * radius {
+                let px = cx + dx;
+                let py = cy + dy;
+                if px >= 0 && px < w && py >= 0 && py < h {
+                    img.put_pixel(px as u32, py as u32, color);
+                }
+            }
+        }
+    }
+}
+
+fn draw_line(img: &mut RgbImage, x0: i32, y0: i32, x1: i32, y1: i32, color: Rgb<u8>) {
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let mut x = x0;
+    let mut y = y0;
+
+    loop {
+        if x >= 0 && x < w && y >= 0 && y < h {
+            img.put_pixel(x as u32, y as u32, color);
+        }
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
     }
 }
 

@@ -13,7 +13,7 @@ members = [
 [workspace.package]
 version = "0.3.0"
 edition = "2024"
-license = "GPL-3.0"
+license = "AGPL-3.0"
 authors = ["tiletopia contributors"]
 repository = "https://github.com/tiletopia/tiletopia"
 
@@ -45,3 +45,31 @@ async-trait = "0.1"
 jsonwebtoken = "9"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+
+# Format readers
+e57 = "0.11"
+ply-rs = "0.1"
+geojson = "1"
+shapefile = "0.8"
+geo-types = "0.7"
+
+# CRS transforms
+proj4rs = "0.1"
+
+# Mesh compression
+meshopt = "0.6"
+bytemuck = { version = "1", features = ["derive"] }
+
+# HTTP client (federation, webhooks, geocoding)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Image generation (static maps)
+image = "0.25"
+
+# Encryption
+aes-gcm = "0.10"
+rand = "0.9"
+
+# HMAC signatures (webhooks)
+hmac = "0.12"
+sha2 = "0.10"

@@ -281,7 +281,7 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 | **Offline viewer export (USB delivery)** | ✅ | ❌ |
 | **Plugin system (custom formats)** | ✅ | ❌ |
 | **Local filesystem storage** | ✅ | ❌ |
-| **Open source** | ✅ GPL-3.0 | ❌ Proprietary |
+| **Open source** | ✅ AGPL-3.0 | ❌ Proprietary |
 | **2D map tiles (XYZ/MVT)** | ✅ | ❌ |
 | **STAC catalog (OGC)** | ✅ | ❌ |
 | **Geocoding (forward/reverse)** | ✅ | ❌ |
@@ -331,4 +331,4 @@ cargo test
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE).
+AGPL-3.0 — see [LICENSE](LICENSE).

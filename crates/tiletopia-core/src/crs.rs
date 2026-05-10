@@ -89,6 +89,44 @@ pub enum ReprojError {
     UnsupportedTransform,
     #[error("coordinate out of range: {0}")]
     OutOfRange(String),
+    #[error("proj4rs error: {0}")]
+    Proj4(String),
+}
+
+/// Transform coordinates between arbitrary CRS using proj4rs.
+///
+/// Falls back to proj4rs for any transform not handled by the
+/// hand-coded UTM/ECEF paths above.
+pub fn transform_proj4(
+    source_epsg: u32,
+    target_epsg: u32,
+    coords: &[Coord3D],
+) -> Result<Vec<Coord3D>, ReprojError> {
+    let src_def = format!("+init=epsg:{source_epsg}");
+    let tgt_def = format!("+init=epsg:{target_epsg}");
+
+    let src = proj4rs::Proj::from_proj_string(&src_def)
+        .map_err(|e| ReprojError::Proj4(format!("source EPSG:{source_epsg}: {e}")))?;
+    let tgt = proj4rs::Proj::from_proj_string(&tgt_def)
+        .map_err(|e| ReprojError::Proj4(format!("target EPSG:{target_epsg}: {e}")))?;
+
+    let mut result = Vec::with_capacity(coords.len());
+    for c in coords {
+        let mut point = (c.x.to_radians(), c.y.to_radians(), c.z);
+        proj4rs::transform::transform(&src, &tgt, &mut point)
+            .map_err(|e| ReprojError::Proj4(e.to_string()))?;
+
+        // proj4rs outputs geographic CRS in radians; convert back to degrees
+        // for geographic targets, otherwise keep as-is (projected).
+        let (x, y) = if tgt.is_latlong() {
+            (point.0.to_degrees(), point.1.to_degrees())
+        } else {
+            (point.0, point.1)
+        };
+
+        result.push(Coord3D { x, y, z: point.2 });
+    }
+    Ok(result)
 }
 
 fn is_utm(epsg: u32) -> bool {
@@ -281,5 +319,32 @@ mod tests {
         assert!((r.x - WGS84_A).abs() < 1.0);
         assert!(r.y.abs() < 1.0);
         assert!(r.z.abs() < 1.0);
+    }
+
+    #[test]
+    fn test_transform_proj4_returns_error_for_unsupported_init() {
+        // proj4rs 0.1 does not ship an EPSG database, so +init=epsg:XXXX
+        // should return a Proj4 error rather than panicking.
+        let coords = vec![Coord3D { x: 9.0, y: 48.0, z: 0.0 }];
+        let result = transform_proj4(4326, 32632, &coords);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ReprojError::Proj4(msg) => assert!(msg.contains("EPSG:4326"), "error should mention EPSG: {msg}"),
+            other => panic!("expected Proj4 error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_transformer_utm_roundtrip() {
+        // Use the hand-coded Transformer path for UTM→WGS84 roundtrip
+        let fwd = Transformer::new(CrsDef::Epsg(4326), CrsDef::Epsg(32632));
+        let inv = Transformer::new(CrsDef::Epsg(32632), CrsDef::Epsg(4326));
+        let c = Coord3D { x: 9.0, y: 48.0, z: 100.0 };
+        let utm = fwd.transform(c).unwrap();
+        assert!((utm.x - 500_000.0).abs() < 1.0);
+        let back = inv.transform(utm).unwrap();
+        assert!((back.x - 9.0).abs() < 1e-6);
+        assert!((back.y - 48.0).abs() < 1e-6);
+        assert!((back.z - 100.0).abs() < 1e-6);
     }
 }

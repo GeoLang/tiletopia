@@ -169,20 +169,53 @@ pub async fn federated_search(
 
 async fn check_peer_health(base_url: &str) -> bool {
     let url = format!("{}/api/v1/health", base_url);
-    // In production, use reqwest. For now, simulate.
-    let _ = url;
-    // TODO: actual HTTP request when reqwest is added
-    true
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build();
+    let client = match client {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    match client.get(&url).send().await {
+        Ok(resp) => resp.status().is_success(),
+        Err(e) => {
+            tracing::debug!("Health check failed for {base_url}: {e}");
+            false
+        }
+    }
 }
 
 async fn query_peer(
     peer: &FederationPeer,
-    _query: &FederatedQuery,
+    query: &FederatedQuery,
 ) -> Result<Vec<FederatedAsset>, String> {
-    // In production, make HTTP request to peer's /api/v1/assets endpoint.
-    // For now, return empty (real implementation needs reqwest dependency).
-    let _ = peer;
-    Ok(Vec::new())
+    let url = format!("{}/api/v1/assets", peer.url);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut req = client.get(&url);
+    if let Some(key) = &peer.api_key {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    if let Some(q) = &query.query {
+        req = req.query(&[("q", q.as_str())]);
+    }
+    if let Some(bounds) = &query.bounds {
+        req = req.query(&[("bbox", &format!("{},{},{},{}", bounds[0], bounds[1], bounds[2], bounds[3]))]);
+    }
+    if let Some(limit) = query.limit {
+        req = req.query(&[("limit", &limit.to_string())]);
+    }
+
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    resp.json::<Vec<FederatedAsset>>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 fn regions_overlap(a: [f64; 4], b: [f64; 4]) -> bool {

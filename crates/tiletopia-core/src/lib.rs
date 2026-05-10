@@ -7,6 +7,7 @@ pub mod bounding_volume;
 pub mod clash_detection;
 pub mod classify;
 pub mod colorize;
+pub mod compression;
 pub mod crs;
 pub mod diff;
 pub mod diff_viz;

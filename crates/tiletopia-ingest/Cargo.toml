@@ -16,3 +16,8 @@ memmap2 = { workspace = true }
 las = { workspace = true }
 tiff = { workspace = true }
 gltf = { workspace = true }
+e57 = { workspace = true }
+ply-rs = { workspace = true }
+geojson = { workspace = true }
+shapefile = { workspace = true }
+geo-types = { workspace = true }

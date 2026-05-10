@@ -5,6 +5,7 @@
 //! depth is reached.
 
 use crate::bounding_volume::Aabb;
+use rayon::prelude::*;
 
 /// A point with position and attributes, used during octree construction.
 #[derive(Debug, Clone, Copy)]
@@ -133,14 +134,22 @@ fn build_node(
         buckets[idx].push(p);
     }
 
-    let children: [Option<Box<OctreeNode>>; 8] = std::array::from_fn(|i| {
-        let bucket = std::mem::take(&mut buckets[i]);
-        if bucket.is_empty() {
-            None
-        } else {
-            Some(Box::new(build_node(bucket, octants[i], depth + 1, config)))
-        }
-    });
+    // Build children in parallel using rayon.
+    let children_vec: Vec<Option<Box<OctreeNode>>> = buckets
+        .into_par_iter()
+        .enumerate()
+        .map(|(i, bucket)| {
+            if bucket.is_empty() {
+                None
+            } else {
+                Some(Box::new(build_node(bucket, octants[i], depth + 1, config)))
+            }
+        })
+        .collect();
+
+    let children: [Option<Box<OctreeNode>>; 8] = children_vec
+        .try_into()
+        .expect("always exactly 8 elements");
 
     OctreeNode::Internal {
         bounds,

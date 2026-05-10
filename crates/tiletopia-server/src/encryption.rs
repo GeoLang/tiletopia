@@ -1,5 +1,10 @@
 //! Encryption at rest — AES-256 with customer-managed keys.
 
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
+use rand::RngCore;
 use std::collections::HashMap;
 
 /// Encryption algorithm.
@@ -133,37 +138,55 @@ impl Default for KeyStore {
     }
 }
 
-/// Encrypt data using XOR-based stream cipher (simplified demo).
-/// In production, use ring or aes-gcm crate.
-pub fn encrypt_data(plaintext: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> EncryptedEnvelope {
-    // XOR-based encryption (demo only — NOT cryptographically secure)
-    let mut ciphertext = Vec::with_capacity(plaintext.len());
-    for (i, byte) in plaintext.iter().enumerate() {
-        let key_byte = key[i % 32] ^ nonce[i % 12];
-        ciphertext.push(byte ^ key_byte);
-    }
+/// Generate a random 256-bit encryption key.
+pub fn generate_key() -> [u8; 32] {
+    let mut key = [0u8; 32];
+    rand::rng().fill_bytes(&mut key);
+    key
+}
 
-    // Simple tag (in real impl, use AEAD)
-    let tag: Vec<u8> = ciphertext.iter().take(16).copied().collect();
+/// Generate a random 96-bit nonce.
+pub fn generate_nonce() -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    rand::rng().fill_bytes(&mut nonce);
+    nonce
+}
+
+/// Encrypt data using AES-256-GCM.
+pub fn encrypt_data(plaintext: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> EncryptedEnvelope {
+    let cipher = Aes256Gcm::new_from_slice(key).expect("valid key length");
+    let aead_nonce = Nonce::from_slice(nonce);
+    let ciphertext = cipher
+        .encrypt(aead_nonce, plaintext)
+        .expect("encryption should not fail");
+
+    // aes-gcm appends the 16-byte auth tag to the ciphertext
+    let tag_offset = ciphertext.len() - 16;
+    let tag = ciphertext[tag_offset..].to_vec();
+    let ct = ciphertext[..tag_offset].to_vec();
 
     EncryptedEnvelope {
         key_id: String::new(),
         algorithm: EncryptionAlgorithm::Aes256Gcm,
         nonce: nonce.to_vec(),
-        ciphertext,
+        ciphertext: ct,
         tag,
     }
 }
 
-/// Decrypt data.
+/// Decrypt data using AES-256-GCM.
 pub fn decrypt_data(envelope: &EncryptedEnvelope, key: &[u8; 32]) -> Vec<u8> {
-    let nonce = &envelope.nonce;
-    let mut plaintext = Vec::with_capacity(envelope.ciphertext.len());
-    for (i, byte) in envelope.ciphertext.iter().enumerate() {
-        let key_byte = key[i % 32] ^ nonce[i % 12];
-        plaintext.push(byte ^ key_byte);
-    }
-    plaintext
+    let cipher = Aes256Gcm::new_from_slice(key).expect("valid key length");
+    let nonce = Nonce::from_slice(&envelope.nonce);
+
+    // Reconstruct combined ciphertext+tag for aes-gcm
+    let mut combined = Vec::with_capacity(envelope.ciphertext.len() + envelope.tag.len());
+    combined.extend_from_slice(&envelope.ciphertext);
+    combined.extend_from_slice(&envelope.tag);
+
+    cipher
+        .decrypt(nonce, combined.as_ref())
+        .expect("decryption failed — wrong key or corrupted data")
 }
 
 #[cfg(test)]
@@ -172,8 +195,8 @@ mod tests {
 
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
-        let key = [42u8; 32];
-        let nonce = [7u8; 12];
+        let key = generate_key();
+        let nonce = generate_nonce();
         let plaintext = b"Hello, TileTopia encryption!";
         let envelope = encrypt_data(plaintext, &key, &nonce);
         let decrypted = decrypt_data(&envelope, &key);
@@ -237,11 +260,18 @@ mod tests {
 
     #[test]
     fn test_ciphertext_differs_from_plaintext() {
-        let key = [1u8; 32];
-        let nonce = [2u8; 12];
+        let key = generate_key();
+        let nonce = generate_nonce();
         let plaintext = b"secret data";
         let envelope = encrypt_data(plaintext, &key, &nonce);
         assert_ne!(envelope.ciphertext, plaintext);
+    }
+
+    #[test]
+    fn test_generated_keys_are_unique() {
+        let k1 = generate_key();
+        let k2 = generate_key();
+        assert_ne!(k1, k2);
     }
 
     #[test]

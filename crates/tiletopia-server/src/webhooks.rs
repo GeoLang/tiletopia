@@ -177,23 +177,92 @@ impl WebhookEngine {
             .count()
     }
 
+    /// Process pending deliveries — sends HTTP requests with retry and HMAC signature.
+    pub async fn process_pending(&self) {
+        let mut to_deliver: Vec<(WebhookDelivery, WebhookSubscription)> = Vec::new();
+
+        {
+            let deliveries = self.deliveries.read().await;
+            let subs = self.subscriptions.read().await;
+            for d in deliveries.iter() {
+                if d.status == DeliveryStatus::Pending || d.status == DeliveryStatus::Retrying {
+                    if let Some(sub) = subs.iter().find(|s| s.id == d.subscription_id) {
+                        to_deliver.push((d.clone(), sub.clone()));
+                    }
+                }
+            }
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+
+        for (delivery, sub) in to_deliver {
+            let payload_bytes = serde_json::to_vec(&delivery.payload).unwrap_or_default();
+            let signature = Self::compute_signature(&sub.secret, &payload_bytes);
+
+            let result = client
+                .post(&sub.url)
+                .header("Content-Type", "application/json")
+                .header("X-TileTopia-Signature", &signature)
+                .header("X-TileTopia-Event", format!("{:?}", delivery.event))
+                .header("X-TileTopia-Delivery", delivery.id.to_string())
+                .body(payload_bytes)
+                .send()
+                .await;
+
+            let mut deliveries = self.deliveries.write().await;
+            if let Some(d) = deliveries.iter_mut().find(|d| d.id == delivery.id) {
+                d.attempt += 1;
+                match result {
+                    Ok(resp) if resp.status().is_success() => {
+                        d.status = DeliveryStatus::Delivered;
+                        d.delivered_at = Some(Utc::now());
+                        d.response_status = Some(resp.status().as_u16());
+                    }
+                    Ok(resp) => {
+                        d.response_status = Some(resp.status().as_u16());
+                        d.response_body = resp.text().await.ok();
+                        if d.attempt >= d.max_attempts {
+                            d.status = DeliveryStatus::Failed;
+                        } else {
+                            d.status = DeliveryStatus::Retrying;
+                            let backoff = chrono::Duration::seconds(2i64.pow(d.attempt));
+                            d.next_retry_at = Some(Utc::now() + backoff);
+                        }
+                    }
+                    Err(e) => {
+                        d.response_body = Some(e.to_string());
+                        if d.attempt >= d.max_attempts {
+                            d.status = DeliveryStatus::Failed;
+                        } else {
+                            d.status = DeliveryStatus::Retrying;
+                            let backoff = chrono::Duration::seconds(2i64.pow(d.attempt));
+                            d.next_retry_at = Some(Utc::now() + backoff);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Compute HMAC-SHA256 signature for a payload.
     pub fn compute_signature(secret: &str, payload: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
         use std::fmt::Write;
-        // Simple HMAC-SHA256 using a basic implementation
-        // In production, use the `hmac` + `sha2` crates
-        let key_bytes = secret.as_bytes();
-        let mut hasher_input = Vec::with_capacity(key_bytes.len() + payload.len());
-        hasher_input.extend_from_slice(key_bytes);
-        hasher_input.extend_from_slice(payload);
 
-        // For demo purposes, use a simplified hash
-        let hash: u64 = hasher_input.iter().fold(0xcbf29ce484222325u64, |acc, &b| {
-            (acc ^ b as u64).wrapping_mul(0x100000001b3)
-        });
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac =
+            HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+        mac.update(payload);
+        let result = mac.finalize().into_bytes();
 
-        let mut sig = String::with_capacity(16);
-        write!(&mut sig, "sha256={:016x}", hash).unwrap();
+        let mut sig = String::from("sha256=");
+        for byte in result.iter() {
+            write!(&mut sig, "{:02x}", byte).unwrap();
+        }
         sig
     }
 
@@ -286,7 +355,7 @@ mod tests {
     fn test_signature_computation() {
         let sig = WebhookEngine::compute_signature("secret", b"payload");
         assert!(sig.starts_with("sha256="));
-        assert_eq!(sig.len(), 7 + 16); // "sha256=" + 16 hex chars
+        assert_eq!(sig.len(), 7 + 64); // "sha256=" + 64 hex chars (SHA-256)
     }
 
     #[tokio::test]

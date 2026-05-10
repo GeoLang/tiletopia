@@ -26,6 +26,13 @@ jsonwebtoken = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 bytes = { workspace = true }
+reqwest = { workspace = true }
+image = { workspace = true }
+aes-gcm = { workspace = true }
+rand = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+geo-types = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
