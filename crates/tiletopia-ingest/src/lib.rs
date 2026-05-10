@@ -8,10 +8,12 @@ pub mod citygml_reader;
 pub mod cityjson_reader;
 pub mod dted_reader;
 pub mod e57_reader;
+pub mod fbx_reader;
 pub mod geojson_reader;
 pub mod gltf_reader;
 pub mod gpkg_reader;
 pub mod hgt_reader;
+pub mod ifc_reader;
 pub mod kml_reader;
 pub mod las_reader;
 pub mod obj_reader;
@@ -133,6 +135,8 @@ pub fn read_mesh(path: &std::path::Path) -> Result<Vec<MeshData>, IngestError> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("gltf" | "glb") => gltf_reader::read(path),
         Some("obj") => obj_reader::read(path),
+        Some("fbx") => fbx_reader::read(path),
+        Some("ifc") => ifc_reader::read(path),
         Some("gml" | "xml") => citygml_reader::read(path),
         Some("json") => {
             // Check if it's CityJSON by peeking at the content

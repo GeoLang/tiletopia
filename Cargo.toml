@@ -64,6 +64,13 @@ draco-rs = "0.1"
 # OBJ loading
 tobj = "4"
 
+# FBX loading
+fbxcel-dom = "0.0.10"
+
+# IFC geometry
+ifc-lite-core = "2.3"
+ifc-lite-geometry = "2.3"
+
 # XML parsing (CityGML, KML)
 quick-xml = "0.39"
 
