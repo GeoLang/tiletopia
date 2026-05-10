@@ -219,8 +219,7 @@ impl Scheduler {
             let jobs = self.jobs.read().await;
             jobs.iter()
                 .filter(|j| {
-                    j.status == JobStatus::Active
-                        && j.next_run_at.is_some_and(|t| t <= now)
+                    j.status == JobStatus::Active && j.next_run_at.is_some_and(|t| t <= now)
                 })
                 .map(|j| j.id)
                 .collect()

@@ -136,10 +136,7 @@ impl ExportEngine {
             }
         }
 
-        let job = self
-            .get_export(job_id)
-            .await
-            .ok_or("Job not found")?;
+        let job = self.get_export(job_id).await.ok_or("Job not found")?;
 
         let output_dir = data_dir.join("exports").join(job_id.to_string());
         std::fs::create_dir_all(&output_dir)
@@ -168,8 +165,7 @@ impl ExportEngine {
                     job.asset_id,
                     Utc::now().to_rfc3339()
                 );
-                std::fs::write(&path, obj_content)
-                    .map_err(|e| format!("Write error: {e}"))?;
+                std::fs::write(&path, obj_content).map_err(|e| format!("Write error: {e}"))?;
                 path
             }
             ExportFormat::Glb => {
@@ -204,8 +200,7 @@ impl ExportEngine {
                 glb.extend_from_slice(&0x4E4F534Au32.to_le_bytes()); // "JSON"
                 glb.extend_from_slice(&json_bytes);
                 glb.resize(total_len, b' ');
-                std::fs::write(&path, &glb)
-                    .map_err(|e| format!("Write error: {e}"))?;
+                std::fs::write(&path, &glb).map_err(|e| format!("Write error: {e}"))?;
                 path
             }
             ExportFormat::Tiles3DZip => {

@@ -206,8 +206,8 @@ pub fn encode_frames_to_video(
     video_rs::init().map_err(|e| format!("FFmpeg init error: {e}"))?;
 
     let settings = Settings::preset_h264_yuv420p(width as usize, height as usize, false);
-    let mut encoder = Encoder::new(output_path, settings)
-        .map_err(|e| format!("Encoder creation error: {e}"))?;
+    let mut encoder =
+        Encoder::new(output_path, settings).map_err(|e| format!("Encoder creation error: {e}"))?;
 
     let frame_duration = Time::from_nth_of_a_second(fps as usize);
 
@@ -219,13 +219,12 @@ pub fn encode_frames_to_video(
             .copied()
             .collect();
 
-        let frame = ndarray::Array3::from_shape_vec(
-            (height as usize, width as usize, 3),
-            rgb_data,
-        )
-        .map_err(|e| format!("Frame shape error: {e}"))?;
+        let frame = ndarray::Array3::from_shape_vec((height as usize, width as usize, 3), rgb_data)
+            .map_err(|e| format!("Frame shape error: {e}"))?;
 
-        let timestamp = frame_duration.aligned_with(&Time::zero()).offset_with(i as i64);
+        let timestamp = frame_duration
+            .aligned_with(&Time::zero())
+            .offset_with(i as i64);
         encoder
             .encode(&frame, timestamp)
             .map_err(|e| format!("Encode frame {} error: {e}", i))?;

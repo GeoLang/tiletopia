@@ -6,11 +6,11 @@
 //! - Indoor routing between rooms
 //! - Indoor positioning reference points (BLE beacons, WiFi)
 
+use petgraph::algo::dijkstra;
+use petgraph::graph::{DiGraph, NodeIndex};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
-use petgraph::graph::{DiGraph, NodeIndex};
-use petgraph::algo::dijkstra;
 
 /// An indoor-mapped building.
 #[derive(Debug, Clone, Serialize, Deserialize)]

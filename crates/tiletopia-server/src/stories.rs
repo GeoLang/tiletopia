@@ -270,11 +270,7 @@ impl StoryPlayer {
     }
 
     /// Advance time and return current interpolated camera.
-    pub fn tick(
-        &mut self,
-        story: &Story,
-        delta_secs: f64,
-    ) -> Option<CameraPosition> {
+    pub fn tick(&mut self, story: &Story, delta_secs: f64) -> Option<CameraPosition> {
         if !self.playing || self.current_slide >= story.slides.len() {
             return None;
         }

@@ -673,9 +673,9 @@ mod tests {
 /// Enable with `--features martin`.
 #[cfg(feature = "martin")]
 pub mod martin_backend {
-    use martin_core::tiles::mbtiles::MbtSource;
-    use martin_core::tiles::BoxedSource;
     use martin_core::CacheZoomRange;
+    use martin_core::tiles::BoxedSource;
+    use martin_core::tiles::mbtiles::MbtSource;
     use martin_tile_utils::TileCoord as MartinTileCoord;
     use std::collections::HashMap;
     use std::path::Path;

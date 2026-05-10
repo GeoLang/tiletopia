@@ -142,11 +142,7 @@ impl IssueTracker {
     }
 
     /// Transition issue status following valid workflow rules.
-    pub fn transition_status(
-        &mut self,
-        id: Uuid,
-        new_status: IssueStatus,
-    ) -> Result<(), String> {
+    pub fn transition_status(&mut self, id: Uuid, new_status: IssueStatus) -> Result<(), String> {
         let issue = self
             .issues
             .iter_mut()
@@ -195,12 +191,7 @@ impl IssueTracker {
     }
 
     /// Add a comment to an issue.
-    pub fn add_comment(
-        &mut self,
-        id: Uuid,
-        author: String,
-        text: String,
-    ) -> Result<Uuid, String> {
+    pub fn add_comment(&mut self, id: Uuid, author: String, text: String) -> Result<Uuid, String> {
         let issue = self
             .issues
             .iter_mut()
