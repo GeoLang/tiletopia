@@ -361,8 +361,8 @@ pub fn icp_align(
 
         // Ensure proper rotation (det = +1)
         if det_3x3(&rot) < 0.0 {
-            for i in 0..3 {
-                rot[i][2] = -rot[i][2];
+            for row in &mut rot {
+                row[2] = -row[2];
             }
         }
 

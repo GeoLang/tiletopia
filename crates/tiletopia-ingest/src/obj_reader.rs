@@ -27,9 +27,9 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
         let positions: Vec<[f32; 3]> = (0..num_verts)
             .map(|i| {
                 [
-                    mesh.positions[i * 3] as f32,
-                    mesh.positions[i * 3 + 1] as f32,
-                    mesh.positions[i * 3 + 2] as f32,
+                    mesh.positions[i * 3],
+                    mesh.positions[i * 3 + 1],
+                    mesh.positions[i * 3 + 2],
                 ]
             })
             .collect();
@@ -38,9 +38,9 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             (0..num_verts)
                 .map(|i| {
                     [
-                        mesh.normals[i * 3] as f32,
-                        mesh.normals[i * 3 + 1] as f32,
-                        mesh.normals[i * 3 + 2] as f32,
+                        mesh.normals[i * 3],
+                        mesh.normals[i * 3 + 1],
+                        mesh.normals[i * 3 + 2],
                     ]
                 })
                 .collect()

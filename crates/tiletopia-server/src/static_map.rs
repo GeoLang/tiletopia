@@ -138,10 +138,10 @@ pub fn render_static_map(request: &StaticMapRequest) -> StaticMapResult {
             draw_line(&mut img, pair[0].0, pair[0].1, pair[1].0, pair[1].1, color);
         }
 
-        if overlay.overlay_type == OverlayType::Polygon {
-            if let (Some(first), Some(last)) = (pixels.first(), pixels.last()) {
-                draw_line(&mut img, last.0, last.1, first.0, first.1, color);
-            }
+        if overlay.overlay_type == OverlayType::Polygon
+            && let (Some(first), Some(last)) = (pixels.first(), pixels.last())
+        {
+            draw_line(&mut img, last.0, last.1, first.0, first.1, color);
         }
     }
 

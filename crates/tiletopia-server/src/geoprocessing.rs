@@ -267,16 +267,16 @@ pub fn polygon_intersection(subject: &[[f64; 2]], clip: &[[f64; 2]]) -> Vec<[f64
             let prev_inside = is_inside(&previous, &edge_start, &edge_end);
 
             if curr_inside {
-                if !prev_inside {
-                    if let Some(p) = line_intersect(&previous, &current, &edge_start, &edge_end) {
-                        output.push(p);
-                    }
-                }
-                output.push(current);
-            } else if prev_inside {
-                if let Some(p) = line_intersect(&previous, &current, &edge_start, &edge_end) {
+                if !prev_inside
+                    && let Some(p) = line_intersect(&previous, &current, &edge_start, &edge_end)
+                {
                     output.push(p);
                 }
+                output.push(current);
+            } else if prev_inside
+                && let Some(p) = line_intersect(&previous, &current, &edge_start, &edge_end)
+            {
+                output.push(p);
             }
         }
     }

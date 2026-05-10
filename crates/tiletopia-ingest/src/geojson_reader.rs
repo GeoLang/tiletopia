@@ -15,9 +15,10 @@ pub fn read(path: &Path) -> Result<Vec<VectorFeature>, IngestError> {
         geojson::GeoJson::FeatureCollection(fc) => fc.features,
         geojson::GeoJson::Feature(f) => vec![f],
         geojson::GeoJson::Geometry(g) => {
-            let mut f = geojson::Feature::default();
-            f.geometry = Some(g);
-            vec![f]
+            vec![geojson::Feature {
+                geometry: Some(g),
+                ..Default::default()
+            }]
         }
     };
 

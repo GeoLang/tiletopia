@@ -297,8 +297,8 @@ fn dist_2d(a: &[f64; 2], b: &[f64; 2]) -> f64 {
 }
 
 /// Find the nearest navigation node to a position on a given floor.
-fn nearest_node_on_floor<'a>(
-    nodes: &'a [(Uuid, &NavNode)],
+fn nearest_node_on_floor(
+    nodes: &[(Uuid, &NavNode)],
     pos: &[f64; 2],
     floor_level: i8,
 ) -> Option<Uuid> {

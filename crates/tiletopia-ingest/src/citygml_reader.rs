@@ -41,7 +41,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
                         .filter_map(|s| s.parse::<f64>().ok())
                         .collect();
 
-                    if coords.len() >= 9 && coords.len() % 3 == 0 {
+                    if coords.len() >= 9 && coords.len().is_multiple_of(3) {
                         let num_pts = coords.len() / 3;
                         let base = all_positions.len() as u32;
 

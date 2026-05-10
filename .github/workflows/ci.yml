@@ -25,9 +25,19 @@ jobs:
 
       - name: Build
         run: cargo build --release
+        if: runner.os == 'Windows'
+
+      - name: Build (with cloud backends)
+        run: cargo build --release --features tiletopia-store/gcs,tiletopia-store/azure
+        if: runner.os != 'Windows'
 
       - name: Test
         run: cargo test --release
+        if: runner.os == 'Windows'
+
+      - name: Test (with cloud backends)
+        run: cargo test --release --features tiletopia-store/gcs,tiletopia-store/azure
+        if: runner.os != 'Windows'
 
       - name: Clippy
         run: cargo clippy -- -D warnings

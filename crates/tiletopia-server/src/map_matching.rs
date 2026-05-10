@@ -282,32 +282,32 @@ pub fn match_trace_hmm(request: &MapMatchRequest, network: &RoadNetwork) -> MapM
     let mut confidence_count = 0;
 
     for (t, gps) in request.trace.iter().enumerate() {
-        if let Some(cand_idx) = best_sequence[t] {
-            if cand_idx < all_candidates[t].len() {
-                let (seg_idx, dist, snap) = &all_candidates[t][cand_idx];
-                let seg = &network.segments[*seg_idx];
-                matched_points.push(MatchedPoint {
-                    original: [gps.longitude, gps.latitude],
-                    snapped: *snap,
-                    distance_from_road_m: *dist,
-                    road_name: Some(seg.name.clone()),
-                });
-                route.push(*snap);
+        if let Some(cand_idx) = best_sequence[t]
+            && cand_idx < all_candidates[t].len()
+        {
+            let (seg_idx, dist, snap) = &all_candidates[t][cand_idx];
+            let seg = &network.segments[*seg_idx];
+            matched_points.push(MatchedPoint {
+                original: [gps.longitude, gps.latitude],
+                snapped: *snap,
+                distance_from_road_m: *dist,
+                road_name: Some(seg.name.clone()),
+            });
+            route.push(*snap);
 
-                if t > 0 {
-                    if let Some(prev) = route.get(route.len().wrapping_sub(2)) {
-                        let d = haversine(prev[1], prev[0], snap[1], snap[0]);
-                        total_distance += d;
-                        *segment_distances.entry(*seg_idx).or_insert(0.0) += d;
-                    }
-                }
-
-                // Confidence based on emission probability (closer = better)
-                let conf = (-0.5 * (dist / sigma_z).powi(2)).exp();
-                confidence_sum += conf;
-                confidence_count += 1;
-                continue;
+            if t > 0
+                && let Some(prev) = route.get(route.len().wrapping_sub(2))
+            {
+                let d = haversine(prev[1], prev[0], snap[1], snap[0]);
+                total_distance += d;
+                *segment_distances.entry(*seg_idx).or_insert(0.0) += d;
             }
+
+            // Confidence based on emission probability (closer = better)
+            let conf = (-0.5 * (dist / sigma_z).powi(2)).exp();
+            confidence_sum += conf;
+            confidence_count += 1;
+            continue;
         }
         // Fallback: no candidate matched
         matched_points.push(MatchedPoint {

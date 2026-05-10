@@ -189,9 +189,7 @@ impl FeatureServiceEngine {
         geometry: FeatureGeometry,
         properties: HashMap<String, serde_json::Value>,
     ) -> Option<Feature> {
-        if self.get_layer(layer_id).is_none() {
-            return None;
-        }
+        self.get_layer(layer_id)?;
         let feature = Feature {
             id: Uuid::new_v4(),
             layer_id,
@@ -233,10 +231,10 @@ impl FeatureServiceEngine {
             .find(|f| f.id == id)
             .map(|f| f.layer_id);
         self.features.retain(|f| f.id != id);
-        if let Some(lid) = layer_id {
-            if let Some(layer) = self.layers.iter_mut().find(|l| l.id == lid) {
-                layer.feature_count = layer.feature_count.saturating_sub(1);
-            }
+        if let Some(lid) = layer_id
+            && let Some(layer) = self.layers.iter_mut().find(|l| l.id == lid)
+        {
+            layer.feature_count = layer.feature_count.saturating_sub(1);
         }
         self.features.len() < before
     }

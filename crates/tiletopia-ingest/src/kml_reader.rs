@@ -24,13 +24,10 @@ pub fn read(path: &Path) -> Result<Vec<VectorFeature>, IngestError> {
                 let local = local_name_str(e.name().as_ref());
                 tag_stack.push(local.clone());
 
-                match local.as_str() {
-                    "Placemark" => {
-                        in_placemark = true;
-                        current_name.clear();
-                        current_geom = None;
-                    }
-                    _ => {}
+                if local.as_str() == "Placemark" {
+                    in_placemark = true;
+                    current_name.clear();
+                    current_geom = None;
                 }
                 current_text.clear();
             }

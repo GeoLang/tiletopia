@@ -82,7 +82,7 @@ quick-xml = "0.39"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # HTTP client (federation, webhooks, geocoding)
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Image generation (static maps)
 image = "0.25"

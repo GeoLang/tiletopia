@@ -127,20 +127,20 @@ fn parse_dimensions(record_a: &str) -> Result<(usize, usize), IngestError> {
     if let (Some(cols), Some(rows)) = (
         parse_int_field(record_a, 858, 864),
         parse_int_field(record_a, 864, 870),
-    ) {
-        if cols > 0 && rows > 0 {
-            return Ok((cols as usize, rows as usize));
-        }
+    ) && cols > 0
+        && rows > 0
+    {
+        return Ok((cols as usize, rows as usize));
     }
 
     // Fallback: try 468–474 and 474–480
     if let (Some(cols), Some(rows)) = (
         parse_int_field(record_a, 468, 474),
         parse_int_field(record_a, 474, 480),
-    ) {
-        if cols > 0 && rows > 0 {
-            return Ok((cols as usize, rows as usize));
-        }
+    ) && cols > 0
+        && rows > 0
+    {
+        return Ok((cols as usize, rows as usize));
     }
 
     Err(IngestError::ParseError(

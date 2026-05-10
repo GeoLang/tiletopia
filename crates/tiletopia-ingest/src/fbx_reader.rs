@@ -82,8 +82,8 @@ fn triangulate_fbx_polygons(raw: &[i32]) -> Vec<u32> {
         if val < 0 {
             // End of polygon — collect vertex indices for this polygon.
             let mut polygon = Vec::with_capacity(i - poly_start + 1);
-            for j in poly_start..i {
-                polygon.push(raw[j] as u32);
+            for &val in &raw[poly_start..i] {
+                polygon.push(val as u32);
             }
             polygon.push((!val) as u32);
 

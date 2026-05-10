@@ -87,6 +87,12 @@ pub struct DemStore {
     grids: Vec<DemGrid>,
 }
 
+impl Default for DemStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DemStore {
     pub fn new() -> Self {
         Self { grids: Vec::new() }
@@ -114,16 +120,16 @@ impl DemStore {
 /// Get elevation at a single point, using DEM grids when available.
 /// Falls back to a synthetic model when no grid covers the point.
 pub fn get_elevation(latitude: f64, longitude: f64, dem: &DemStore) -> ElevationPoint {
-    if let Some(grid) = dem.find_grid(latitude, longitude) {
-        if let Some(elev) = grid.sample(latitude, longitude) {
-            return ElevationPoint {
-                latitude,
-                longitude,
-                elevation_m: elev,
-                resolution_m: grid.cell_size_x * 111_320.0, // approximate metres
-                source: ElevationSource::LocalDem,
-            };
-        }
+    if let Some(grid) = dem.find_grid(latitude, longitude)
+        && let Some(elev) = grid.sample(latitude, longitude)
+    {
+        return ElevationPoint {
+            latitude,
+            longitude,
+            elevation_m: elev,
+            resolution_m: grid.cell_size_x * 111_320.0, // approximate metres
+            source: ElevationSource::LocalDem,
+        };
     }
 
     // Fallback: synthetic elevation based on position

@@ -3,7 +3,9 @@
 //! Abstraction over local filesystem, S3, GCS, and Azure Blob storage
 //! for reading/writing tiles and assets.
 
+#[cfg(feature = "azure")]
 pub mod azure;
+#[cfg(feature = "gcs")]
 pub mod gcs;
 pub mod hybrid;
 pub mod s3;

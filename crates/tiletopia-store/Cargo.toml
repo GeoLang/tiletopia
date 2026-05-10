@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "Storage abstraction — local filesystem, S3, GCS, Azure Blob"
 
+[features]
+default = []
+gcs = ["dep:cloud-storage"]
+azure = ["dep:azure_storage", "dep:azure_storage_blobs", "dep:futures"]
+
 [dependencies]
 tiletopia-core = { path = "../tiletopia-core" }
 serde = { workspace = true }
@@ -16,10 +21,10 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 aws-sdk-s3 = { workspace = true }
 aws-config = { workspace = true }
-cloud-storage = { workspace = true }
-azure_storage = { workspace = true }
-azure_storage_blobs = { workspace = true }
-futures = { workspace = true }
+cloud-storage = { workspace = true, optional = true }
+azure_storage = { workspace = true, optional = true }
+azure_storage_blobs = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

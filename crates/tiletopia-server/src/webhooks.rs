@@ -185,10 +185,10 @@ impl WebhookEngine {
             let deliveries = self.deliveries.read().await;
             let subs = self.subscriptions.read().await;
             for d in deliveries.iter() {
-                if d.status == DeliveryStatus::Pending || d.status == DeliveryStatus::Retrying {
-                    if let Some(sub) = subs.iter().find(|s| s.id == d.subscription_id) {
-                        to_deliver.push((d.clone(), sub.clone()));
-                    }
+                if (d.status == DeliveryStatus::Pending || d.status == DeliveryStatus::Retrying)
+                    && let Some(sub) = subs.iter().find(|s| s.id == d.subscription_id)
+                {
+                    to_deliver.push((d.clone(), sub.clone()));
                 }
             }
         }
