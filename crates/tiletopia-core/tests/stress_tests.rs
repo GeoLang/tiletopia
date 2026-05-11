@@ -7,7 +7,7 @@
 //! Run with: cargo test --release -p tiletopia-core stress -- --nocapture
 
 use std::time::Instant;
-use tiletopia_core::octree::{build_octree, collect_stats, OctreeConfig, OctreePoint};
+use tiletopia_core::octree::{OctreeConfig, OctreePoint, build_octree, collect_stats};
 use tiletopia_core::tile::write_tileset_to_dir;
 use tiletopia_core::tileset::TilingConfig;
 
@@ -79,14 +79,20 @@ fn stress_100k_uniform() {
     println!("  Points preserved: {}", stats.total_points);
 
     // total_points includes LOD copies at internal nodes, so it exceeds input count
-    assert!(stats.total_points >= n, "all points must be preserved in octree");
+    assert!(
+        stats.total_points >= n,
+        "all points must be preserved in octree"
+    );
     assert!(
         stats.total_points < n * 2,
         "LOD overhead should be < 2x: got {}",
         stats.total_points
     );
     assert!(stats.leaf_nodes > 1, "should have multiple leaf nodes");
-    assert!(elapsed.as_secs() < 10, "100K points should tile in under 10s");
+    assert!(
+        elapsed.as_secs() < 10,
+        "100K points should tile in under 10s"
+    );
 }
 
 #[test]
@@ -144,7 +150,10 @@ fn stress_5m_uniform() {
 
     assert!(stats.total_points >= n);
     assert!(stats.total_points < n * 2, "LOD overhead < 2x");
-    assert!(elapsed.as_secs() < 120, "5M points should tile in under 2min");
+    assert!(
+        elapsed.as_secs() < 120,
+        "5M points should tile in under 2min"
+    );
 }
 
 #[test]
@@ -170,7 +179,10 @@ fn stress_10m_uniform() {
 
     assert!(stats.total_points >= n);
     assert!(stats.total_points < n * 2, "LOD overhead < 2x");
-    assert!(elapsed.as_secs() < 300, "10M points should tile in under 5min");
+    assert!(
+        elapsed.as_secs() < 300,
+        "10M points should tile in under 5min"
+    );
 }
 
 #[test]
