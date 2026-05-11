@@ -325,8 +325,8 @@ pub fn generate_terrain_quadtree(
                     elevations: {
                         let mut elev = Vec::with_capacity((tile_res * tile_res) as usize);
                         for row in 0..tile_res {
-                            let v_frac = (min_lat + row as f64 / (tile_res - 1).max(1) as f64
-                                * tile_lat
+                            let v_frac = (min_lat
+                                + row as f64 / (tile_res - 1).max(1) as f64 * tile_lat
                                 - heightmap.min_lat)
                                 / lat_span;
                             for col in 0..tile_res {
@@ -334,10 +334,10 @@ pub fn generate_terrain_quadtree(
                                     + col as f64 / (tile_res - 1).max(1) as f64 * tile_lon
                                     - heightmap.min_lon)
                                     / lon_span;
-                                elev.push(heightmap.sample(
-                                    u_frac.clamp(0.0, 1.0),
-                                    v_frac.clamp(0.0, 1.0),
-                                ));
+                                elev.push(
+                                    heightmap
+                                        .sample(u_frac.clamp(0.0, 1.0), v_frac.clamp(0.0, 1.0)),
+                                );
                             }
                         }
                         elev

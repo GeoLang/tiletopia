@@ -355,9 +355,8 @@ pub mod raft_types {
             &mut self,
         ) -> Result<openraft::Snapshot<TypeConfig>, openraft::StorageError<TypeConfig>> {
             let sm = self.state_machine.read().await;
-            let data = serde_json::to_vec(&*sm).map_err(|e| {
-                openraft::StorageError::read(&e.to_string())
-            })?;
+            let data = serde_json::to_vec(&*sm)
+                .map_err(|e| openraft::StorageError::read(&e.to_string()))?;
             let last_applied = sm.last_applied;
             let snapshot_id = format!(
                 "{}-{}",
@@ -431,10 +430,7 @@ pub mod raft_types {
             log_id: openraft::LogId<NodeId>,
         ) -> Result<(), openraft::StorageError<TypeConfig>> {
             let mut log = self.log.write().await;
-            let keys: Vec<u64> = log
-                .range(log_id.index..)
-                .map(|(&k, _)| k)
-                .collect();
+            let keys: Vec<u64> = log.range(log_id.index..).map(|(&k, _)| k).collect();
             for key in keys {
                 log.remove(&key);
             }
@@ -446,10 +442,7 @@ pub mod raft_types {
             log_id: openraft::LogId<NodeId>,
         ) -> Result<(), openraft::StorageError<TypeConfig>> {
             let mut log = self.log.write().await;
-            let keys: Vec<u64> = log
-                .range(..=log_id.index)
-                .map(|(&k, _)| k)
-                .collect();
+            let keys: Vec<u64> = log.range(..=log_id.index).map(|(&k, _)| k).collect();
             for key in keys {
                 log.remove(&key);
             }

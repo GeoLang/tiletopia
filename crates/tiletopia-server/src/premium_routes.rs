@@ -2,7 +2,11 @@
 //!
 //! Wires up all premium modules into axum routers.
 
-use axum::{Json, Router, extract::{Query, State}, routing::get};
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    routing::get,
+};
 use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -257,7 +261,9 @@ pub fn photogrammetry_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/photogrammetry/presets", get(quality_presets))
 }
 
-async fn list_photogrammetry_projects(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+async fn list_photogrammetry_projects(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
     let engine = &state.photogrammetry_engine;
     let projects = engine.list_projects(None).await;
     Json(serde_json::json!({ "projects": projects }))
@@ -298,7 +304,9 @@ pub fn collaboration_routes() -> Router<Arc<AppState>> {
     )
 }
 
-async fn list_collaboration_sessions(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+async fn list_collaboration_sessions(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
     let engine = &state.collaboration_engine;
     let sessions = engine.list_sessions().await;
     Json(serde_json::json!({ "sessions": sessions }))
@@ -445,7 +453,10 @@ struct RouteQuery {
     profile: Option<String>,
 }
 
-async fn compute_route(State(state): State<Arc<AppState>>, Query(params): Query<RouteQuery>) -> Json<serde_json::Value> {
+async fn compute_route(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RouteQuery>,
+) -> Json<serde_json::Value> {
     let engine = &state.routing_engine;
     let profile = match params.profile.as_deref() {
         Some("walking") => routing::RoutingProfile::Walking,
@@ -477,10 +488,7 @@ pub fn map_tile_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/tiles/styles", get(list_tile_styles))
         .route("/api/v1/tiles/cache/stats", get(tile_cache_stats))
         .route("/api/v1/tiles/layers", get(list_vector_layers))
-        .route(
-            "/api/v1/tiles/{source_id}/tilejson",
-            get(get_tilejson),
-        )
+        .route("/api/v1/tiles/{source_id}/tilejson", get(get_tilejson))
 }
 
 async fn list_tile_sources(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -629,7 +637,10 @@ struct FeatureQuery {
     where_clause: Option<String>,
 }
 
-async fn query_features(State(state): State<Arc<AppState>>, Query(params): Query<FeatureQuery>) -> Json<serde_json::Value> {
+async fn query_features(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<FeatureQuery>,
+) -> Json<serde_json::Value> {
     let engine = &state.feature_service_engine;
     let layers = engine.list_layers();
     let layer = if let Some(name) = &params.layer {
@@ -675,7 +686,10 @@ struct ElevationQuery {
     lon: Option<f64>,
 }
 
-async fn elevation_point(State(state): State<Arc<AppState>>, Query(params): Query<ElevationQuery>) -> Json<serde_json::Value> {
+async fn elevation_point(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ElevationQuery>,
+) -> Json<serde_json::Value> {
     let dem = &state.elevation_store;
     let lat = params.lat.unwrap_or(37.7749);
     let lon = params.lon.unwrap_or(-122.4194);

@@ -99,10 +99,7 @@ impl EntityLinkStore {
     /// Find all 3D tile assets linked to a given entity ID.
     pub fn query_by_entity(&self, entity_id: &str) -> Vec<&EntityLink> {
         match self.by_entity.get(entity_id) {
-            Some(indices) => indices
-                .iter()
-                .filter_map(|&i| self.links.get(i))
-                .collect(),
+            Some(indices) => indices.iter().filter_map(|&i| self.links.get(i)).collect(),
             None => Vec::new(),
         }
     }

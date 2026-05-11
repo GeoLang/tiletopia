@@ -442,11 +442,7 @@ pub async fn classify_ml(
                     .unwrap_or_default();
                 let confidences: Vec<f64> = body["confidences"]
                     .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .map(|v| v.as_f64().unwrap_or(0.0))
-                            .collect()
-                    })
+                    .map(|arr| arr.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect())
                     .unwrap_or_default();
                 if classes.len() == features.len() {
                     return (classes, confidences);

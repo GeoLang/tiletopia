@@ -171,15 +171,18 @@ async fn main() -> anyhow::Result<()> {
                 export_engine: tiletopia_server::export::ExportEngine::new(),
                 scheduler: tiletopia_server::scheduler::Scheduler::new(),
                 plugin_registry: tiletopia_server::plugins::PluginRegistry::new(),
-                photogrammetry_engine: tiletopia_server::photogrammetry::PhotogrammetryEngine::new(),
-                classification_engine: tiletopia_server::classification::ClassificationEngine::new(),
+                photogrammetry_engine: tiletopia_server::photogrammetry::PhotogrammetryEngine::new(
+                ),
+                classification_engine: tiletopia_server::classification::ClassificationEngine::new(
+                ),
                 collaboration_engine: tiletopia_server::collaboration::CollaborationEngine::new(),
                 versioning_engine: tiletopia_server::versioning::VersioningEngine::new(),
                 bim4d_engine: tiletopia_server::bim4d::Bim4DEngine::new(),
                 cog_engine: tiletopia_server::cog::CogEngine::new(),
                 routing_engine: tiletopia_server::routing::RoutingEngine::new(),
                 map_tile_engine: tiletopia_server::map_tiles::MapTileEngine::new(),
-                feature_service_engine: tiletopia_server::feature_service::FeatureServiceEngine::new(),
+                feature_service_engine:
+                    tiletopia_server::feature_service::FeatureServiceEngine::new(),
                 issue_tracker: tiletopia_server::issue_tracking::IssueTracker::new(),
                 elevation_store: tiletopia_server::elevation::DemStore::new(),
                 entity_link_store: tiletopia_server::entity_linking::EntityLinkStore::new(),
