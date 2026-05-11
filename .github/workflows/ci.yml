@@ -20,8 +20,7 @@ jobs:
           - os: macos-14
             features: tiletopia-core/draco,tiletopia-store/gcs,tiletopia-store/azure
           - os: windows-2022
-            # draco-rs C++ bindings have linker issues on MSVC (unresolved Status methods)
-            features: tiletopia-store/gcs,tiletopia-store/azure
+            features: tiletopia-core/draco,tiletopia-store/gcs,tiletopia-store/azure
     runs-on: ${{ matrix.os }}
 
     steps:

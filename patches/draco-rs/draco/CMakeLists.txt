@@ -374,6 +374,7 @@ list(
          "${draco_src_root}/core/options.h"
          "${draco_src_root}/core/quantization_utils.cc"
          "${draco_src_root}/core/quantization_utils.h"
+         "${draco_src_root}/core/status.cc"
          "${draco_src_root}/core/status.h"
          "${draco_src_root}/core/status_or.h"
          "${draco_src_root}/core/varint_decoding.h"
