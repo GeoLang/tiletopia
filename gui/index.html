@@ -34,6 +34,20 @@
       <span id="status-text">No server</span>
     </div>
   </aside>
+  <div id="chat-panel">
+    <div id="chat-header">
+      <span>🤖 GeoLang Agent</span>
+      <button id="chat-toggle" title="Toggle chat">◀</button>
+    </div>
+    <div id="chat-messages"></div>
+    <div id="chat-input-area">
+      <textarea id="chat-input" placeholder="Ask the agent to analyze data, fly to locations, show layers..." rows="2"></textarea>
+      <button id="chat-send">Send</button>
+    </div>
+    <div id="chat-status">
+      <span id="agent-status">Ready</span>
+    </div>
+  </div>
   <main id="main-content">
     <div id="cesium-container" class="panel active"></div>
     <div id="panel-catalog" class="panel"></div>

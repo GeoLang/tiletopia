@@ -9,6 +9,7 @@ import { StoryPlayer, fetchStories } from './stories.js';
 import { CollaborationPanel } from './collaboration.js';
 import { applyOpenData, loadOsmBuildings } from './open-data.js';
 import { applyClassificationStyle, clearClassificationStyle, createClassLegend, highlightClass } from './classification-viz.js';
+import { initAgentChat } from './agent-chat.js';
 
 // API base URL (proxied in dev, same-origin in production)
 const API = '/api/v1';
@@ -38,6 +39,9 @@ const loadedTilesets = new Map();
 
 // Apply zero-config open data sources (terrain, geocoder, etc.)
 applyOpenData(viewer).catch(e => console.warn('Open data setup:', e));
+
+// Initialize agent chat panel
+initAgentChat(viewer);
 
 // Wire up multi-renderer
 setCesiumViewer(viewer);
