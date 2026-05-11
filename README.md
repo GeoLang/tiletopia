@@ -129,6 +129,7 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 ### Geospatial Services
 - **Photogrammetry (SfM/MVS)** — Structure from Motion + Multi-View Stereo pipeline with quality presets
 - **Point Cloud Classification** — ASPRS-standard classes (ground/vegetation/building/water), ensemble decision tree classifier with height/density/planarity features, optional PyTorch PointNet sidecar for ML inference (`--features ml`)
+- **AI Agent (GeoLang)** — natural language control of the 3D viewer via LLM-powered agent. Chat with the agent to fly to locations, classify point clouds, overlay GeoJSON layers, run spatial analysis, and generate reports — no GIS expertise required. Powered by [Letta](https://github.com/letta-ai/letta) with 20+ chainable geospatial tools.
 - **Real-Time Collaboration** — multi-user sessions with 3D cursors, viewports, annotations, and replies
 - **Asset Versioning** — full version history, diffs, change regions between versions
 - **BIM 4D Scheduling** — construction timeline, phases, Gantt keyframes, progress tracking
@@ -149,6 +150,43 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Terrain Analysis** — slope, aspect, hillshade, viewshed, watershed, contour lines from DEMs
 - **Geostatistics** — IDW, kriging (ordinary/universal/simple), variograms, Moran's I autocorrelation
 - **Multispectral Imagery** — NDVI, EVI, SAVI, thermal anomaly detection, band math, spectral indices
+
+---
+
+## AI Agent (GeoLang Integration)
+
+TileTopia includes an LLM-powered geospatial agent that lets users control the 3D viewer through natural language conversation. Instead of clicking through menus, type what you want:
+
+- **"Fly to the Sydney Opera House"** — geocodes the location and moves the 3D camera
+- **"Classify this point cloud"** — applies ASPRS classification coloring
+- **"Show me flood risk for sites near Manchester"** — chains geocoding → environmental analysis → visualization
+- **"Load the building survey tileset"** — adds a 3D Tiles dataset to the scene
+- **"Compare elevation profiles between two sites"** — runs terrain analysis and displays results
+
+The agent uses [Letta](https://github.com/letta-ai/letta) (persistent-memory LLM framework) with 20+ geospatial tools including geocoding, isochrones, clustering, Voronoi, terrain profiles, environmental risk assessment, and routing.
+
+### Viewer Commands
+
+The agent can programmatically control the CesiumJS/deck.gl/MapLibre viewer:
+
+| Command | Description |
+|---------|-------------|
+| `fly_to` | Animate camera to coordinates |
+| `set_view` | Set camera position + orientation |
+| `add_marker` | Place a labeled pin |
+| `load_tileset` | Load a 3D Tiles dataset |
+| `classify` | Apply ASPRS classification colors |
+| `add_geojson` | Overlay GeoJSON layer |
+| `set_time` | Set the time slider |
+| `clear_entities` | Remove all markers/entities |
+| `screenshot` | Capture the current view |
+
+### Setup
+
+1. Start the Letta server: `docker-compose up -d` (in the GeoLang directory)
+2. Start the GeoLang API: `uvicorn src.api.server:app --port 8100`
+3. Start TileTopia: `tiletopia serve --port 3000`
+4. The chat panel appears on the left side of the viewer
 
 ---
 

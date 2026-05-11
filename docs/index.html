@@ -159,7 +159,19 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 </ul>
 </div>
 <div class="card">
-<h3>🤝 Collaboration</h3>
+<h3>� AI Agent (GeoLang)</h3>
+<ul>
+<li>Natural language viewer control</li>
+<li>Fly to, classify, overlay via chat</li>
+<li>20+ chainable geospatial tools</li>
+<li>Letta persistent-memory LLM agent</li>
+<li>Geocoding → analysis → visualization</li>
+<li>Works with CesiumJS/deck.gl/MapLibre</li>
+<li>No GIS expertise required</li>
+</ul>
+</div>
+<div class="card">
+<h3>�🤝 Collaboration</h3>
 <ul>
 <li>Real-time multi-user sessions</li>
 <li>3D cursors & viewport sharing</li>
@@ -283,6 +295,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td>Terrain analysis (slope/viewshed)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
 <tr><td>Geostatistics (kriging/IDW)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
 <tr><td>Multispectral imagery (NDVI)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td></tr>
+<tr><td>AI Agent (NL viewer control)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
 <tr><td><strong>Price (monthly)</strong></td><td class="check"><strong>$0</strong></td><td class="cross">$150–$3,750</td><td class="cross">$0–$1,500+</td><td class="cross">Pay-per-use</td><td class="cross">$10K+ enterprise</td><td class="cross">$500–$2,000</td><td class="check">$0</td></tr>
 </tbody>
 </table>
@@ -484,7 +497,44 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td><code>GET</code></td><td><code>/api/v1/terrain-analysis/operations</code></td><td>Terrain analysis (slope/viewshed)</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/geostatistics/methods</code></td><td>Interpolation methods (kriging/IDW)</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/multispectral/indices</code></td><td>Spectral indices (NDVI/EVI/SAVI)</td></tr>
+<tr><td colspan="3" style="color:var(--accent);font-weight:600;padding-top:12px">AI Agent</td></tr>
+<tr><td><code>POST</code></td><td><code>/agent/chat</code></td><td>Send message to GeoLang agent</td></tr>
+<tr><td><code>POST</code></td><td><code>/agent/chat/stream</code></td><td>Streaming agent chat (SSE)</td></tr>
 </table>
+</div>
+</section>
+
+<section>
+<div class="container">
+<h2>🤖 AI Agent — Natural Language Viewer Control</h2>
+<p style="font-size:1.1rem;color:var(--muted);margin-bottom:20px">Control the 3D viewer through conversation. No GIS expertise required.</p>
+<div class="grid" style="grid-template-columns:1fr 1fr">
+<div>
+<h3 style="color:var(--heading);margin-bottom:12px">Example Prompts</h3>
+<pre style="font-size:.9rem">"Fly to the Sydney Opera House"
+
+"Classify this point cloud by vegetation"
+
+"Show flood risk for warehouses near Manchester"
+
+"Compare elevation between these two sites"
+
+"Load the building survey and add markers"</pre>
+</div>
+<div>
+<h3 style="color:var(--heading);margin-bottom:12px">Viewer Commands</h3>
+<table>
+<tr><th>Command</th><th>Action</th></tr>
+<tr><td><code>fly_to</code></td><td>Animate camera to coordinates</td></tr>
+<tr><td><code>classify</code></td><td>Apply ASPRS classification colors</td></tr>
+<tr><td><code>add_geojson</code></td><td>Overlay GeoJSON layer</td></tr>
+<tr><td><code>load_tileset</code></td><td>Load 3D Tiles dataset</td></tr>
+<tr><td><code>add_marker</code></td><td>Place labeled pins</td></tr>
+<tr><td><code>screenshot</code></td><td>Capture current view</td></tr>
+</table>
+</div>
+</div>
+<p style="margin-top:16px;color:var(--muted)">Powered by <a href="https://github.com/letta-ai/letta">Letta</a> persistent-memory LLM framework with 20+ chainable geospatial tools (geocoding, isochrones, clustering, terrain profiles, environmental risk, routing).</p>
 </div>
 </section>
 
