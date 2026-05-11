@@ -128,7 +128,7 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 
 ### Geospatial Services
 - **Photogrammetry (SfM/MVS)** — Structure from Motion + Multi-View Stereo pipeline with quality presets
-- **Point Cloud Classification** — ASPRS-standard classes (ground/vegetation/building/water), ensemble decision tree classifier with height/density/planarity features
+- **Point Cloud Classification** — ASPRS-standard classes (ground/vegetation/building/water), ensemble decision tree classifier with height/density/planarity features, optional PyTorch PointNet sidecar for ML inference (`--features ml`)
 - **Real-Time Collaboration** — multi-user sessions with 3D cursors, viewports, annotations, and replies
 - **Asset Versioning** — full version history, diffs, change regions between versions
 - **BIM 4D Scheduling** — construction timeline, phases, Gantt keyframes, progress tracking
@@ -207,6 +207,29 @@ viewer.scene.primitives.add(tileset);
 ```bash
 docker run -p 3000:3000 -v /path/to/data:/data tiletopia serve --data-dir /data
 ```
+
+### Zero-Config Viewer (no API keys needed)
+
+The built-in CesiumJS viewer works out-of-the-box with open data — **no Cesium Ion token, no API keys, no server required** for a basic 3D globe experience:
+
+```bash
+cd gui
+npm install
+npm run dev        # opens http://localhost:5173
+```
+
+| Feature | Source | Cesium Ion Equivalent |
+|---------|--------|-----------------------|
+| Base imagery | OpenStreetMap raster tiles | Bing Maps Aerial |
+| 3D Buildings | Overpass API (client-side) | Cesium OSM Buildings |
+| Geocoding | Nominatim (OpenStreetMap) | Ion geocoder |
+| Terrain | TileTopia server quantized-mesh (if running) | Cesium World Terrain |
+| 3D Tilesets | TileTopia server | Ion asset hosting |
+| Photorealistic 3D | Set `VITE_GOOGLE_3D_TILES_KEY` env var | Google Photorealistic 3D Tiles |
+
+Additional imagery layers (Stamen Toner, ESRI World Imagery) are available via the layer picker.
+
+When the TileTopia server is running on port 3000, the viewer automatically connects and loads terrain + tilesets.  Without the server, you still get a full globe with buildings and geocoding.
 
 ---
 
@@ -326,7 +349,7 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 cargo test
 ```
 
-341 unit tests covering:
+502 unit tests covering:
 - Core: AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, GPU compute, diff detection, plugins (21)
 - Core: spatial queries (radius/kNN/bbox/polygon clip/volume), AI point cloud classification, change detection & time slider, implicit tiling (3D Tiles Next), colorization from imagery, glTF structural metadata (35)
 - Core: 3D measurement (distance/area/volume/cut-fill/slope/bearing), anomaly detection (deformation/encroachment/deviation/outlier), predictive analytics (linear regression/exponential smoothing/trend/seasonal), BIM clash detection (hard/soft/design deviation) (22)

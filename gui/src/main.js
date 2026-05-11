@@ -7,6 +7,7 @@ import { AnnotationTool } from './annotations.js';
 import { FeaturePicker, StyleEditor } from './feature-picker.js';
 import { StoryPlayer, fetchStories } from './stories.js';
 import { CollaborationPanel } from './collaboration.js';
+import { applyOpenData, loadOsmBuildings } from './open-data.js';
 
 // API base URL (proxied in dev, same-origin in production)
 const API = '/api/v1';
@@ -15,7 +16,7 @@ const API = '/api/v1';
 const viewer = new Cesium.Viewer('cesium-container', {
   terrain: undefined,
   baseLayerPicker: false,
-  geocoder: false,
+  geocoder: true,
   animation: false,
   timeline: false,
   homeButton: true,
@@ -33,6 +34,9 @@ const viewer = new Cesium.Viewer('cesium-container', {
 
 // Track loaded tilesets
 const loadedTilesets = new Map();
+
+// Apply zero-config open data sources (terrain, geocoder, etc.)
+applyOpenData(viewer).catch(e => console.warn('Open data setup:', e));
 
 // Wire up multi-renderer
 setCesiumViewer(viewer);
@@ -540,6 +544,28 @@ async function loadEntities() {
 }
 
 // ─── Time Slider ─────────────────────────────────────────────────────────────
+
+// ─── OSM Buildings (client-side Overpass — no server needed) ─────────────────
+
+document.getElementById('tb-osm')?.addEventListener('click', async () => {
+  const btn = document.getElementById('tb-osm');
+  btn.classList.add('active');
+  btn.textContent = '⏳';
+  try {
+    const entities = await loadOsmBuildings(viewer);
+    if (entities.length > 0) {
+      viewer.flyTo(viewer.entities);
+    } else {
+      console.warn('No buildings found — try zooming in');
+    }
+    btn.textContent = '🏢';
+    btn.classList.remove('active');
+  } catch (e) {
+    console.error('Failed to load OSM buildings:', e);
+    btn.textContent = '🏢';
+    btn.classList.remove('active');
+  }
+});
 
 document.getElementById('tb-timeslider')?.addEventListener('click', () => {
   const container = document.getElementById('time-slider-container');

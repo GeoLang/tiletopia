@@ -418,7 +418,6 @@ nav {
 #time-slider-container label { color: var(--muted); display: flex; align-items: center; gap: 6px; }
 #time-slider { width: 200px; accent-color: var(--accent); }
 #time-label { color: var(--accent); min-width: 80px; }
-}
 
 /* ─── Feature Info Panel ────────────────────────────────── */
 

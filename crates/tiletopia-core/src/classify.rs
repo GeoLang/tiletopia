@@ -396,6 +396,78 @@ fn compute_eigenvalues_3x3(m: &[[f64; 3]; 3]) -> [f64; 3] {
     eigs
 }
 
+/// Classify via external ML service (PyTorch PointNet sidecar).
+///
+/// Calls `http://{host}/classify` with point features. Falls back to
+/// the built-in decision tree ensemble if the service is unavailable.
+#[cfg(feature = "ml")]
+pub async fn classify_ml(
+    features: &[PointFeatures],
+    ml_url: &str,
+) -> (Vec<Classification>, Vec<f64>) {
+    let features_array: Vec<[f64; 8]> = features
+        .iter()
+        .map(|f| {
+            [
+                f.height_above_ground,
+                f.planarity,
+                f.linearity,
+                f.scatter,
+                f.density,
+                f.elevation,
+                f.return_number as f64,
+                f.normal_z,
+            ]
+        })
+        .collect();
+
+    let payload = serde_json::json!({ "features": features_array });
+
+    match reqwest::Client::new()
+        .post(format!("{}/classify", ml_url))
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                let classes: Vec<Classification> = body["classifications"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|v| Classification::from_u8(v.as_u64().unwrap_or(0) as u8))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let confidences: Vec<f64> = body["confidences"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|v| v.as_f64().unwrap_or(0.0))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if classes.len() == features.len() {
+                    return (classes, confidences);
+                }
+            }
+            // Fallback
+            let model = ClassificationModel::pretrained();
+            let classes = model.classify_batch(features);
+            let confidences = vec![0.7; classes.len()];
+            (classes, confidences)
+        }
+        _ => {
+            // ML service unavailable — use built-in classifier
+            let model = ClassificationModel::pretrained();
+            let classes = model.classify_batch(features);
+            let confidences = vec![0.7; classes.len()];
+            (classes, confidences)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

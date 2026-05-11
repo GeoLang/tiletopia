@@ -10,6 +10,7 @@ default = ["draco"]
 gpu = ["dep:wgpu", "dep:pollster"]
 draco = ["dep:draco-rs"]
 plugin-dylib = ["dep:libloading"]
+ml = ["dep:reqwest"]
 
 [dependencies]
 serde = { workspace = true }
@@ -28,6 +29,7 @@ bytemuck = { workspace = true }
 draco-rs = { workspace = true, optional = true }
 libloading = { version = "0.8", optional = true }
 image = { workspace = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
 
 [dev-dependencies]
 gltf = { workspace = true }
