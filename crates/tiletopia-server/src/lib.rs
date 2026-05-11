@@ -44,6 +44,7 @@ pub mod marketplace;
 pub mod metering;
 pub mod metrics;
 pub mod mobile;
+pub mod model_registry;
 pub mod multispectral;
 pub mod offline_export;
 pub mod osm_buildings;
@@ -110,6 +111,7 @@ pub struct AppState {
     pub plugin_registry: plugins::PluginRegistry,
     pub photogrammetry_engine: photogrammetry::PhotogrammetryEngine,
     pub classification_engine: classification::ClassificationEngine,
+    pub model_registry: model_registry::ModelRegistry,
     pub collaboration_engine: collaboration::CollaborationEngine,
     pub versioning_engine: versioning::VersioningEngine,
     pub bim4d_engine: bim4d::Bim4DEngine,
@@ -235,6 +237,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::mobile_routes())
         .merge(premium_routes::photogrammetry_routes())
         .merge(premium_routes::classification_routes())
+        .merge(model_registry::model_registry_routes())
         .merge(premium_routes::collaboration_routes())
         .merge(premium_routes::versioning_routes())
         .merge(premium_routes::bim4d_routes())

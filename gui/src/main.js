@@ -8,6 +8,7 @@ import { FeaturePicker, StyleEditor } from './feature-picker.js';
 import { StoryPlayer, fetchStories } from './stories.js';
 import { CollaborationPanel } from './collaboration.js';
 import { applyOpenData, loadOsmBuildings } from './open-data.js';
+import { applyClassificationStyle, clearClassificationStyle, createClassLegend, highlightClass } from './classification-viz.js';
 
 // API base URL (proxied in dev, same-origin in production)
 const API = '/api/v1';
@@ -571,6 +572,44 @@ document.getElementById('tb-osm')?.addEventListener('click', async () => {
     alert(`Failed to load OSM buildings: ${e.message}`);
     btn.textContent = '🏢';
     btn.classList.remove('active');
+  }
+});
+
+// ─── Classification Visualization ────────────────────────────────────────────
+
+let classifyActive = false;
+let classLegend = null;
+
+document.getElementById('tb-classify')?.addEventListener('click', () => {
+  classifyActive = !classifyActive;
+  const btn = document.getElementById('tb-classify');
+
+  if (classifyActive) {
+    btn.classList.add('active');
+    // Apply classification colors to all loaded tilesets
+    for (const [, tileset] of loadedTilesets) {
+      applyClassificationStyle(tileset);
+    }
+    // Show legend
+    if (!classLegend) {
+      classLegend = createClassLegend();
+      classLegend.addEventListener('click', (e) => {
+        const el = e.target.closest('[data-class]');
+        if (el) {
+          const code = parseInt(el.dataset.class, 10);
+          for (const [, ts] of loadedTilesets) {
+            highlightClass(ts, code);
+          }
+        }
+      });
+    }
+    document.getElementById('cesium-container').appendChild(classLegend);
+  } else {
+    btn.classList.remove('active');
+    for (const [, tileset] of loadedTilesets) {
+      clearClassificationStyle(tileset);
+    }
+    classLegend?.remove();
   }
 });
 

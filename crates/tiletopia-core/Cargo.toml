@@ -11,6 +11,7 @@ gpu = ["dep:wgpu", "dep:pollster"]
 draco = ["dep:draco-rs"]
 plugin-dylib = ["dep:libloading"]
 ml = ["dep:reqwest"]
+onnx = ["dep:ort", "dep:ndarray"]
 
 [dependencies]
 serde = { workspace = true }
@@ -30,6 +31,8 @@ draco-rs = { workspace = true, optional = true }
 libloading = { version = "0.8", optional = true }
 image = { workspace = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
+ort = { version = "2.0.0-rc.12", optional = true }
+ndarray = { version = "0.16", optional = true }
 
 [dev-dependencies]
 gltf = { workspace = true }
