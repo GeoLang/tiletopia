@@ -293,10 +293,10 @@ impl MapTileEngine {
         });
 
         // Include vector_layers for MVT/vector sources (TileJSON 3.0.0 spec)
-        if source.source_type == TileSourceType::VectorGeoJson
-            || source.source_type == TileSourceType::VectorPostGis
+        if (source.source_type == TileSourceType::VectorGeoJson
+            || source.source_type == TileSourceType::VectorPostGis)
+            && let Some(layers) = self.vector_layers(source_id)
         {
-            if let Some(layers) = self.vector_layers(source_id) {
                 let vl: Vec<serde_json::Value> = layers
                     .iter()
                     .map(|l| {
@@ -324,7 +324,6 @@ impl MapTileEngine {
                     })
                     .collect();
                 tj["vector_layers"] = serde_json::Value::Array(vl);
-            }
         }
 
         Some(tj)

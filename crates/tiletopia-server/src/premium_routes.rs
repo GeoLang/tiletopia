@@ -693,14 +693,14 @@ async fn elevation_point(
     let dem = &state.elevation_store;
     let lat = params.lat.unwrap_or(37.7749);
     let lon = params.lon.unwrap_or(-122.4194);
-    let elev = elevation::get_elevation(lat, lon, &dem);
+    let elev = elevation::get_elevation(lat, lon, dem);
     Json(serde_json::json!(elev))
 }
 
 async fn elevation_profile_demo(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let path = vec![[-122.42, 37.77], [-122.41, 37.78], [-122.40, 37.79]];
     let dem = &state.elevation_store;
-    let profile = elevation::get_profile(&path, &dem);
+    let profile = elevation::get_profile(&path, dem);
     Json(serde_json::json!(profile))
 }
 
