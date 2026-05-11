@@ -25,28 +25,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release --no-default-features
-        if: runner.os == 'Windows'
-
-      - name: Build (with cloud backends)
         run: cargo build --release --features tiletopia-core/draco,tiletopia-store/gcs,tiletopia-store/azure
-        if: runner.os != 'Windows'
 
       - name: Test
-        run: cargo test --release --no-default-features
-        if: runner.os == 'Windows'
-
-      - name: Test (with cloud backends)
         run: cargo test --release --features tiletopia-core/draco,tiletopia-store/gcs,tiletopia-store/azure
-        if: runner.os != 'Windows'
 
       - name: Clippy
-        run: cargo clippy --no-default-features -- -D warnings
-        if: runner.os == 'Windows'
-
-      - name: Clippy (with cloud backends)
         run: cargo clippy --features tiletopia-core/draco,tiletopia-store/gcs,tiletopia-store/azure -- -D warnings
-        if: runner.os != 'Windows'
 
   fmt:
     runs-on: ubuntu-24.04
