@@ -297,33 +297,33 @@ impl MapTileEngine {
             || source.source_type == TileSourceType::VectorPostGis)
             && let Some(layers) = self.vector_layers(source_id)
         {
-                let vl: Vec<serde_json::Value> = layers
-                    .iter()
-                    .map(|l| {
-                        let fields: serde_json::Map<String, serde_json::Value> = l
-                            .fields
-                            .iter()
-                            .map(|f| {
-                                (
-                                    f.name.clone(),
-                                    serde_json::Value::String(match f.field_type {
-                                        FieldType::String => "String".into(),
-                                        FieldType::Number => "Number".into(),
-                                        FieldType::Boolean => "Boolean".into(),
-                                    }),
-                                )
-                            })
-                            .collect();
-                        serde_json::json!({
-                            "id": l.id,
-                            "description": l.name,
-                            "minzoom": l.min_zoom,
-                            "maxzoom": l.max_zoom,
-                            "fields": fields,
+            let vl: Vec<serde_json::Value> = layers
+                .iter()
+                .map(|l| {
+                    let fields: serde_json::Map<String, serde_json::Value> = l
+                        .fields
+                        .iter()
+                        .map(|f| {
+                            (
+                                f.name.clone(),
+                                serde_json::Value::String(match f.field_type {
+                                    FieldType::String => "String".into(),
+                                    FieldType::Number => "Number".into(),
+                                    FieldType::Boolean => "Boolean".into(),
+                                }),
+                            )
                         })
+                        .collect();
+                    serde_json::json!({
+                        "id": l.id,
+                        "description": l.name,
+                        "minzoom": l.min_zoom,
+                        "maxzoom": l.max_zoom,
+                        "fields": fields,
                     })
-                    .collect();
-                tj["vector_layers"] = serde_json::Value::Array(vl);
+                })
+                .collect();
+            tj["vector_layers"] = serde_json::Value::Array(vl);
         }
 
         Some(tj)

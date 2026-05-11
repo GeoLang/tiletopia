@@ -8,16 +8,44 @@
  */
 
 import { Deck } from '@deck.gl/core';
-import { Tile3DLayer } from '@deck.gl/geo-layers';
+import { Tile3DLayer, TileLayer } from '@deck.gl/geo-layers';
+import { BitmapLayer } from '@deck.gl/layers';
 import { Tiles3DLoader } from '@loaders.gl/3d-tiles';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import * as Cesium from 'cesium';
 
 const API = '/api/v1';
 
 /** Active renderer state */
 let activeRenderer = null;
 let cesiumViewer = null; // keep reference from main.js
+let sharedCamera = { longitude: -122.4, latitude: 37.8, zoom: 11, pitch: 45, bearing: 0 };
+let deckViewState = null; // module-level to avoid timing issues
+
+/** Extract camera state from the currently active renderer. */
+function captureCamera() {
+  if (activeRenderer?.type === 'deckgl') {
+    const vs = deckViewState;
+    if (vs) {
+      sharedCamera = { longitude: vs.longitude, latitude: vs.latitude, zoom: vs.zoom, pitch: vs.pitch ?? 45, bearing: vs.bearing ?? 0 };
+    }
+  } else if (activeRenderer?.type === 'maplibre' && activeRenderer.map) {
+    const c = activeRenderer.map.getCenter();
+    sharedCamera = { longitude: c.lng, latitude: c.lat, zoom: activeRenderer.map.getZoom(), pitch: activeRenderer.map.getPitch(), bearing: activeRenderer.map.getBearing() };
+  } else if (cesiumViewer) {
+    const carto = cesiumViewer.camera.positionCartographic;
+    if (carto) {
+      sharedCamera = {
+        longitude: Cesium.Math.toDegrees(carto.longitude),
+        latitude: Cesium.Math.toDegrees(carto.latitude),
+        zoom: Math.max(0, Math.log2(4e7 / Math.max(carto.height, 1))),
+        pitch: Cesium.Math.toDegrees(-cesiumViewer.camera.pitch) || 45,
+        bearing: Cesium.Math.toDegrees(cesiumViewer.camera.heading) || 0,
+      };
+    }
+  }
+}
 
 export function setCesiumViewer(viewer) {
   cesiumViewer = viewer;
@@ -39,6 +67,9 @@ export function initRendererSelector() {
  * Switch to a different renderer.
  */
 export function switchRenderer(renderer) {
+  // Capture camera from outgoing renderer
+  captureCamera();
+
   // Clean up previous non-Cesium renderer
   cleanupActiveRenderer();
 
@@ -65,7 +96,20 @@ function showCesium(container) {
   if (overlay) overlay.remove();
   // Show Cesium's own elements
   container.querySelectorAll('.cesium-widget').forEach(el => el.style.display = '');
-  if (cesiumViewer) cesiumViewer.resize();
+  if (cesiumViewer) {
+    cesiumViewer.resize();
+    // Restore camera from shared state
+    const height = 4e7 / Math.pow(2, sharedCamera.zoom);
+    cesiumViewer.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(sharedCamera.longitude, sharedCamera.latitude, height),
+      orientation: {
+        heading: Cesium.Math.toRadians(sharedCamera.bearing),
+        pitch: Cesium.Math.toRadians(-sharedCamera.pitch),
+        roll: 0,
+      },
+      duration: 0,
+    });
+  }
 }
 
 function hideCesium(container) {
@@ -97,22 +141,37 @@ function initDeckGL(container) {
   overlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:10;';
   container.appendChild(overlay);
 
+  const initState = {
+      longitude: sharedCamera.longitude,
+      latitude: sharedCamera.latitude,
+      zoom: sharedCamera.zoom,
+      pitch: sharedCamera.pitch,
+      bearing: sharedCamera.bearing,
+    };
+  deckViewState = initState;
+
   const deck = new Deck({
     parent: overlay,
-    initialViewState: {
-      longitude: -122.4,
-      latitude: 37.8,
-      zoom: 11,
-      pitch: 45,
-      bearing: 0,
-    },
+    initialViewState: initState,
     controller: true,
+    onViewStateChange: ({ viewState }) => {
+      deckViewState = viewState;
+    },
     layers: [
-      new Tile3DLayer({
-        id: 'osm-buildings',
+      new TileLayer({
+        id: 'osm-basemap',
         data: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-        loader: Tiles3DLoader,
-        pointSize: 2,
+        minZoom: 0,
+        maxZoom: 19,
+        tileSize: 256,
+        renderSubLayers: (props) => {
+          const { boundingBox } = props.tile;
+          return new BitmapLayer(props, {
+            data: null,
+            image: props.data,
+            bounds: [boundingBox[0][0], boundingBox[0][1], boundingBox[1][0], boundingBox[1][1]],
+          });
+        },
       }),
     ],
     getTooltip: ({ object }) => object && JSON.stringify(object.properties),
@@ -164,9 +223,10 @@ function initMapLibre(container) {
         exaggeration: 1.5,
       },
     },
-    center: [-122.4, 37.8],
-    zoom: 11,
-    pitch: 45,
+    center: [sharedCamera.longitude, sharedCamera.latitude],
+    zoom: sharedCamera.zoom,
+    pitch: sharedCamera.pitch,
+    bearing: sharedCamera.bearing,
   });
 
   map.addControl(new maplibregl.NavigationControl());
