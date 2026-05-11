@@ -549,19 +549,26 @@ async function loadEntities() {
 
 document.getElementById('tb-osm')?.addEventListener('click', async () => {
   const btn = document.getElementById('tb-osm');
+  const status = document.getElementById('measure-status');
+  const setStatus = (msg) => { if (status) status.textContent = msg; };
   btn.classList.add('active');
   btn.textContent = '⏳';
+  setStatus('Loading OSM buildings...');
   try {
     const entities = await loadOsmBuildings(viewer);
     if (entities.length > 0) {
+      setStatus(`Loaded ${entities.length} buildings`);
       viewer.flyTo(viewer.entities);
     } else {
-      console.warn('No buildings found — try zooming in');
+      setStatus('No buildings found — zoom in closer');
+      alert('No buildings found in current view. Try zooming in closer to a city area.');
     }
     btn.textContent = '🏢';
     btn.classList.remove('active');
   } catch (e) {
     console.error('Failed to load OSM buildings:', e);
+    setStatus(`Error: ${e.message}`);
+    alert(`Failed to load OSM buildings: ${e.message}`);
     btn.textContent = '🏢';
     btn.classList.remove('active');
   }

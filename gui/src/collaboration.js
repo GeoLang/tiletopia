@@ -1,6 +1,7 @@
 /**
  * Collaboration panel — real-time presence, cursor sharing, and chat over WebSocket.
  */
+import * as Cesium from 'cesium';
 
 export class CollaborationPanel {
   constructor(viewer) {

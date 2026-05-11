@@ -87,12 +87,24 @@ export class NominatimGeocoder {
  *
  * @param {Cesium.Viewer} viewer
  * @param {object} [opts]
- * @param {number} [opts.maxArea=0.01] Max bbox area in degrees² to avoid huge queries
+ * @param {number} [opts.maxArea=0.5] Max bbox area in degrees² to avoid huge queries
  */
 export async function loadOsmBuildings(viewer, opts = {}) {
-  const maxArea = opts.maxArea ?? 0.01;
-  const rect = viewer.camera.computeViewRectangle();
-  if (!rect) return [];
+  const maxArea = opts.maxArea ?? 0.5;
+  let rect = viewer.camera.computeViewRectangle();
+
+  // computeViewRectangle can return undefined in 3D mode — fall back to a bbox from camera position
+  if (!rect) {
+    const carto = viewer.camera.positionCartographic;
+    if (!carto) return [];
+    const span = 0.005; // ~500m
+    rect = new Cesium.Rectangle(
+      carto.longitude - span,
+      carto.latitude - span,
+      carto.longitude + span,
+      carto.latitude + span,
+    );
+  }
 
   const south = Cesium.Math.toDegrees(rect.south);
   const west = Cesium.Math.toDegrees(rect.west);
@@ -120,6 +132,7 @@ export async function loadOsmBuildings(viewer, opts = {}) {
     if (el.type === 'node') nodes.set(el.id, el);
     else if (el.type === 'way') ways.push(el);
   }
+  console.log(`OSM: fetched ${nodes.size} nodes, ${ways.length} ways for bbox ${bbox}`);
 
   const entities = [];
   for (const way of ways) {
@@ -136,6 +149,7 @@ export async function loadOsmBuildings(viewer, opts = {}) {
       viewer.entities.add({
         polygon: {
           hierarchy: Cesium.Cartesian3.fromDegreesArray(coords),
+          height: 0,
           extrudedHeight: height,
           material: Cesium.Color.fromCssColorString(way.tags?.['building:colour'] ?? '#c8b896').withAlpha(0.85),
           outline: true,

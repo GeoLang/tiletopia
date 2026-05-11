@@ -4,6 +4,7 @@
  * Flies the camera between slides, manages asset visibility,
  * shows annotations, and provides playback controls.
  */
+import * as Cesium from 'cesium';
 
 const API = '/api/v1';
 
