@@ -278,7 +278,7 @@ impl MapTileEngine {
     /// TileJSON metadata for a source (used by MapLibre).
     pub fn tilejson(&self, source_id: Uuid) -> Option<serde_json::Value> {
         let source = self.get_source(source_id)?;
-        Some(serde_json::json!({
+        let mut tj = serde_json::json!({
             "tilejson": "3.0.0",
             "name": source.name,
             "description": format!("Tile source: {}", source.name),
@@ -290,7 +290,44 @@ impl MapTileEngine {
             "maxzoom": source.max_zoom,
             "bounds": source.bounds.unwrap_or([-180.0, -85.0511, 180.0, 85.0511]),
             "center": [0.0, 0.0, source.min_zoom],
-        }))
+        });
+
+        // Include vector_layers for MVT/vector sources (TileJSON 3.0.0 spec)
+        if source.source_type == TileSourceType::VectorGeoJson
+            || source.source_type == TileSourceType::VectorPostGis
+        {
+            if let Some(layers) = self.vector_layers(source_id) {
+                let vl: Vec<serde_json::Value> = layers
+                    .iter()
+                    .map(|l| {
+                        let fields: serde_json::Map<String, serde_json::Value> = l
+                            .fields
+                            .iter()
+                            .map(|f| {
+                                (
+                                    f.name.clone(),
+                                    serde_json::Value::String(match f.field_type {
+                                        FieldType::String => "String".into(),
+                                        FieldType::Number => "Number".into(),
+                                        FieldType::Boolean => "Boolean".into(),
+                                    }),
+                                )
+                            })
+                            .collect();
+                        serde_json::json!({
+                            "id": l.id,
+                            "description": l.name,
+                            "minzoom": l.min_zoom,
+                            "maxzoom": l.max_zoom,
+                            "fields": fields,
+                        })
+                    })
+                    .collect();
+                tj["vector_layers"] = serde_json::Value::Array(vl);
+            }
+        }
+
+        Some(tj)
     }
 
     /// Fetch a tile from the upstream source, caching it locally.

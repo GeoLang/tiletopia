@@ -27,7 +27,7 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 ### Tile Server
 - **REST API** for asset management, tiling jobs, access control
 - **Multipart upload** — stream large files directly
-- **Tile streaming** with view-dependent LOD and frustum culling
+- **Tile streaming** with geometric error-based LOD (client-side frustum culling via CesiumJS)
 - **CORS support** for cross-origin CesiumJS access
 - **WebSocket real-time layer** for live IoT/sensor data overlay
 - **JWT authentication** (opt-in via `TILETOPIA_JWT_SECRET`)
@@ -65,8 +65,8 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 ### Storage
 - **Local filesystem** — zero-config default
 - **Amazon S3** — full CRUD via aws-sdk-s3
-- **Google Cloud Storage** — planned
-- **Azure Blob** — planned
+- **Google Cloud Storage** — full CRUD via cloud-storage (feature-gated)
+- **Azure Blob** — full CRUD via azure-storage-blobs (feature-gated)
 - **Hybrid** — hot tiles local, cold tiles in cloud
 
 ### Deployment
@@ -112,9 +112,23 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Tile Caching** — LRU cache with TTL, hit rate tracking, invalidation
 - **Custom Overlays** — render asset footprints and BIM zones as vector tile layers
 
+### OSM Buildings
+- **OSM Building Extrusion** — parse OpenStreetMap building footprints into 3D meshes
+- **Tiered building profiles** — multi-level setbacks (Empire State Building-style)
+- **Roof shapes** — flat, gabled, hipped, pyramidal, skillion, dome
+- **Overpass API parsing** — directly ingest Overpass JSON responses
+- **Batch extrusion** — extrude entire city regions at once
+
+### Cesium Ion Compatibility
+- **Ion REST API compatibility layer** — drop-in replacement for Cesium Ion REST endpoints
+- **Asset catalog** — searchable/filterable asset catalog with pagination
+- **CRS auto-detection & reprojection** — automatic coordinate reference system detection via proj4rs
+- **Imagery tiling** — XYZ/TMS tile pyramid generation from raster sources
+- **DEM tile caching** — LRU cache for terrain DEM tiles
+
 ### Geospatial Services
 - **Photogrammetry (SfM/MVS)** — Structure from Motion + Multi-View Stereo pipeline with quality presets
-- **Point Cloud Classification** — ASPRS-standard classes (ground/vegetation/building/water), ML models (PointNet++/RandLA-Net)
+- **Point Cloud Classification** — ASPRS-standard classes (ground/vegetation/building/water), ensemble decision tree classifier with height/density/planarity features
 - **Real-Time Collaboration** — multi-user sessions with 3D cursors, viewports, annotations, and replies
 - **Asset Versioning** — full version history, diffs, change regions between versions
 - **BIM 4D Scheduling** — construction timeline, phases, Gantt keyframes, progress tracking

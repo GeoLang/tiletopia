@@ -400,6 +400,26 @@ nav {
   white-space: nowrap;
 }
 
+#time-slider-container {
+  position: absolute;
+  top: 56px;
+  left: 12px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--sidebar);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+
+#time-slider-container label { color: var(--muted); display: flex; align-items: center; gap: 6px; }
+#time-slider { width: 200px; accent-color: var(--accent); }
+#time-label { color: var(--accent); min-width: 80px; }
+}
+
 /* ─── Feature Info Panel ────────────────────────────────── */
 
 .feature-info-panel {

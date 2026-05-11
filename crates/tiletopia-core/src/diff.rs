@@ -142,6 +142,66 @@ impl SpatialGrid {
     }
 }
 
+/// Result of partial re-tiling: only the octree nodes affected by changes.
+#[derive(Debug, Clone)]
+pub struct PartialRetileResult {
+    /// The bounding boxes of octree nodes that need re-tiling.
+    pub affected_nodes: Vec<Aabb>,
+    /// Points that fall within changed cells (input for octree rebuild).
+    pub changed_points: Vec<OctreePoint>,
+    /// Number of cells skipped (unchanged).
+    pub skipped_cells: usize,
+}
+
+/// Identify only the octree nodes that need re-tiling after a point cloud update.
+///
+/// Compares `new_points` against a previous `snapshot`, using the given
+/// `cell_size` for spatial hashing, and returns the affected regions plus
+/// only the points in those regions — so the worker can skip unchanged data.
+pub fn partial_retile(
+    snapshot: &SpatialGrid,
+    new_points: &[OctreePoint],
+    config: &crate::octree::OctreeConfig,
+) -> PartialRetileResult {
+    let new_grid = SpatialGrid::from_points(new_points, snapshot.cell_size);
+    let diff = new_grid.diff(snapshot);
+
+    let changed_points = filter_changed_points(new_points, &diff, snapshot.cell_size);
+
+    // Build bounding boxes for affected octree nodes by grouping changed cells
+    // into regions aligned to the octree's min_extent.
+    let node_size = config.min_extent.max(snapshot.cell_size);
+    let mut node_set = std::collections::HashSet::new();
+    for &(cx, cy, cz) in diff.changed_cells.iter().chain(diff.removed_cells.iter()) {
+        let world_x = cx as f64 * snapshot.cell_size;
+        let world_y = cy as f64 * snapshot.cell_size;
+        let world_z = cz as f64 * snapshot.cell_size;
+        let nx = (world_x / node_size).floor() as i64;
+        let ny = (world_y / node_size).floor() as i64;
+        let nz = (world_z / node_size).floor() as i64;
+        node_set.insert((nx, ny, nz));
+    }
+
+    let affected_nodes: Vec<Aabb> = node_set
+        .into_iter()
+        .map(|(nx, ny, nz)| {
+            let x = nx as f64 * node_size;
+            let y = ny as f64 * node_size;
+            let z = nz as f64 * node_size;
+            Aabb {
+                min: [x, y, z],
+                max: [x + node_size, y + node_size, z + node_size],
+            }
+        })
+        .collect();
+
+    PartialRetileResult {
+        affected_nodes,
+        changed_points,
+        skipped_cells: diff.unchanged_count,
+    }
+}
+
 /// Filter points to only those in changed cells.
 pub fn filter_changed_points(
     points: &[OctreePoint],

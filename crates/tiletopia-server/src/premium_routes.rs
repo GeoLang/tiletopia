@@ -2,17 +2,16 @@
 //!
 //! Wires up all premium modules into axum routers.
 
-use axum::{Json, Router, extract::Query, routing::get};
+use axum::{Json, Router, extract::{Query, State}, routing::get};
 use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{
-    AppState, api_keys, bim4d, classification, cog, collaboration, elevation, export,
-    feature_service, flight_planning, geocoding, geoprocessing, geostatistics, indoor, isochrone,
-    issue_tracking, map_matching, map_tiles, metering, mobile, multispectral, osm_buildings,
-    photogrammetry, plugins, routing, scan_registration, scheduler, stac, static_map,
-    terrain_analysis, versioning, webhooks, workspaces,
+    AppState, classification, elevation, feature_service, flight_planning, geocoding,
+    geoprocessing, geostatistics, indoor, isochrone, map_matching, map_tiles, metering, mobile,
+    multispectral, osm_buildings, routing, scan_registration, scheduler, stac, static_map,
+    terrain_analysis,
 };
 
 /// Routes for API key management.
@@ -22,8 +21,8 @@ pub fn api_key_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/api-keys/usage", get(get_usage))
 }
 
-async fn list_api_keys() -> Json<serde_json::Value> {
-    let store = api_keys::ApiKeyStore::new();
+async fn list_api_keys(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let store = &state.api_key_store;
     let keys = store.list_keys(None).await;
     Json(serde_json::json!({
         "keys": keys.iter().map(|k| serde_json::json!({
@@ -42,8 +41,8 @@ async fn list_api_keys() -> Json<serde_json::Value> {
     }))
 }
 
-async fn get_usage() -> Json<serde_json::Value> {
-    let store = api_keys::ApiKeyStore::new();
+async fn get_usage(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let store = &state.api_key_store;
     let keys = store.list_keys(None).await;
     let usages: Vec<_> = keys
         .iter()
@@ -64,8 +63,8 @@ pub fn metering_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/metering/pricing", get(pricing_tiers))
 }
 
-async fn metering_summary() -> Json<serde_json::Value> {
-    let store = metering::MeteringStore::new();
+async fn metering_summary(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let store = &state.metering_store;
     let now = chrono::Utc::now();
     let period_start = now - chrono::Duration::days(30);
     let tenant_id = Uuid::nil(); // demo
@@ -90,8 +89,8 @@ pub fn webhook_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/webhooks/events", get(webhook_event_types))
 }
 
-async fn list_webhooks() -> Json<serde_json::Value> {
-    let engine = webhooks::WebhookEngine::new();
+async fn list_webhooks(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let engine = &state.webhook_engine;
     let subs = engine.list_subscriptions(None).await;
     Json(serde_json::json!({
         "subscriptions": subs,
@@ -117,14 +116,14 @@ pub fn workspace_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/workspaces/projects", get(list_projects))
 }
 
-async fn list_orgs() -> Json<serde_json::Value> {
-    let store = workspaces::WorkspaceStore::new();
+async fn list_orgs(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let store = &state.workspace_store;
     let orgs = store.list_orgs().await;
     Json(serde_json::json!({ "organizations": orgs }))
 }
 
-async fn list_teams() -> Json<serde_json::Value> {
-    let store = workspaces::WorkspaceStore::new();
+async fn list_teams(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let store = &state.workspace_store;
     let orgs = store.list_orgs().await;
     if let Some(org) = orgs.first() {
         let teams = store.list_teams(org.id).await;
@@ -134,8 +133,8 @@ async fn list_teams() -> Json<serde_json::Value> {
     }
 }
 
-async fn list_projects() -> Json<serde_json::Value> {
-    let store = workspaces::WorkspaceStore::new();
+async fn list_projects(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let store = &state.workspace_store;
     let orgs = store.list_orgs().await;
     if let Some(org) = orgs.first() {
         let projects = store.list_projects(org.id).await;
@@ -152,8 +151,8 @@ pub fn export_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/exports/formats", get(export_formats))
 }
 
-async fn list_exports() -> Json<serde_json::Value> {
-    let engine = export::ExportEngine::new();
+async fn list_exports(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let engine = &state.export_engine;
     let jobs = engine.list_exports(None).await;
     Json(serde_json::json!({ "exports": jobs }))
 }
@@ -182,19 +181,19 @@ pub fn scheduler_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/scheduler/runs", get(recent_runs))
 }
 
-async fn list_scheduled_jobs() -> Json<serde_json::Value> {
-    let sched = scheduler::Scheduler::new();
+async fn list_scheduled_jobs(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let sched = &state.scheduler;
     let jobs = sched.list_jobs(None).await;
     Json(serde_json::json!({ "jobs": jobs }))
 }
 
-async fn scheduler_stats() -> Json<scheduler::SchedulerStats> {
-    let sched = scheduler::Scheduler::new();
+async fn scheduler_stats(State(state): State<Arc<AppState>>) -> Json<scheduler::SchedulerStats> {
+    let sched = &state.scheduler;
     Json(sched.stats().await)
 }
 
-async fn recent_runs() -> Json<serde_json::Value> {
-    let sched = scheduler::Scheduler::new();
+async fn recent_runs(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let sched = &state.scheduler;
     let runs = sched.recent_runs(20).await;
     Json(serde_json::json!({ "runs": runs }))
 }
@@ -206,14 +205,14 @@ pub fn plugin_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/plugins/pipelines", get(list_pipelines))
 }
 
-async fn list_plugins() -> Json<serde_json::Value> {
-    let registry = plugins::PluginRegistry::new();
+async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let registry = &state.plugin_registry;
     let all = registry.list_plugins(None).await;
     Json(serde_json::json!({ "plugins": all }))
 }
 
-async fn list_pipelines() -> Json<serde_json::Value> {
-    let registry = plugins::PluginRegistry::new();
+async fn list_pipelines(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let registry = &state.plugin_registry;
     let pipelines = registry.list_pipelines().await;
     Json(serde_json::json!({ "pipelines": pipelines }))
 }
@@ -258,8 +257,8 @@ pub fn photogrammetry_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/photogrammetry/presets", get(quality_presets))
 }
 
-async fn list_photogrammetry_projects() -> Json<serde_json::Value> {
-    let engine = photogrammetry::PhotogrammetryEngine::new();
+async fn list_photogrammetry_projects(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let engine = &state.photogrammetry_engine;
     let projects = engine.list_projects(None).await;
     Json(serde_json::json!({ "projects": projects }))
 }
@@ -285,8 +284,8 @@ async fn list_classification_models() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "models": models }))
 }
 
-async fn list_classes() -> Json<serde_json::Value> {
-    let engine = classification::ClassificationEngine::new();
+async fn list_classes(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let engine = &state.classification_engine;
     let jobs = engine.list_jobs(None).await;
     Json(serde_json::json!({ "jobs": jobs }))
 }
@@ -299,8 +298,8 @@ pub fn collaboration_routes() -> Router<Arc<AppState>> {
     )
 }
 
-async fn list_collaboration_sessions() -> Json<serde_json::Value> {
-    let engine = collaboration::CollaborationEngine::new();
+async fn list_collaboration_sessions(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let engine = &state.collaboration_engine;
     let sessions = engine.list_sessions().await;
     Json(serde_json::json!({ "sessions": sessions }))
 }
@@ -310,8 +309,8 @@ pub fn versioning_routes() -> Router<Arc<AppState>> {
     Router::new().route("/api/v1/versioning/assets", get(list_versioned_assets))
 }
 
-async fn list_versioned_assets() -> Json<serde_json::Value> {
-    let engine = versioning::VersioningEngine::new();
+async fn list_versioned_assets(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let engine = &state.versioning_engine;
     let assets = engine.list_assets().await;
     Json(serde_json::json!({ "assets": assets }))
 }
@@ -321,8 +320,8 @@ pub fn bim4d_routes() -> Router<Arc<AppState>> {
     Router::new().route("/api/v1/bim4d/projects", get(list_bim4d_projects))
 }
 
-async fn list_bim4d_projects() -> Json<serde_json::Value> {
-    let engine = bim4d::Bim4DEngine::new();
+async fn list_bim4d_projects(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let engine = &state.bim4d_engine;
     let projects = engine.list_projects().await;
     Json(serde_json::json!({ "projects": projects }))
 }
@@ -409,14 +408,14 @@ pub fn cog_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/cog/stats", get(cog_stats))
 }
 
-async fn list_cog_datasets() -> Json<serde_json::Value> {
-    let engine = cog::CogEngine::new();
+async fn list_cog_datasets(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let engine = &state.cog_engine;
     let datasets = engine.list_datasets().to_vec();
     Json(serde_json::json!({ "datasets": datasets }))
 }
 
-async fn cog_stats() -> Json<serde_json::Value> {
-    let engine = cog::CogEngine::new();
+async fn cog_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let engine = &state.cog_engine;
     let datasets = engine.list_datasets();
     let total_bytes: u64 = datasets.iter().map(|d| d.file_size_bytes).sum();
     Json(serde_json::json!({
@@ -432,8 +431,8 @@ pub fn routing_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/routing/route", get(compute_route))
 }
 
-async fn routing_stats() -> Json<routing::RoutingStats> {
-    let engine = routing::RoutingEngine::new();
+async fn routing_stats(State(state): State<Arc<AppState>>) -> Json<routing::RoutingStats> {
+    let engine = &state.routing_engine;
     Json(engine.stats())
 }
 
@@ -446,8 +445,8 @@ struct RouteQuery {
     profile: Option<String>,
 }
 
-async fn compute_route(Query(params): Query<RouteQuery>) -> Json<serde_json::Value> {
-    let engine = routing::RoutingEngine::new();
+async fn compute_route(State(state): State<Arc<AppState>>, Query(params): Query<RouteQuery>) -> Json<serde_json::Value> {
+    let engine = &state.routing_engine;
     let profile = match params.profile.as_deref() {
         Some("walking") => routing::RoutingProfile::Walking,
         Some("cycling") => routing::RoutingProfile::Cycling,
@@ -478,27 +477,31 @@ pub fn map_tile_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/tiles/styles", get(list_tile_styles))
         .route("/api/v1/tiles/cache/stats", get(tile_cache_stats))
         .route("/api/v1/tiles/layers", get(list_vector_layers))
+        .route(
+            "/api/v1/tiles/{source_id}/tilejson",
+            get(get_tilejson),
+        )
 }
 
-async fn list_tile_sources() -> Json<serde_json::Value> {
-    let engine = map_tiles::MapTileEngine::new();
+async fn list_tile_sources(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let engine = &state.map_tile_engine;
     let sources = engine.list_sources().to_vec();
     Json(serde_json::json!({ "sources": sources }))
 }
 
-async fn list_tile_styles() -> Json<serde_json::Value> {
-    let engine = map_tiles::MapTileEngine::new();
+async fn list_tile_styles(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let engine = &state.map_tile_engine;
     let styles = engine.list_styles().to_vec();
     Json(serde_json::json!({ "styles": styles }))
 }
 
-async fn tile_cache_stats() -> Json<map_tiles::CacheStats> {
-    let engine = map_tiles::MapTileEngine::new();
+async fn tile_cache_stats(State(state): State<Arc<AppState>>) -> Json<map_tiles::CacheStats> {
+    let engine = &state.map_tile_engine;
     Json(engine.cache_stats().clone())
 }
 
-async fn list_vector_layers() -> Json<serde_json::Value> {
-    let engine = map_tiles::MapTileEngine::new();
+async fn list_vector_layers(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let engine = &state.map_tile_engine;
     let vector_source = engine
         .list_sources()
         .iter()
@@ -511,6 +514,17 @@ async fn list_vector_layers() -> Json<serde_json::Value> {
         }
         None => Json(serde_json::json!({ "layers": [] })),
     }
+}
+
+async fn get_tilejson(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(source_id): axum::extract::Path<Uuid>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let engine = &state.map_tile_engine;
+    engine
+        .tilejson(source_id)
+        .map(Json)
+        .ok_or(axum::http::StatusCode::NOT_FOUND)
 }
 
 // ─── Batch 2: Competitive gap-closing routes ────────────────────────────────
@@ -599,8 +613,8 @@ pub fn feature_service_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/features/query", get(query_features))
 }
 
-async fn list_feature_layers() -> Json<serde_json::Value> {
-    let engine = feature_service::FeatureServiceEngine::new();
+async fn list_feature_layers(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let engine = &state.feature_service_engine;
     let layers = engine.list_layers();
     Json(serde_json::json!({ "layers": layers }))
 }
@@ -615,8 +629,8 @@ struct FeatureQuery {
     where_clause: Option<String>,
 }
 
-async fn query_features(Query(params): Query<FeatureQuery>) -> Json<serde_json::Value> {
-    let engine = feature_service::FeatureServiceEngine::new();
+async fn query_features(State(state): State<Arc<AppState>>, Query(params): Query<FeatureQuery>) -> Json<serde_json::Value> {
+    let engine = &state.feature_service_engine;
     let layers = engine.list_layers();
     let layer = if let Some(name) = &params.layer {
         layers.iter().find(|l| l.name == *name)
@@ -661,17 +675,17 @@ struct ElevationQuery {
     lon: Option<f64>,
 }
 
-async fn elevation_point(Query(params): Query<ElevationQuery>) -> Json<serde_json::Value> {
-    let dem = elevation::DemStore::new();
+async fn elevation_point(State(state): State<Arc<AppState>>, Query(params): Query<ElevationQuery>) -> Json<serde_json::Value> {
+    let dem = &state.elevation_store;
     let lat = params.lat.unwrap_or(37.7749);
     let lon = params.lon.unwrap_or(-122.4194);
     let elev = elevation::get_elevation(lat, lon, &dem);
     Json(serde_json::json!(elev))
 }
 
-async fn elevation_profile_demo() -> Json<serde_json::Value> {
+async fn elevation_profile_demo(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let path = vec![[-122.42, 37.77], [-122.41, 37.78], [-122.40, 37.79]];
-    let dem = elevation::DemStore::new();
+    let dem = &state.elevation_store;
     let profile = elevation::get_profile(&path, &dem);
     Json(serde_json::json!(profile))
 }
@@ -854,14 +868,14 @@ pub fn issue_tracking_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/issues/stats", get(issue_stats))
 }
 
-async fn list_issues() -> Json<serde_json::Value> {
-    let tracker = issue_tracking::IssueTracker::new();
+async fn list_issues(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let tracker = &state.issue_tracker;
     let issues = tracker.list_issues(None);
     Json(serde_json::json!({ "issues": issues }))
 }
 
-async fn issue_stats() -> Json<serde_json::Value> {
-    let tracker = issue_tracking::IssueTracker::new();
+async fn issue_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let tracker = &state.issue_tracker;
     let stats = tracker.stats();
     Json(serde_json::json!(stats))
 }
@@ -1347,4 +1361,53 @@ async fn osm_buildings_info() -> Json<serde_json::Value> {
         "roof_shapes": ["flat", "gabled", "hipped", "pyramidal", "skillion", "dome"],
         "competitive_note": "Equivalent to Cesium Ion OSM Buildings — fully self-hosted, no per-tile streaming fees"
     }))
+}
+
+// ─── Entity Linking Routes ──────────────────────────────────────────────────
+
+/// Routes for entity linking (mapping external IDs to 3D assets).
+pub fn entity_linking_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/entity-links", get(list_entity_links))
+        .route(
+            "/api/v1/entity-links/by-entity/{entity_id}",
+            get(query_entity_links),
+        )
+        .route(
+            "/api/v1/entity-links/nearby",
+            get(query_entity_links_by_position),
+        )
+}
+
+async fn list_entity_links(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let store = &state.entity_link_store;
+    let links = store.list(None);
+    Json(serde_json::json!({ "links": links }))
+}
+
+async fn query_entity_links(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(entity_id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let store = &state.entity_link_store;
+    let links = store.query_by_entity(&entity_id);
+    Json(serde_json::json!({ "links": links }))
+}
+
+#[derive(Deserialize)]
+struct NearbyQuery {
+    x: f64,
+    y: f64,
+    z: f64,
+    radius: Option<f64>,
+}
+
+async fn query_entity_links_by_position(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<NearbyQuery>,
+) -> Json<serde_json::Value> {
+    let store = &state.entity_link_store;
+    let radius = params.radius.unwrap_or(100.0);
+    let links = store.query_by_position([params.x, params.y, params.z], radius);
+    Json(serde_json::json!({ "links": links }))
 }

@@ -23,6 +23,7 @@ pub mod db;
 pub mod demo;
 pub mod elevation;
 pub mod encryption;
+pub mod entity_linking;
 pub mod export;
 pub mod feature_service;
 pub mod federation;
@@ -100,6 +101,25 @@ pub struct AppState {
     pub demo: demo::DemoState,
     pub catalog: catalog::OpenDataCatalog,
     pub started_at: Instant,
+    pub api_key_store: api_keys::ApiKeyStore,
+    pub metering_store: metering::MeteringStore,
+    pub webhook_engine: webhooks::WebhookEngine,
+    pub workspace_store: workspaces::WorkspaceStore,
+    pub export_engine: export::ExportEngine,
+    pub scheduler: scheduler::Scheduler,
+    pub plugin_registry: plugins::PluginRegistry,
+    pub photogrammetry_engine: photogrammetry::PhotogrammetryEngine,
+    pub classification_engine: classification::ClassificationEngine,
+    pub collaboration_engine: collaboration::CollaborationEngine,
+    pub versioning_engine: versioning::VersioningEngine,
+    pub bim4d_engine: bim4d::Bim4DEngine,
+    pub cog_engine: cog::CogEngine,
+    pub routing_engine: routing::RoutingEngine,
+    pub map_tile_engine: map_tiles::MapTileEngine,
+    pub feature_service_engine: feature_service::FeatureServiceEngine,
+    pub issue_tracker: issue_tracking::IssueTracker,
+    pub elevation_store: elevation::DemStore,
+    pub entity_link_store: entity_linking::EntityLinkStore,
 }
 
 /// A managed geospatial asset.
@@ -238,6 +258,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::geostatistics_routes())
         .merge(premium_routes::multispectral_routes())
         .merge(premium_routes::osm_buildings_routes())
+        .merge(premium_routes::entity_linking_routes())
         .merge(stories_api::story_routes())
         .merge(catalog::add_dataset_routes())
         .merge(plugin_registry::plugin_registry_routes())

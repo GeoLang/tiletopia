@@ -193,6 +193,8 @@ const panelMap = {
   clash: 'panel-clash',
   admin: 'panel-admin',
   stories: 'panel-stories',
+  terrain: 'panel-terrain',
+  entities: 'panel-entities',
 };
 
 document.querySelectorAll('.nav-btn').forEach(btn => {
@@ -210,6 +212,8 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     if (view === 'clash') loadClash();
     if (view === 'admin') loadAdmin();
     if (view === 'stories') loadStories();
+    if (view === 'terrain') loadTerrain();
+    if (view === 'entities') loadEntities();
   });
 });
 
@@ -461,6 +465,103 @@ async function loadCatalog() {
     panel.innerHTML = `<div class="feature-panel"><p style="color:#f85149">Error: ${e.message}</p></div>`;
   }
 }
+
+// ─── Terrain Panel ───────────────────────────────────────────────────────────
+
+async function loadTerrain() {
+  const panel = document.getElementById('panel-terrain');
+  panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading terrain data...</p></div>';
+  try {
+    const [terrainRes, elevRes] = await Promise.all([
+      fetch(`${API}/terrain-analysis/operations`),
+      fetch(`${API}/elevation/point?lat=37.7749&lon=-122.4194`),
+    ]);
+    const ops = await terrainRes.json();
+    const elev = await elevRes.json();
+    panel.innerHTML = `<div class="feature-panel">
+      <h2>⛰️ Terrain Viewer</h2>
+      <p class="subtitle">Quantized mesh terrain with real-time elevation queries</p>
+      <div class="card-grid">
+        <div class="metric-card"><div class="label">Sample Elevation</div><div class="value">${elev.elevation_m}<span class="unit"> m</span></div></div>
+        <div class="metric-card"><div class="label">Resolution</div><div class="value">${elev.resolution || 'N/A'}</div></div>
+        <div class="metric-card"><div class="label">Available Analyses</div><div class="value">${ops.operations ? ops.operations.length : 0}</div></div>
+      </div>
+      <h3 class="section-title">Available Terrain Analyses</h3>
+      <div class="feature-tags">
+        ${(ops.operations || []).map(op => `<span class="tag">${typeof op === 'string' ? op : op.name || JSON.stringify(op)}</span>`).join('')}
+      </div>
+      <h3 class="section-title">Load Terrain into Viewer</h3>
+      <button class="play-story-btn" id="load-terrain-btn">Load Quantized Mesh Terrain</button>
+    </div>`;
+    document.getElementById('load-terrain-btn')?.addEventListener('click', () => {
+      const terrainProvider = new Cesium.CesiumTerrainProvider({
+        url: `${API}/terrain`,
+      });
+      viewer.terrainProvider = terrainProvider;
+    });
+  } catch(e) {
+    panel.innerHTML = `<div class="feature-panel"><p style="color:#f85149">Error: ${e.message}</p></div>`;
+  }
+}
+
+// ─── Entity Linking Panel ────────────────────────────────────────────────────
+
+async function loadEntities() {
+  const panel = document.getElementById('panel-entities');
+  panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading entity links...</p></div>';
+  try {
+    const res = await fetch(`${API}/entity-links`);
+    const data = await res.json();
+    const links = data.links || [];
+    panel.innerHTML = `<div class="feature-panel">
+      <h2>🔗 Entity Links</h2>
+      <p class="subtitle">Map 3D tiles to metadata — building IDs, sensor readings, BIM elements</p>
+      <div class="card-grid">
+        <div class="metric-card"><div class="label">Total Links</div><div class="value">${links.length}</div></div>
+        <div class="metric-card"><div class="label">Entity Types</div><div class="value">${[...new Set(links.map(l => l.entity_type))].length}</div></div>
+      </div>
+      ${links.length > 0 ? `
+        <h3 class="section-title">Linked Entities</h3>
+        <table class="data-table">
+          <thead><tr><th>Entity ID</th><th>Type</th><th>Asset</th><th>Position</th><th>Metadata</th></tr></thead>
+          <tbody>${links.slice(0, 50).map(l => `<tr>
+            <td>${l.entity_id}</td>
+            <td><span class="badge badge-info">${l.entity_type}</span></td>
+            <td>${l.asset_id}</td>
+            <td>${l.position ? `[${l.position.map(v => v.toFixed(2)).join(', ')}]` : '—'}</td>
+            <td><code>${JSON.stringify(l.metadata || {}).slice(0, 80)}</code></td>
+          </tr>`).join('')}</tbody>
+        </table>
+      ` : '<p style="color:var(--muted)">No entity links configured yet. Use the REST API to create links.</p>'}
+    </div>`;
+  } catch(e) {
+    panel.innerHTML = `<div class="feature-panel"><p style="color:#f85149">Error: ${e.message}</p></div>`;
+  }
+}
+
+// ─── Time Slider ─────────────────────────────────────────────────────────────
+
+document.getElementById('tb-timeslider')?.addEventListener('click', () => {
+  const container = document.getElementById('time-slider-container');
+  container.style.display = container.style.display === 'none' ? 'flex' : 'none';
+});
+
+document.getElementById('time-slider')?.addEventListener('input', (e) => {
+  const pct = parseInt(e.target.value);
+  const label = document.getElementById('time-label');
+  if (pct === 100) {
+    label.textContent = 'Latest';
+  } else {
+    const d = new Date();
+    d.setDate(d.getDate() - Math.floor((100 - pct) * 3.65));
+    label.textContent = d.toLocaleDateString();
+  }
+  // Apply temporal filter to loaded tilesets
+  const julianDate = Cesium.JulianDate.fromDate(
+    pct === 100 ? new Date() : (() => { const d2 = new Date(); d2.setDate(d2.getDate() - Math.floor((100 - pct) * 3.65)); return d2; })()
+  );
+  viewer.clock.currentTime = julianDate;
+});
 
 // Utilities
 function formatBytes(bytes) {

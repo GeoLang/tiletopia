@@ -20,6 +20,8 @@
       <button class="nav-btn" data-view="clash">💥 Clash Analytics</button>
       <button class="nav-btn" data-view="admin">🔒 Enterprise Admin</button>
       <button class="nav-btn" data-view="stories">🎬 Stories</button>
+      <button class="nav-btn" data-view="terrain">⛰️ Terrain</button>
+      <button class="nav-btn" data-view="entities">🔗 Entity Links</button>
     </nav>
     <div id="asset-list"></div>
     <div id="upload-section">
@@ -40,6 +42,8 @@
     <div id="panel-clash" class="panel"></div>
     <div id="panel-admin" class="panel"></div>
     <div id="panel-stories" class="panel"></div>
+    <div id="panel-terrain" class="panel"></div>
+    <div id="panel-entities" class="panel"></div>
     <div id="renderer-selector">
       <label>Renderer:</label>
       <select id="renderer-choice">
@@ -56,7 +60,12 @@
       <button class="toolbar-btn" id="tb-style" title="Style Editor">🎨</button>
       <button class="toolbar-btn" id="tb-featureinfo" title="Feature Info">ℹ️</button>
       <button class="toolbar-btn" id="tb-clear" title="Clear Measurements">🗑️</button>
+      <button class="toolbar-btn" id="tb-timeslider" title="Time Slider">⏱️</button>
       <span id="measure-status" class="toolbar-status"></span>
+    </div>
+    <div id="time-slider-container" style="display:none">
+      <label>Time: <input type="range" id="time-slider" min="0" max="100" value="100"></label>
+      <span id="time-label">Latest</span>
     </div>
   </main>
 </div>

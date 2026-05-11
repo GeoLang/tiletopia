@@ -283,3 +283,91 @@ pub fn generate_terrain(
     );
     tiles
 }
+
+/// Generate a TMS-style quadtree hierarchy of terrain tiles from a DEM grid.
+///
+/// Produces `{output_dir}/{z}/{x}/{y}.terrain` files for each tile at each
+/// zoom level, using `subsample()` to create lower-resolution tiles.
+pub fn generate_terrain_quadtree(
+    heightmap: &Heightmap,
+    output_dir: &std::path::Path,
+    max_zoom: u32,
+) -> std::io::Result<Vec<QuantizedMeshTile>> {
+    let mut all_tiles = Vec::new();
+
+    for z in 0..=max_zoom {
+        let num_tiles_x = 2u32.pow(z);
+        let num_tiles_y = 2u32.pow(z);
+
+        let lon_span = heightmap.max_lon - heightmap.min_lon;
+        let lat_span = heightmap.max_lat - heightmap.min_lat;
+        let tile_lon = lon_span / num_tiles_x as f64;
+        let tile_lat = lat_span / num_tiles_y as f64;
+
+        // Resolution per tile decreases at lower zoom
+        let tile_res = (heightmap.width / num_tiles_x).max(2);
+
+        for y in 0..num_tiles_y {
+            for x in 0..num_tiles_x {
+                let min_lon = heightmap.min_lon + x as f64 * tile_lon;
+                let min_lat = heightmap.min_lat + y as f64 * tile_lat;
+                let max_lon = min_lon + tile_lon;
+                let max_lat = min_lat + tile_lat;
+
+                // Extract the sub-region from the full heightmap via subsample
+                let sub = Heightmap {
+                    width: heightmap.width,
+                    height: heightmap.height,
+                    min_lon,
+                    min_lat,
+                    max_lon,
+                    max_lat,
+                    elevations: {
+                        let mut elev = Vec::with_capacity((tile_res * tile_res) as usize);
+                        for row in 0..tile_res {
+                            let v_frac = (min_lat + row as f64 / (tile_res - 1).max(1) as f64
+                                * tile_lat
+                                - heightmap.min_lat)
+                                / lat_span;
+                            for col in 0..tile_res {
+                                let u_frac = (min_lon
+                                    + col as f64 / (tile_res - 1).max(1) as f64 * tile_lon
+                                    - heightmap.min_lon)
+                                    / lon_span;
+                                elev.push(heightmap.sample(
+                                    u_frac.clamp(0.0, 1.0),
+                                    v_frac.clamp(0.0, 1.0),
+                                ));
+                            }
+                        }
+                        elev
+                    },
+                };
+
+                let sub = sub.subsample(tile_res, tile_res);
+                let data = generate_quantized_mesh(&sub);
+
+                // Write to {output_dir}/{z}/{x}/{y}.terrain
+                let tile_dir = output_dir.join(z.to_string()).join(x.to_string());
+                std::fs::create_dir_all(&tile_dir)?;
+                let tile_path = tile_dir.join(format!("{y}.terrain"));
+                std::fs::write(&tile_path, &data)?;
+
+                all_tiles.push(QuantizedMeshTile {
+                    x,
+                    y,
+                    level: z,
+                    data,
+                });
+            }
+        }
+    }
+
+    tracing::info!(
+        "Generated {} quadtree terrain tiles (zoom 0-{}) in {}",
+        all_tiles.len(),
+        max_zoom,
+        output_dir.display()
+    );
+    Ok(all_tiles)
+}
