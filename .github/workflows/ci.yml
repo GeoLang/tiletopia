@@ -14,7 +14,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14, windows-2022]
+        include:
+          - os: ubuntu-24.04
+            features: tiletopia-core/draco,tiletopia-store/gcs,tiletopia-store/azure
+          - os: macos-14
+            features: tiletopia-core/draco,tiletopia-store/gcs,tiletopia-store/azure
+          - os: windows-2022
+            # draco-rs C++ bindings have linker issues on MSVC (unresolved Status methods)
+            features: tiletopia-store/gcs,tiletopia-store/azure
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -25,13 +32,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release --features tiletopia-core/draco,tiletopia-store/gcs,tiletopia-store/azure
+        run: cargo build --release --features ${{ matrix.features }}
 
       - name: Test
-        run: cargo test --release --features tiletopia-core/draco,tiletopia-store/gcs,tiletopia-store/azure
+        run: cargo test --release --features ${{ matrix.features }}
 
       - name: Clippy
-        run: cargo clippy --features tiletopia-core/draco,tiletopia-store/gcs,tiletopia-store/azure -- -D warnings
+        run: cargo clippy --features ${{ matrix.features }} -- -D warnings
 
   fmt:
     runs-on: ubuntu-24.04
