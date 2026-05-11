@@ -42,9 +42,9 @@ gltf = "1"
 aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 async-trait = "0.1"
-cloud-storage = "0.11"
-azure_storage = "0.21"
-azure_storage_blobs = "0.21"
+cloud-storage = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+azure_storage = { version = "0.21", default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"] }
+azure_storage_blobs = { version = "0.21", default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"] }
 futures = "0.3"
 jsonwebtoken = "9"
 metrics = "0.24"
