@@ -21,6 +21,7 @@ pub mod crdt;
 pub mod dashboard;
 pub mod db;
 pub mod demo;
+pub mod dynamic_raster;
 pub mod elevation;
 pub mod encryption;
 pub mod entity_linking;
