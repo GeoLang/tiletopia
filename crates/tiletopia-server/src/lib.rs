@@ -33,6 +33,7 @@ pub mod geocoding;
 pub mod geofence;
 pub mod geoprocessing;
 pub mod geostatistics;
+pub mod http_cache;
 pub mod indoor;
 pub mod ion_compat;
 pub mod isochrone;
