@@ -19,6 +19,7 @@ description = "Geospatial tile server platform with routing, terrain, and point 
 license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["multipart", "ws"] }
 axum-extra = { version = "0.10", features = ["typed-header"] }
