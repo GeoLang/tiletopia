@@ -66,5 +66,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Pages documentation site
 - CI/CD with GitHub Actions
 
-[0.2.0]: https://github.com/TileTopia-HQ/tiletopia/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/TileTopia-HQ/tiletopia/releases/tag/v0.1.0
+[0.2.0]: https://github.com/GeoLang/tiletopia/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/GeoLang/tiletopia/releases/tag/v0.1.0

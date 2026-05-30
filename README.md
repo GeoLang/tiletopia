@@ -4,7 +4,7 @@
 
 Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Tiles 1.1, and serve it with view-dependent streaming. Compatible with CesiumJS, Cesium for Unreal, Cesium for Unity, and any 3D Tiles client.
 
-**Website:** https://tiletopia-hq.github.io/tiletopia
+**Website:** https://geolang.github.io/tiletopia
 
 ---
 
@@ -155,7 +155,7 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 
 ## AI Agent (GeoLang Integration)
 
-TileTopia includes an LLM-powered geospatial agent that lets users control the 3D viewer through natural language conversation. Instead of clicking through menus, type what you want:
+GeoLang includes an LLM-powered geospatial agent that lets users control the 3D viewer through natural language conversation. Instead of clicking through menus, type what you want:
 
 - **"Fly to the Sydney Opera House"** — geocodes the location and moves the 3D camera
 - **"Classify this point cloud"** — applies ASPRS classification coloring
@@ -185,7 +185,7 @@ The agent can programmatically control the CesiumJS/deck.gl/MapLibre viewer:
 
 1. Start the Letta server: `docker-compose up -d` (in the GeoLang directory)
 2. Start the GeoLang API: `uvicorn src.api.server:app --port 8100`
-3. Start TileTopia: `tiletopia serve --port 3000`
+3. Start GeoLang: `tiletopia serve --port 3000`
 4. The chat panel appears on the left side of the viewer
 
 ---
@@ -213,7 +213,7 @@ tiletopia/
 ### Build from source
 
 ```bash
-git clone https://github.com/TileTopia-HQ/tiletopia.git
+git clone https://github.com/GeoLang/tiletopia.git
 cd tiletopia
 cargo build --release
 ```
@@ -261,13 +261,13 @@ npm run dev        # opens http://localhost:5173
 | Base imagery | OpenStreetMap raster tiles | Bing Maps Aerial |
 | 3D Buildings | Overpass API (client-side) | Cesium OSM Buildings |
 | Geocoding | Nominatim (OpenStreetMap) | Ion geocoder |
-| Terrain | TileTopia server quantized-mesh (if running) | Cesium World Terrain |
-| 3D Tilesets | TileTopia server | Ion asset hosting |
+| Terrain | GeoLang server quantized-mesh (if running) | Cesium World Terrain |
+| 3D Tilesets | GeoLang server | Ion asset hosting |
 | Photorealistic 3D | Set `VITE_GOOGLE_3D_TILES_KEY` env var | Google Photorealistic 3D Tiles |
 
 Additional imagery layers (Stamen Toner, ESRI World Imagery) are available via the layer picker.
 
-When the TileTopia server is running on port 3000, the viewer automatically connects and loads terrain + tilesets.  Without the server, you still get a full globe with buildings and geocoding.
+When the GeoLang server is running on port 3000, the viewer automatically connects and loads terrain + tilesets.  Without the server, you still get a full globe with buildings and geocoding.
 
 ---
 
@@ -330,9 +330,9 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 
 ---
 
-## TileTopia vs Cesium Ion
+## GeoLang vs Cesium Ion
 
-| Feature | TileTopia | Cesium Ion |
+| Feature | GeoLang | Cesium Ion |
 |---------|-----------|------------|
 | OGC 3D Tiles 1.1 | ✅ | ✅ |
 | Point cloud tiling (LAS/LAZ) | ✅ | ✅ |

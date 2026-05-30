@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TileTopia — OSM Buildings Demo</title>
+<title>GeoLang — OSM Buildings Demo</title>
 <script src="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Cesium.js"></script>
 <link href="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
 <style>
@@ -143,7 +143,7 @@ async function loadInfo() {
       tag.textContent = r;
       roofList.appendChild(tag);
     });
-    log('Connected to TileTopia OSM Buildings API', 'success');
+    log('Connected to GeoLang OSM Buildings API', 'success');
   } catch (e) {
     log('API unavailable — using local demo data', 'info');
     // Fallback: show tags locally
@@ -163,7 +163,7 @@ async function loadInfo() {
 }
 
 async function loadDemo() {
-  log('Fetching extruded buildings from TileTopia...');
+  log('Fetching extruded buildings from GeoLang...');
   try {
     const res = await fetch(`${API_BASE}/osm-buildings/extrude`);
     const data = await res.json();
@@ -358,7 +358,7 @@ function toggleWireframe() {
 
 // Initialize
 loadInfo();
-log('TileTopia OSM Buildings viewer initialized');
+log('GeoLang OSM Buildings viewer initialized');
 log('Click "Load Demo Buildings" to extrude and render');
 </script>
 </body>

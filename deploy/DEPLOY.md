@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Deploy TileTopia to AWS in under 5 minutes.
+Deploy GeoLang to AWS in under 5 minutes.
 
 ## Architecture
 
@@ -19,7 +19,7 @@ Deploy TileTopia to AWS in under 5 minutes.
 **Components:**
 | Service | Purpose | Cost (small) |
 |---------|---------|-------------|
-| ECS Fargate | Runs TileTopia server (0.5 vCPU, 1GB) | ~$15/mo |
+| ECS Fargate | Runs GeoLang server (0.5 vCPU, 1GB) | ~$15/mo |
 | S3 | Tile + asset storage | ~$2/mo per 100GB |
 | CloudFront | CDN for global tile delivery | ~$5/mo per 100GB transfer |
 | ALB | Load balancing + health checks | ~$16/mo |

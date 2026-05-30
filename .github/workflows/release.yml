@@ -74,8 +74,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/tiletopia-hq/tiletopia:${{ github.ref_name }}
-            ghcr.io/tiletopia-hq/tiletopia:latest
+            ghcr.io/geolang/tiletopia:${{ github.ref_name }}
+            ghcr.io/geolang/tiletopia:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
