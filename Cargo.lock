@@ -3466,7 +3466,7 @@ dependencies = [
 [[package]]
 name = "geokode-core"
 version = "0.1.0"
-source = "git+https://github.com/TileTopia-HQ/geokode.git?tag=v0.1.0#ef04fe9ff3f04541468f16c86366e4fea5ef03ce"
+source = "git+https://github.com/GeoLang/geokode.git?tag=v0.1.0#fe998d6f54c69bdc761d4c8fef47b877e1161297"
 dependencies = [
  "bincode",
  "chrono",
@@ -4734,7 +4734,7 @@ dependencies = [
 [[package]]
 name = "itinera-core"
 version = "0.1.0"
-source = "git+https://github.com/TileTopia-HQ/itinera.git#5fe78743aa3890cc0f104f558a989f9f1c08c30f"
+source = "git+https://github.com/GeoLang/itinera.git#26fb5317497ff4c720398ddc7fc0c6be5a1f7972"
 dependencies = [
  "itinera-graph",
  "serde",
@@ -4745,7 +4745,7 @@ dependencies = [
 [[package]]
 name = "itinera-graph"
 version = "0.1.0"
-source = "git+https://github.com/TileTopia-HQ/itinera.git#5fe78743aa3890cc0f104f558a989f9f1c08c30f"
+source = "git+https://github.com/GeoLang/itinera.git#26fb5317497ff4c720398ddc7fc0c6be5a1f7972"
 dependencies = [
  "bincode",
  "rstar 0.12.2",
@@ -4756,7 +4756,7 @@ dependencies = [
 [[package]]
 name = "itinera-match"
 version = "0.1.0"
-source = "git+https://github.com/TileTopia-HQ/itinera.git#5fe78743aa3890cc0f104f558a989f9f1c08c30f"
+source = "git+https://github.com/GeoLang/itinera.git#26fb5317497ff4c720398ddc7fc0c6be5a1f7972"
 dependencies = [
  "itinera-graph",
  "serde",
@@ -5820,7 +5820,7 @@ dependencies = [
 [[package]]
 name = "nubis-core"
 version = "0.1.0"
-source = "git+https://github.com/TileTopia-HQ/nubis.git?tag=v0.1.0#aab3bc48b5cfa9c5ca8f543600d210270b4d4c94"
+source = "git+https://github.com/GeoLang/nubis.git?tag=v0.1.0#fe326761087e8325d2dc2390755bae9c5a5edc6b"
 dependencies = [
  "thiserror 2.0.18",
 ]
@@ -9112,7 +9112,7 @@ dependencies = [
 [[package]]
 name = "terrano-core"
 version = "0.1.0"
-source = "git+https://github.com/TileTopia-HQ/terrano.git?tag=v0.1.0#45c9990b28c5f5c37fbc71833346f883c908d07a"
+source = "git+https://github.com/GeoLang/terrano.git?tag=v0.1.0#9d680789003b503aa271e04d85416b9a05acd4a1"
 dependencies = [
  "thiserror 2.0.18",
 ]
