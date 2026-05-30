@@ -51,6 +51,57 @@ pub struct Point3D {
     pub intensity: u16,
 }
 
+impl Point3D {
+    /// Convert to nubis Point3 (drops RGB, preserves position/intensity/class).
+    pub fn to_nubis(&self) -> nubis_core::Point3 {
+        let mut p = nubis_core::Point3::new(self.x, self.y, self.z);
+        p.intensity = self.intensity;
+        p.classification = nubis_core::Classification::from_u8(self.classification);
+        p
+    }
+
+    /// Create from nubis Point3 (RGB will be zero).
+    pub fn from_nubis(p: &nubis_core::Point3) -> Self {
+        Self {
+            x: p.x,
+            y: p.y,
+            z: p.z,
+            r: 0,
+            g: 0,
+            b: 0,
+            classification: p.classification as u8,
+            intensity: p.intensity,
+        }
+    }
+}
+
+/// Convert a slice of Point3D to a nubis PointCloud for processing.
+pub fn to_nubis_cloud(points: &[Point3D]) -> nubis_core::PointCloud {
+    let nubis_points: Vec<nubis_core::Point3> = points.iter().map(|p| p.to_nubis()).collect();
+    nubis_core::PointCloud::from_points(nubis_points)
+}
+
+/// Thin a point cloud using nubis voxel grid downsampling.
+pub fn thin_voxel(points: &[Point3D], voxel_size: f64) -> Vec<Point3D> {
+    let cloud = to_nubis_cloud(points);
+    let thinned = nubis_core::thin_voxel(&cloud, voxel_size);
+    thinned.points().iter().map(Point3D::from_nubis).collect()
+}
+
+/// Remove statistical outliers from a point cloud using nubis.
+pub fn remove_outliers(points: &[Point3D], k_neighbors: usize, std_ratio: f64) -> Vec<Point3D> {
+    let cloud = to_nubis_cloud(points);
+    let cleaned = nubis_core::statistical_outlier_removal(&cloud, k_neighbors, std_ratio);
+    cleaned.points().iter().map(Point3D::from_nubis).collect()
+}
+
+/// Ground-filter a point cloud using nubis.
+pub fn ground_filter(points: &[Point3D], cell_size: f64, height_threshold: f64) -> Vec<Point3D> {
+    let mut cloud = to_nubis_cloud(points);
+    nubis_core::ground_filter_simple(&mut cloud, cell_size, height_threshold);
+    cloud.points().iter().map(Point3D::from_nubis).collect()
+}
+
 /// A vector feature with geometry and properties.
 #[derive(Debug, Clone)]
 pub struct VectorFeature {

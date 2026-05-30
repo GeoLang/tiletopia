@@ -7,6 +7,7 @@ description = "Format readers — LAS/LAZ, CityGML, GeoTIFF, glTF, OBJ, Shapefil
 
 [dependencies]
 tiletopia-core = { path = "../tiletopia-core", default-features = false }
+nubis-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

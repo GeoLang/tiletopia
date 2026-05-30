@@ -121,8 +121,9 @@ martin-core = { version = "0.5", default-features = false, features = ["mbtiles"
 martin-tile-utils = "0.7"
 
 # TileTopia ecosystem crates
-itinera-core = { git = "https://github.com/TileTopia-HQ/itinera.git", tag = "v0.1.0" }
-itinera-graph = { git = "https://github.com/TileTopia-HQ/itinera.git", tag = "v0.1.0" }
+itinera-core = { git = "https://github.com/TileTopia-HQ/itinera.git" }
+itinera-graph = { git = "https://github.com/TileTopia-HQ/itinera.git" }
+itinera-match = { git = "https://github.com/TileTopia-HQ/itinera.git" }
 geokode-core = { git = "https://github.com/TileTopia-HQ/geokode.git", tag = "v0.1.0" }
 nubis-core = { git = "https://github.com/TileTopia-HQ/nubis.git", tag = "v0.1.0" }
 terrano-core = { git = "https://github.com/TileTopia-HQ/terrano.git", tag = "v0.1.0" }

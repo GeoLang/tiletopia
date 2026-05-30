@@ -13,6 +13,7 @@ tiletopia-store = { path = "../tiletopia-store" }
 tiletopia-ingest = { path = "../tiletopia-ingest" }
 itinera-core = { workspace = true }
 itinera-graph = { workspace = true }
+itinera-match = { workspace = true }
 geokode-core = { workspace = true }
 nubis-core = { workspace = true }
 terrano-core = { workspace = true }

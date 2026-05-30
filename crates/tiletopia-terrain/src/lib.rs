@@ -371,3 +371,47 @@ pub fn generate_terrain_quadtree(
     );
     Ok(all_tiles)
 }
+
+// ─── Terrain analysis (delegated to terrano-core) ───────────────────────────
+
+/// Convert a tiletopia Heightmap to a terrano Raster for analysis.
+pub fn to_terrano_raster(heightmap: &Heightmap) -> terrano_core::Raster {
+    let cell_size =
+        (heightmap.max_lon - heightmap.min_lon) / (heightmap.width.saturating_sub(1).max(1)) as f64;
+    let data: Vec<f64> = heightmap.elevations.iter().map(|&e| e as f64).collect();
+    terrano_core::Raster::from_vec(
+        heightmap.width as usize,
+        heightmap.height as usize,
+        data,
+        -9999.0,
+        cell_size,
+    )
+    .expect("raster dimensions match data length")
+}
+
+/// Compute hillshade from a heightmap.
+pub fn hillshade(heightmap: &Heightmap, azimuth_deg: f64, altitude_deg: f64) -> Vec<f32> {
+    let dem = to_terrano_raster(heightmap);
+    let hs = terrano_core::hillshade(&dem, azimuth_deg, altitude_deg);
+    hs.data().iter().map(|&v| v as f32).collect()
+}
+
+/// Compute slope (degrees) from a heightmap.
+pub fn slope(heightmap: &Heightmap) -> Vec<f32> {
+    let dem = to_terrano_raster(heightmap);
+    let s = terrano_core::slope(&dem);
+    s.data().iter().map(|&v| v as f32).collect()
+}
+
+/// Compute aspect (degrees, 0=N clockwise) from a heightmap.
+pub fn aspect(heightmap: &Heightmap) -> Vec<f32> {
+    let dem = to_terrano_raster(heightmap);
+    let a = terrano_core::aspect(&dem);
+    a.data().iter().map(|&v| v as f32).collect()
+}
+
+/// Extract contour lines from a heightmap at the given interval.
+pub fn contours(heightmap: &Heightmap, interval: f64) -> Vec<terrano_core::ContourLine> {
+    let dem = to_terrano_raster(heightmap);
+    terrano_core::contours(&dem, interval, 0.0)
+}

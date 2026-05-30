@@ -4734,7 +4734,7 @@ dependencies = [
 [[package]]
 name = "itinera-core"
 version = "0.1.0"
-source = "git+https://github.com/TileTopia-HQ/itinera.git?tag=v0.1.0#6a95111997764fb0058c2d1ab3bcdb63fa7d4a64"
+source = "git+https://github.com/TileTopia-HQ/itinera.git#5fe78743aa3890cc0f104f558a989f9f1c08c30f"
 dependencies = [
  "itinera-graph",
  "serde",
@@ -4745,12 +4745,23 @@ dependencies = [
 [[package]]
 name = "itinera-graph"
 version = "0.1.0"
-source = "git+https://github.com/TileTopia-HQ/itinera.git?tag=v0.1.0#6a95111997764fb0058c2d1ab3bcdb63fa7d4a64"
+source = "git+https://github.com/TileTopia-HQ/itinera.git#5fe78743aa3890cc0f104f558a989f9f1c08c30f"
 dependencies = [
  "bincode",
  "rstar 0.12.2",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "itinera-match"
+version = "0.1.0"
+source = "git+https://github.com/TileTopia-HQ/itinera.git#5fe78743aa3890cc0f104f558a989f9f1c08c30f"
+dependencies = [
+ "itinera-graph",
+ "serde",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -9278,6 +9289,7 @@ dependencies = [
  "image",
  "las",
  "memmap2",
+ "nubis-core",
  "ply-rs",
  "quick-xml 0.39.4",
  "rayon",
@@ -9313,6 +9325,7 @@ dependencies = [
  "image",
  "itinera-core",
  "itinera-graph",
+ "itinera-match",
  "jsonwebtoken 9.3.1",
  "martin-core",
  "martin-tile-utils",
@@ -9376,6 +9389,7 @@ dependencies = [
  "rayon",
  "reqwest 0.12.28",
  "serde",
+ "terrano-core",
  "thiserror 2.0.18",
  "tiletopia-core",
  "tiletopia-ingest",
