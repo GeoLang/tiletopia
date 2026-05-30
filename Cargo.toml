@@ -13,7 +13,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-authors = ["TileTopia <tiletopia@proton.me>"]
+authors = ["GeoLang <tiletopia@proton.me>"]
 repository = "https://github.com/GeoLang/tiletopia"
 description = "Geospatial tile server platform with routing, terrain, and point cloud services"
 license = "AGPL-3.0-or-later"
@@ -121,7 +121,7 @@ video-rs = { version = "0.11", features = ["ndarray"] }
 martin-core = { version = "0.5", default-features = false, features = ["mbtiles", "pmtiles"] }
 martin-tile-utils = "0.7"
 
-# TileTopia ecosystem crates
+# GeoLang ecosystem crates
 itinera-core = { git = "https://github.com/GeoLang/itinera.git" }
 itinera-graph = { git = "https://github.com/GeoLang/itinera.git" }
 itinera-match = { git = "https://github.com/GeoLang/itinera.git" }
