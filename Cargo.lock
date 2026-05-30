@@ -6927,6 +6927,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.40.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2474bd2e5029e7ccb6abb2ba48cf2383a333851dedf495901544281590c7da7f"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9291,7 +9300,7 @@ dependencies = [
  "memmap2",
  "nubis-core",
  "ply-rs",
- "quick-xml 0.39.4",
+ "quick-xml 0.40.1",
  "rayon",
  "rusqlite",
  "serde",

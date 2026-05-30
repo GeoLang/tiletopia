@@ -77,7 +77,7 @@ ifc-lite-core = "2.3"
 ifc-lite-geometry = "2.3"
 
 # XML parsing (CityGML, KML)
-quick-xml = "0.39"
+quick-xml = "0.40"
 
 # GeoPackage (SQLite)
 rusqlite = { version = "0.32", features = ["bundled"] }
