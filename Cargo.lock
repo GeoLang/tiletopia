@@ -1354,6 +1354,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3239,6 +3248,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
+name = "fst"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ab85b9b05e3978cc9a9cf8fea7f01b494e1a09ed3037e16ba39edc7a29eb61a"
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3446,6 +3461,20 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tinyvec",
+]
+
+[[package]]
+name = "geokode-core"
+version = "0.1.0"
+source = "git+https://github.com/TileTopia-HQ/geokode.git?tag=v0.1.0#ef04fe9ff3f04541468f16c86366e4fea5ef03ce"
+dependencies = [
+ "bincode",
+ "chrono",
+ "fst",
+ "rstar 0.12.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4703,6 +4732,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "itinera-core"
+version = "0.1.0"
+source = "git+https://github.com/TileTopia-HQ/itinera.git?tag=v0.1.0#6a95111997764fb0058c2d1ab3bcdb63fa7d4a64"
+dependencies = [
+ "itinera-graph",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "itinera-graph"
+version = "0.1.0"
+source = "git+https://github.com/TileTopia-HQ/itinera.git?tag=v0.1.0#6a95111997764fb0058c2d1ab3bcdb63fa7d4a64"
+dependencies = [
+ "bincode",
+ "rstar 0.12.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "itoa"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5753,6 +5804,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "nubis-core"
+version = "0.1.0"
+source = "git+https://github.com/TileTopia-HQ/nubis.git?tag=v0.1.0#aab3bc48b5cfa9c5ca8f543600d210270b4d4c94"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -9040,6 +9099,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "terrano-core"
+version = "0.1.0"
+source = "git+https://github.com/TileTopia-HQ/terrano.git?tag=v0.1.0#45c9990b28c5f5c37fbc71833346f883c908d07a"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "textwrap"
 version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9240,14 +9307,18 @@ dependencies = [
  "chrono",
  "cron",
  "geo-types",
+ "geokode-core",
  "gltf",
  "hmac 0.12.1",
  "image",
+ "itinera-core",
+ "itinera-graph",
  "jsonwebtoken 9.3.1",
  "martin-core",
  "martin-tile-utils",
  "metrics",
  "metrics-exporter-prometheus",
+ "nubis-core",
  "openraft",
  "petgraph 0.7.1",
  "printpdf",
@@ -9258,6 +9329,7 @@ dependencies = [
  "sha2 0.10.9",
  "sqlx",
  "tempfile",
+ "terrano-core",
  "thiserror 2.0.18",
  "tiff 0.9.1",
  "tiletopia-core",
