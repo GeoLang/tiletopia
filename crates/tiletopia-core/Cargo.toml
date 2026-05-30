@@ -28,7 +28,7 @@ proj4rs = { workspace = true }
 meshopt = { workspace = true }
 bytemuck = { workspace = true }
 draco-rs = { workspace = true, optional = true }
-libloading = { version = "0.8", optional = true }
+libloading = { version = "0.9", optional = true }
 image = { workspace = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 ort = { version = "2.0.0-rc.12", optional = true }
