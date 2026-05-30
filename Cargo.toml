@@ -13,9 +13,10 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "AGPL-3.0"
-authors = ["tiletopia contributors"]
-repository = "https://github.com/tiletopia/tiletopia"
+authors = ["TileTopia <tiletopia@proton.me>"]
+repository = "https://github.com/TileTopia-HQ/tiletopia"
+description = "Geospatial tile server platform with routing, terrain, and point cloud services"
+license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

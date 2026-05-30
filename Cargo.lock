@@ -9231,7 +9231,7 @@ dependencies = [
 
 [[package]]
 name = "tiletopia-cli"
-version = "0.3.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -9251,7 +9251,7 @@ dependencies = [
 
 [[package]]
 name = "tiletopia-core"
-version = "0.3.0"
+version = "0.1.0"
 dependencies = [
  "bytemuck",
  "bytes",
@@ -9277,7 +9277,7 @@ dependencies = [
 
 [[package]]
 name = "tiletopia-ingest"
-version = "0.3.0"
+version = "0.1.0"
 dependencies = [
  "e57",
  "fbxcel-dom",
@@ -9307,7 +9307,7 @@ dependencies = [
 
 [[package]]
 name = "tiletopia-server"
-version = "0.3.0"
+version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "aws-config",
@@ -9362,7 +9362,7 @@ dependencies = [
 
 [[package]]
 name = "tiletopia-store"
-version = "0.3.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -9383,7 +9383,7 @@ dependencies = [
 
 [[package]]
 name = "tiletopia-terrain"
-version = "0.3.0"
+version = "0.1.0"
 dependencies = [
  "flate2",
  "rayon",
@@ -9399,7 +9399,7 @@ dependencies = [
 
 [[package]]
 name = "tiletopia-worker"
-version = "0.3.0"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "rayon",
