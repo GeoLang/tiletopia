@@ -31,9 +31,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets --features ${{ matrix.features }} -- -D warnings
+        run: cargo clippy --all-targets --no-default-features --features ${{ matrix.features }} -- -D warnings
       - name: Test
-        run: cargo test --all
+        run: cargo test --all --no-default-features --features ${{ matrix.features }}
 
   deny:
     runs-on: ubuntu-latest
