@@ -25,7 +25,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build documentation
-        run: cargo doc --all-features --workspace --no-deps
+        run: cargo doc --features draco,gpu,plugin-dylib,ml --workspace --no-deps
         env:
           RUSTDOCFLAGS: "--cfg docsrs -D warnings"
       - name: Add redirect
