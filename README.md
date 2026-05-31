@@ -61,6 +61,7 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Photogrammetry (SfM)** — feature detection, matching, triangulation from photos
 - **Global DEM terrain** — SRTM/Copernicus/ASTER with TMS tiling and bilinear sampling
 - **Edge deployment** — cross-compile for ARM/embedded with offline bundles
+- **Martin integration** — PMTiles and PostGIS vector tile sources via `martin-tile-utils`, MBTiles metadata parsing
 
 ### Storage
 - **Local filesystem** — zero-config default
