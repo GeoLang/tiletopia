@@ -35,7 +35,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 bytes = "1"
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
 wgpu = "24"
 memmap2 = "0.9"
 las = "0.9"
