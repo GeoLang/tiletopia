@@ -21,7 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user for security
-RUN useradd -r -s /bin/false tiletopia
+RUN useradd -r -s /bin/false tiletopia && \
+    mkdir -p /data && chown tiletopia:tiletopia /data
 
 COPY --from=builder /app/target/release/tiletopia /usr/local/bin/tiletopia
 COPY gui /opt/tiletopia/gui
