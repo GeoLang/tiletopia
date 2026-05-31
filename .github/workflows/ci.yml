@@ -14,7 +14,13 @@ jobs:
   check:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            features: draco,gpu,plugin-dylib,ml
+          - os: macos-latest
+            features: draco,gpu,plugin-dylib,ml
+          - os: windows-latest
+            features: gpu,plugin-dylib,ml
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +31,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets --features draco,gpu,plugin-dylib,ml -- -D warnings
+        run: cargo clippy --all-targets --features ${{ matrix.features }} -- -D warnings
       - name: Test
         run: cargo test --all
 
