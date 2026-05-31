@@ -8,7 +8,6 @@
 
 use std::time::Instant;
 use tiletopia_core::octree::{OctreeConfig, OctreePoint, build_octree, collect_stats};
-use tiletopia_core::tile::write_tileset_to_dir;
 use tiletopia_core::tileset::TilingConfig;
 
 fn make_random_points(n: usize, spread: f64) -> Vec<OctreePoint> {

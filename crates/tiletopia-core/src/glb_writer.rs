@@ -1,7 +1,7 @@
 //! GLB (binary glTF 2.0) tile writer for mesh data.
 //!
 //! Produces spec-compliant GLB files suitable for 3D Tiles mesh content.
-//! See: https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#glb-file-format-specification
+//! See: <https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#glb-file-format-specification>
 
 use std::io::{self, Write};
 use std::path::Path;

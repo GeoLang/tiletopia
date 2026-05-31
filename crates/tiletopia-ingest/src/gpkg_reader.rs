@@ -388,12 +388,12 @@ mod tests {
         .unwrap();
 
         // Insert a point using GeoPackage Binary format (GP header + WKB)
-        let mut geom_blob = Vec::new();
-        // GP header
-        geom_blob.push(0x47); // 'G'
-        geom_blob.push(0x50); // 'P'
-        geom_blob.push(0x00); // version
-        geom_blob.push(0x01); // flags: little-endian, no envelope
+        let mut geom_blob = vec![
+            0x47, // 'G'
+            0x50, // 'P'
+            0x00, // version
+            0x01, // flags: little-endian, no envelope
+        ];
         geom_blob.extend_from_slice(&4326i32.to_le_bytes()); // srs_id
         // WKB Point (little-endian)
         geom_blob.push(0x01); // byte order = LE
@@ -431,9 +431,9 @@ mod tests {
         data.extend_from_slice(&3u32.to_le_bytes()); // wkbPolygon
         data.extend_from_slice(&1u32.to_le_bytes()); // 1 ring
         data.extend_from_slice(&4u32.to_le_bytes()); // 4 points
-        for &(x, y) in &[(0.0f64, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 0.0)] {
+        for &(x, y) in &[(0.0f64, 0.0f64), (1.0, 0.0), (1.0, 1.0), (0.0, 0.0)] {
             data.extend_from_slice(&x.to_le_bytes());
-            data.extend_from_slice(&(y as f64).to_le_bytes());
+            data.extend_from_slice(&y.to_le_bytes());
         }
 
         let geom = parse_wkb(&data).unwrap();

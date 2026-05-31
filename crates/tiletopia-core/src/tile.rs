@@ -2,7 +2,7 @@
 //!
 //! Implements the Point Cloud (pnts) tile format per the 3D Tiles spec
 //! and binary glTF (GLB) mesh tiles.
-//! See: https://github.com/CesiumGS/3d-tiles/tree/main/specification/TileFormats/PointCloud
+//! See: <https://github.com/CesiumGS/3d-tiles/tree/main/specification/TileFormats/PointCloud>
 
 use crate::glb_writer::{self, GlbMesh};
 use crate::octree::OctreePoint;

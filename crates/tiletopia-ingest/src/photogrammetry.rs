@@ -1313,7 +1313,7 @@ mod tests {
             k1: 0.0,
             k2: 0.0,
         };
-        let neighbors = vec![BundleCamera {
+        let neighbors = [BundleCamera {
             position: [1.0, 0.0, 0.0],
             rotation: [0.0, 0.0, 0.0],
             focal_length: 100.0,
