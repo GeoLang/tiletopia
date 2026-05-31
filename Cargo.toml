@@ -94,7 +94,7 @@ aes-gcm = "0.10"
 rand = "0.9"
 
 # HMAC signatures (webhooks)
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.10"
 
 # Graph algorithms (indoor routing)
