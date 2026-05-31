@@ -703,7 +703,7 @@ mod tests {
 
 // ─── Martin-core integration ────────────────────────────────────────────────
 
-/// Martin-core backed tile serving: production-grade MBTiles, PMTiles, COG,
+/// Martin-core backed tile serving: production-grade MBTiles, PMTiles,
 /// and PostGIS tile sources via the same engine that powers MapLibre Martin.
 ///
 /// Enable with `--features martin`.
@@ -712,24 +712,56 @@ pub mod martin_backend {
     use martin_core::CacheZoomRange;
     use martin_core::tiles::BoxedSource;
     use martin_core::tiles::mbtiles::MbtSource;
-    use martin_tile_utils::TileCoord as MartinTileCoord;
+    use martin_core::tiles::pmtiles::{PmtCache, PmtCacheInstance, PmtilesSource};
+    use martin_core::tiles::postgres::{PostgresPool, PostgresSource, PostgresSqlInfo};
+    use martin_tile_utils::{TileCoord as MartinTileCoord, TileInfo};
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::RwLock;
 
+    /// Source type discriminant for catalog entries.
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub enum MartinSourceKind {
+        MBTiles,
+        PMTiles,
+        PostGIS,
+    }
+
+    /// Catalog entry describing a registered source.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct SourceInfo {
+        pub id: String,
+        pub kind: MartinSourceKind,
+        pub content_type: String,
+    }
+
     /// Thread-safe registry of martin-core tile sources.
+    ///
+    /// Supports MBTiles, PMTiles, and PostGIS data sources with a unified
+    /// tile-fetching API. Each source is registered with a unique string ID
+    /// and can be queried, listed, or removed at runtime.
     #[derive(Clone)]
     pub struct MartinTileBackend {
         sources: Arc<RwLock<HashMap<String, BoxedSource>>>,
+        kinds: Arc<RwLock<HashMap<String, MartinSourceKind>>>,
+        pmt_cache: Arc<PmtCache>,
+        pmt_counter: Arc<AtomicUsize>,
     }
 
     impl MartinTileBackend {
+        /// Create a new empty backend.
         pub fn new() -> Self {
             Self {
                 sources: Arc::new(RwLock::new(HashMap::new())),
+                kinds: Arc::new(RwLock::new(HashMap::new())),
+                pmt_cache: Arc::new(PmtCache::new(128 * 1024 * 1024, None, None)),
+                pmt_counter: Arc::new(AtomicUsize::new(0)),
             }
         }
+
+        // ── MBTiles ──────────────────────────────────────────────────────
 
         /// Register an MBTiles file as a tile source.
         pub async fn add_mbtiles(
@@ -745,13 +777,137 @@ pub mod martin_backend {
             )
             .await
             .map_err(|e| format!("Failed to open MBTiles {}: {e}", path.as_ref().display()))?;
-            self.sources.write().await.insert(id, Box::new(source));
+            self.sources
+                .write()
+                .await
+                .insert(id.clone(), Box::new(source));
+            self.kinds
+                .write()
+                .await
+                .insert(id, MartinSourceKind::MBTiles);
             Ok(())
         }
+
+        // ── PMTiles ──────────────────────────────────────────────────────
+
+        /// Register a local PMTiles file as a tile source.
+        pub async fn add_pmtiles(
+            &self,
+            id: impl Into<String>,
+            path: impl AsRef<Path>,
+        ) -> Result<(), String> {
+            let id = id.into();
+            let abs = std::fs::canonicalize(path.as_ref())
+                .map_err(|e| format!("Cannot resolve {}: {e}", path.as_ref().display()))?;
+            let parent = abs.parent().unwrap_or_else(|| Path::new("/"));
+            let filename = abs
+                .file_name()
+                .ok_or("Invalid PMTiles path")?
+                .to_string_lossy()
+                .to_string();
+
+            let store = object_store::local::LocalFileSystem::new_with_prefix(parent)
+                .map_err(|e| format!("Cannot create object store: {e}"))?;
+
+            let cache_id = self.pmt_counter.fetch_add(1, Ordering::Relaxed);
+            let cache_instance = PmtCacheInstance::new(cache_id, (*self.pmt_cache).clone());
+
+            let source = PmtilesSource::new(
+                cache_instance,
+                id.clone(),
+                Box::new(store),
+                filename,
+                CacheZoomRange::default(),
+            )
+            .await
+            .map_err(|e| format!("Failed to open PMTiles {}: {e}", path.as_ref().display()))?;
+
+            self.sources
+                .write()
+                .await
+                .insert(id.clone(), Box::new(source));
+            self.kinds
+                .write()
+                .await
+                .insert(id, MartinSourceKind::PMTiles);
+            Ok(())
+        }
+
+        // ── PostGIS ──────────────────────────────────────────────────────
+
+        /// Register a PostGIS table/function as a tile source.
+        ///
+        /// `connection_string` is a standard `postgresql://` URL.
+        /// `query` is the SQL query that generates MVT tile bytes, e.g.:
+        /// ```sql
+        /// SELECT ST_AsMVT(q, 'layer', 4096, 'geom')
+        /// FROM (
+        ///   SELECT id, name, ST_AsMVTGeom(geom, ST_TileEnvelope($1,$2,$3), 4096, 64, true) AS geom
+        ///   FROM my_table
+        ///   WHERE geom && ST_TileEnvelope($1,$2,$3)
+        /// ) q
+        /// ```
+        pub async fn add_postgis(
+            &self,
+            id: impl Into<String>,
+            connection_string: &str,
+            query: &str,
+        ) -> Result<(), String> {
+            let id = id.into();
+
+            let pool = PostgresPool::new(connection_string, None, None, None, 4)
+                .await
+                .map_err(|e| format!("PostGIS pool error: {e}"))?;
+
+            let sql_info = PostgresSqlInfo::new(query.to_string(), false, id.clone());
+
+            let mut tilejson = tilejson::tilejson! {
+                tiles: vec![format!("/martin/{id}/{{z}}/{{x}}/{{y}}")],
+            };
+            tilejson.name = Some(id.clone());
+
+            let source = PostgresSource::new(
+                id.clone(),
+                sql_info,
+                tilejson,
+                pool,
+                TileInfo::new(
+                    martin_tile_utils::Format::Mvt,
+                    martin_tile_utils::Encoding::Uncompressed,
+                ),
+                CacheZoomRange::default(),
+            );
+
+            self.sources
+                .write()
+                .await
+                .insert(id.clone(), Box::new(source));
+            self.kinds
+                .write()
+                .await
+                .insert(id, MartinSourceKind::PostGIS);
+            Ok(())
+        }
+
+        // ── Unified API ──────────────────────────────────────────────────
 
         /// List all registered source IDs.
         pub async fn list_source_ids(&self) -> Vec<String> {
             self.sources.read().await.keys().cloned().collect()
+        }
+
+        /// Get catalog info for all sources.
+        pub async fn catalog(&self) -> Vec<SourceInfo> {
+            let sources = self.sources.read().await;
+            let kinds = self.kinds.read().await;
+            sources
+                .iter()
+                .map(|(id, src)| SourceInfo {
+                    id: id.clone(),
+                    kind: kinds.get(id).cloned().unwrap_or(MartinSourceKind::MBTiles),
+                    content_type: src.get_tile_info().format.content_type().to_string(),
+                })
+                .collect()
         }
 
         /// Get TileJSON metadata for a source.
@@ -780,11 +936,192 @@ pub mod martin_backend {
                 .map_err(|e| format!("Tile fetch failed: {e}"))?;
             Ok(data)
         }
+
+        /// Remove a source by ID.
+        pub async fn remove_source(&self, source_id: &str) -> bool {
+            let removed = self.sources.write().await.remove(source_id).is_some();
+            if removed {
+                self.kinds.write().await.remove(source_id);
+            }
+            removed
+        }
+
+        /// Check whether a source ID is registered.
+        pub async fn contains(&self, source_id: &str) -> bool {
+            self.sources.read().await.contains_key(source_id)
+        }
+
+        /// Get the source kind for a given ID.
+        pub async fn source_kind(&self, source_id: &str) -> Option<MartinSourceKind> {
+            self.kinds.read().await.get(source_id).cloned()
+        }
     }
 
     impl Default for MartinTileBackend {
         fn default() -> Self {
             Self::new()
+        }
+    }
+
+    // ── Axum route helpers ───────────────────────────────────────────────
+
+    /// Build Axum routes for the Martin backend.
+    ///
+    /// Mounts:
+    /// - `GET  /martin/catalog`                — list all sources
+    /// - `GET  /martin/:source_id`             — TileJSON for a source
+    /// - `GET  /martin/:source_id/:z/:x/:y`    — fetch a tile
+    pub fn martin_routes(backend: MartinTileBackend) -> axum::Router {
+        use axum::extract::{Path, State};
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::get;
+
+        async fn catalog_handler(State(b): State<MartinTileBackend>) -> impl IntoResponse {
+            let entries = b.catalog().await;
+            axum::Json(entries).into_response()
+        }
+
+        async fn tilejson_handler(
+            State(b): State<MartinTileBackend>,
+            Path(source_id): Path<String>,
+        ) -> impl IntoResponse {
+            match b.tilejson(&source_id).await {
+                Some(tj) => axum::Json(tj).into_response(),
+                None => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+
+        async fn tile_handler(
+            State(b): State<MartinTileBackend>,
+            Path((source_id, z, x, y)): Path<(String, u8, u32, u32)>,
+        ) -> impl IntoResponse {
+            match b.get_tile(&source_id, z, x, y).await {
+                Ok(data) if data.is_empty() => StatusCode::NO_CONTENT.into_response(),
+                Ok(data) => {
+                    let sources = b.sources.read().await;
+                    let content_type = sources
+                        .get(&source_id)
+                        .map(|s| s.get_tile_info().format.content_type().to_string())
+                        .unwrap_or_else(|| "application/octet-stream".to_string());
+                    (
+                        StatusCode::OK,
+                        [(axum::http::header::CONTENT_TYPE, content_type)],
+                        data,
+                    )
+                        .into_response()
+                }
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+            }
+        }
+
+        axum::Router::new()
+            .route("/martin/catalog", get(catalog_handler))
+            .route("/martin/{source_id}", get(tilejson_handler))
+            .route("/martin/{source_id}/{z}/{x}/{y}", get(tile_handler))
+            .with_state(backend)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn backend_default() {
+            let backend = MartinTileBackend::default();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let ids = rt.block_on(backend.list_source_ids());
+            assert!(ids.is_empty());
+        }
+
+        #[test]
+        fn backend_contains_empty() {
+            let backend = MartinTileBackend::new();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            assert!(!rt.block_on(backend.contains("nonexistent")));
+        }
+
+        #[test]
+        fn backend_catalog_empty() {
+            let backend = MartinTileBackend::new();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let catalog = rt.block_on(backend.catalog());
+            assert!(catalog.is_empty());
+        }
+
+        #[test]
+        fn backend_remove_nonexistent() {
+            let backend = MartinTileBackend::new();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            assert!(!rt.block_on(backend.remove_source("missing")));
+        }
+
+        #[test]
+        fn backend_tilejson_missing_source() {
+            let backend = MartinTileBackend::new();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            assert!(rt.block_on(backend.tilejson("missing")).is_none());
+        }
+
+        #[test]
+        fn backend_get_tile_missing_source() {
+            let backend = MartinTileBackend::new();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(backend.get_tile("missing", 0, 0, 0));
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err(), "Source not found");
+        }
+
+        #[test]
+        fn backend_source_kind_missing() {
+            let backend = MartinTileBackend::new();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            assert!(rt.block_on(backend.source_kind("missing")).is_none());
+        }
+
+        #[test]
+        fn backend_add_mbtiles_nonexistent_file() {
+            let backend = MartinTileBackend::new();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(backend.add_mbtiles("test", "/tmp/nonexistent.mbtiles"));
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn backend_add_pmtiles_nonexistent_file() {
+            let backend = MartinTileBackend::new();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(backend.add_pmtiles("test", "/tmp/nonexistent.pmtiles"));
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn source_kind_serde_roundtrip() {
+            let kind = MartinSourceKind::PMTiles;
+            let json = serde_json::to_string(&kind).unwrap();
+            let back: MartinSourceKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, kind);
+        }
+
+        #[test]
+        fn source_info_serialize() {
+            let info = SourceInfo {
+                id: "my-source".to_string(),
+                kind: MartinSourceKind::PostGIS,
+                content_type: "application/x-protobuf".to_string(),
+            };
+            let json = serde_json::to_value(&info).unwrap();
+            assert_eq!(json["id"], "my-source");
+            assert_eq!(json["kind"], "PostGIS");
+            assert_eq!(json["content_type"], "application/x-protobuf");
+        }
+
+        #[test]
+        fn martin_routes_build() {
+            let backend = MartinTileBackend::new();
+            let router = martin_routes(backend);
+            // Just verify we can build the router without panic
+            let _ = router;
         }
     }
 }

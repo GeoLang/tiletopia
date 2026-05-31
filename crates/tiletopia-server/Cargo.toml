@@ -53,13 +53,15 @@ wasmtime = { workspace = true, optional = true }
 video-rs = { workspace = true, optional = true }
 martin-core = { workspace = true, optional = true }
 martin-tile-utils = { workspace = true, optional = true }
+tilejson = { workspace = true, optional = true }
+object_store = { workspace = true, optional = true }
 
 [features]
 default = []
 raft = ["openraft"]
 wasm-plugins = ["wasmtime"]
 video = ["video-rs"]
-martin = ["martin-core", "martin-tile-utils"]
+martin = ["martin-core", "martin-tile-utils", "tilejson", "object_store"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
