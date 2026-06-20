@@ -1,0 +1,8 @@
+# pnpm settings for the tiletopia GUI (independent project root).
+#
+# Security: pnpm blocks dependency build scripts by default. Only these audited
+# packages may run install scripts — esbuild (downloads its platform binary,
+# required by Vite) and protobufjs (benign postinstall).
+allowBuilds:
+  esbuild: true
+  protobufjs: true

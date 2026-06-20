@@ -256,8 +256,8 @@ The built-in CesiumJS viewer works out-of-the-box with open data — **no Cesium
 
 ```bash
 cd gui
-npm install
-npm run dev        # opens http://localhost:5173
+pnpm install
+pnpm run dev        # opens http://localhost:5173
 ```
 
 | Feature | Source | Cesium Ion Equivalent |
