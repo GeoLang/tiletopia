@@ -78,6 +78,16 @@ pub async fn upload_asset(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // point clouds get tiled to 3d tiles right away; the job worker flips the
+    // asset to Ready and tileset.json becomes servable
+    if asset.asset_type == AssetType::PointCloud {
+        state
+            .job_queue
+            .submit(asset.id, input_path.to_string_lossy().into_owned())
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
     tracing::info!("Uploaded asset {} ({} bytes)", asset.id, file_data.len());
     tracing::info!("metric: assets_uploaded");
 

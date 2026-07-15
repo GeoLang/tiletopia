@@ -320,4 +320,110 @@ mod tests {
                 || response.status() == StatusCode::NOT_FOUND
         );
     }
+
+    async fn post_json(
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, Option<String>, Vec<u8>) {
+        let app = router(test_state().await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        (status, ct, bytes)
+    }
+
+    #[tokio::test]
+    async fn analysis_viewshed_returns_polygon() {
+        let (status, ct, bytes) = post_json(
+            "/api/v1/analysis/viewshed",
+            serde_json::json!({ "observer": [7.42, 43.73], "height_m": 2.0, "radius_m": 1000.0 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(ct.unwrap().contains("json"));
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "FeatureCollection");
+        let geom = &v["features"][0]["geometry"];
+        assert_eq!(geom["type"], "Polygon");
+        assert!(geom["coordinates"][0].as_array().unwrap().len() > 8);
+    }
+
+    #[tokio::test]
+    async fn analysis_flood_grows_with_level() {
+        let bbox = [7.40, 43.72, 7.45, 43.75];
+        let count_at = |level: f64| async move {
+            let (status, _, bytes) = post_json(
+                "/api/v1/analysis/flood",
+                serde_json::json!({ "level_m": level, "bbox": bbox, "resolution": 48 }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            v["features"][0]["properties"]["flooded_cells"]
+                .as_u64()
+                .unwrap_or(0)
+        };
+        let low = count_at(40.0).await;
+        let high = count_at(80.0).await;
+        assert!(high >= low, "high {high} should be >= low {low}");
+    }
+
+    #[tokio::test]
+    async fn analysis_terrain_hillshade_png_decodes() {
+        let (status, ct, bytes) = post_json(
+            "/api/v1/analysis/terrain",
+            serde_json::json!({ "op": "hillshade", "bbox": [7.40, 43.72, 7.45, 43.75], "resolution": 48 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ct.unwrap(), "image/png");
+        let img = image::load_from_memory(&bytes).expect("valid png");
+        assert_eq!(img.width(), 48);
+    }
+
+    #[tokio::test]
+    async fn analysis_terrain_contours_returns_lines() {
+        let (status, ct, bytes) = post_json(
+            "/api/v1/analysis/terrain",
+            serde_json::json!({ "op": "contours", "bbox": [7.40, 43.72, 7.45, 43.75], "resolution": 64 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(ct.unwrap().contains("json"));
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "FeatureCollection");
+        let feats = v["features"].as_array().unwrap();
+        assert!(!feats.is_empty());
+        assert_eq!(feats[0]["geometry"]["type"], "LineString");
+    }
+
+    #[tokio::test]
+    async fn analysis_solar_returns_png() {
+        let (status, ct, bytes) = post_json(
+            "/api/v1/analysis/solar",
+            serde_json::json!({ "bbox": [7.40, 43.72, 7.45, 43.75], "date": "2026-06-21", "resolution": 48 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ct.unwrap(), "image/png");
+        image::load_from_memory(&bytes).expect("valid png");
+    }
 }

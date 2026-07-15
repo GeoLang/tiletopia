@@ -4,6 +4,7 @@
 //! view-dependent LOD, and provides WebSocket for real-time data.
 
 pub mod admin;
+pub mod analysis;
 pub mod annotations;
 pub mod api_keys;
 pub mod arvr;
@@ -143,7 +144,7 @@ pub struct Asset {
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AssetType {
     PointCloud,
@@ -261,6 +262,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::scan_registration_routes())
         .merge(premium_routes::issue_tracking_routes())
         .merge(premium_routes::terrain_analysis_routes())
+        .merge(analysis::analysis_routes())
         .merge(premium_routes::geostatistics_routes())
         .merge(premium_routes::multispectral_routes())
         .merge(premium_routes::osm_buildings_routes())

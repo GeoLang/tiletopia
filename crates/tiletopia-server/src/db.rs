@@ -305,6 +305,11 @@ impl Database {
     }
 
     pub async fn delete_asset(&self, id: Uuid) -> Result<(), sqlx::Error> {
+        // jobs reference assets without a cascade; remove them first
+        sqlx::query("DELETE FROM jobs WHERE asset_id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
         sqlx::query("DELETE FROM assets WHERE id = ?")
             .bind(id.to_string())
             .execute(&self.pool)
