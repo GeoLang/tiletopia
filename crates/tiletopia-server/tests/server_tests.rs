@@ -7,15 +7,25 @@ mod tests {
     use tower::ServiceExt;
 
     async fn test_state() -> Arc<AppState> {
-        let dir =
-            std::env::temp_dir().join(format!("tiletopia_server_test_{}", std::process::id()));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let dir = std::env::temp_dir().join(format!(
+            "tiletopia_server_test_{}_{}",
+            std::process::id(),
+            n
+        ));
         std::fs::create_dir_all(&dir).ok();
 
-        let db = Arc::new(
-            tiletopia_server::db::Database::new("sqlite::memory:")
-                .await
-                .unwrap(),
+        // named shared-cache memory db so all pooled connections see one database,
+        // unique per test so cases stay isolated
+        let db_url = format!(
+            "sqlite:file:tiletopia_test_{}_{}?mode=memory&cache=shared",
+            std::process::id(),
+            n
         );
+        let db = Arc::new(tiletopia_server::db::Database::new(&db_url).await.unwrap());
         db.migrate().await.unwrap();
 
         let store: Arc<dyn tiletopia_store::TileStore> =
@@ -117,6 +127,178 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // signs up a user and returns (bearer_token, user_id).
+    async fn signup(state: &Arc<AppState>, email: &str) -> (String, String) {
+        let body =
+            serde_json::json!({ "email": email, "password": "pw123456", "name": "Test User" })
+                .to_string();
+        let resp = router(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/signup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (
+            v["token"].as_str().unwrap().to_string(),
+            v["user"]["id"].as_str().unwrap().to_string(),
+        )
+    }
+
+    async fn create_portal_item(
+        state: &Arc<AppState>,
+        token: &str,
+        title: &str,
+        sharing: &str,
+    ) -> serde_json::Value {
+        let body = serde_json::json!({
+            "title": title,
+            "type": "map",
+            "description": "a test item",
+            "tags": ["alpha", "beta"],
+            "sharing": sharing,
+        })
+        .to_string();
+        let resp = router(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/portal/items")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn list_portal_items(state: &Arc<AppState>, token: &str) -> Vec<serde_json::Value> {
+        let resp = router(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/portal/items")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn portal_requires_auth() {
+        let state = test_state().await;
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/portal/items")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn portal_crud_roundtrip() {
+        let state = test_state().await;
+        let (token, _uid) = signup(&state, "owner@example.com").await;
+
+        let created = create_portal_item(&state, &token, "My Map", "private").await;
+        assert_eq!(created["title"], "My Map");
+        assert_eq!(created["type"], "map");
+        assert_eq!(created["owner"], "Test User");
+        assert!(created.get("owner_id").is_none(), "owner_id must not leak");
+        let id = created["id"].as_str().unwrap();
+
+        let items = list_portal_items(&state, &token).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], id);
+
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/portal/items/{id}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let items = list_portal_items(&state, &token).await;
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn portal_non_owner_cannot_delete() {
+        let state = test_state().await;
+        let (owner_token, _) = signup(&state, "owner2@example.com").await;
+        let (other_token, _) = signup(&state, "other2@example.com").await;
+
+        let created = create_portal_item(&state, &owner_token, "Owned", "public").await;
+        let id = created["id"].as_str().unwrap();
+
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/portal/items/{id}"))
+                    .header("authorization", format!("Bearer {other_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // item survives the rejected delete
+        let items = list_portal_items(&state, &owner_token).await;
+        assert_eq!(items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn portal_private_hidden_from_others() {
+        let state = test_state().await;
+        let (owner_token, _) = signup(&state, "owner3@example.com").await;
+        let (other_token, _) = signup(&state, "other3@example.com").await;
+
+        create_portal_item(&state, &owner_token, "Secret", "private").await;
+        let shared = create_portal_item(&state, &owner_token, "Shared", "public").await;
+
+        // owner sees both
+        let owner_items = list_portal_items(&state, &owner_token).await;
+        assert_eq!(owner_items.len(), 2);
+
+        // other user sees only the public one
+        let other_items = list_portal_items(&state, &other_token).await;
+        assert_eq!(other_items.len(), 1);
+        assert_eq!(other_items[0]["id"], shared["id"]);
     }
 
     #[tokio::test]

@@ -53,6 +53,7 @@ pub mod osm_buildings;
 pub mod photogrammetry;
 pub mod plugin_registry;
 pub mod plugins;
+pub mod portal;
 pub mod premium_routes;
 pub mod priority_queue;
 pub mod rbac;
@@ -265,6 +266,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::osm_buildings_routes())
         .merge(premium_routes::entity_linking_routes())
         .merge(stories_api::story_routes())
+        .merge(portal::portal_routes())
         .merge(catalog::add_dataset_routes())
         .merge(plugin_registry::plugin_registry_routes())
         .merge(ion_compat::ion_compat_routes())

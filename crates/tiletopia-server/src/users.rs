@@ -131,7 +131,7 @@ fn create_jwt(user: &User) -> Result<String, StatusCode> {
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-fn extract_claims(request: &Request) -> Result<Claims, StatusCode> {
+pub fn extract_claims(request: &Request) -> Result<Claims, StatusCode> {
     let auth_header = request
         .headers()
         .get("Authorization")

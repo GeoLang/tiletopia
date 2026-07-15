@@ -213,6 +213,22 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS portal_items (
+                id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                item_type TEXT NOT NULL,
+                sharing TEXT NOT NULL DEFAULT 'private',
+                config TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -865,6 +881,83 @@ impl Database {
             .await?;
         Ok(())
     }
+
+    // -- Portal item CRUD --
+
+    pub async fn create_portal_item(
+        &self,
+        item: &crate::portal::PortalItem,
+    ) -> Result<(), sqlx::Error> {
+        let id = item.id.to_string();
+        let owner_id = item.owner_id.to_string();
+        let created_at = item.created.to_rfc3339();
+        let updated_at = item.modified.to_rfc3339();
+        // display owner + viewer-only fields live in config json
+        let config = serde_json::json!({
+            "owner": item.owner,
+            "tags": item.tags,
+            "thumbnail": item.thumbnail,
+            "extent": item.extent,
+            "metadata": item.metadata,
+        });
+        let config_str = serde_json::to_string(&config).unwrap_or_else(|_| "{}".into());
+
+        sqlx::query(
+            "INSERT INTO portal_items (id, owner_id, title, description, item_type, sharing, config, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&owner_id)
+        .bind(&item.title)
+        .bind(&item.description)
+        .bind(&item.item_type)
+        .bind(&item.sharing)
+        .bind(&config_str)
+        .bind(&created_at)
+        .bind(&updated_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn list_portal_items_for_viewer(
+        &self,
+        viewer_id: Uuid,
+    ) -> Result<Vec<crate::portal::PortalItem>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, owner_id, title, description, item_type, sharing, config, created_at, updated_at
+             FROM portal_items WHERE owner_id = ? OR sharing IN ('public', 'org') ORDER BY updated_at DESC",
+        )
+        .bind(viewer_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.iter().map(row_to_portal_item).collect())
+    }
+
+    pub async fn get_portal_item(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<crate::portal::PortalItem>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT id, owner_id, title, description, item_type, sharing, config, created_at, updated_at
+             FROM portal_items WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| row_to_portal_item(&r)))
+    }
+
+    pub async fn delete_portal_item(&self, id: Uuid) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM portal_items WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 fn row_to_asset(row: &sqlx::sqlite::SqliteRow) -> Asset {
@@ -996,6 +1089,45 @@ fn row_to_story(row: &sqlx::sqlite::SqliteRow) -> crate::stories_api::Story {
         created_at: parse_datetime(&created_at_str),
         updated_at: parse_datetime(&updated_at_str),
     }
+}
+
+fn row_to_portal_item(row: &sqlx::sqlite::SqliteRow) -> crate::portal::PortalItem {
+    let id_str: String = row.get("id");
+    let owner_id_str: String = row.get("owner_id");
+    let config_str: String = row.get("config");
+    let created_at_str: String = row.get("created_at");
+    let updated_at_str: String = row.get("updated_at");
+    let config: serde_json::Value = serde_json::from_str(&config_str).unwrap_or_default();
+
+    crate::portal::PortalItem {
+        id: Uuid::parse_str(&id_str).unwrap_or_default(),
+        owner_id: Uuid::parse_str(&owner_id_str).unwrap_or_default(),
+        title: row.get("title"),
+        item_type: row.get("item_type"),
+        owner: config
+            .get("owner")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        description: row.get("description"),
+        tags: config_field(&config, "tags"),
+        sharing: row.get("sharing"),
+        thumbnail: config_field(&config, "thumbnail"),
+        created: parse_datetime(&created_at_str),
+        modified: parse_datetime(&updated_at_str),
+        extent: config_field(&config, "extent"),
+        metadata: config.get("metadata").filter(|v| !v.is_null()).cloned(),
+    }
+}
+
+fn config_field<T: serde::de::DeserializeOwned>(
+    config: &serde_json::Value,
+    key: &str,
+) -> Option<T> {
+    config
+        .get(key)
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
 }
 
 fn row_to_plugin(row: &sqlx::sqlite::SqliteRow) -> crate::plugin_registry::InstalledPlugin {
