@@ -48,6 +48,8 @@ petgraph = { workspace = true }
 cron = { workspace = true }
 printpdf = { workspace = true }
 casbin = { workspace = true }
+las = { workspace = true, features = ["laz"] }
+zip = { version = "8", default-features = false }
 openraft = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 video-rs = { workspace = true, optional = true }
@@ -67,3 +69,4 @@ martin = ["martin-core", "martin-tile-utils", "tilejson", "object_store"]
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 tiletopia-store = { path = "../tiletopia-store" }
+quick-xml = { workspace = true }

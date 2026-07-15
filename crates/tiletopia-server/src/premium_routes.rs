@@ -165,7 +165,7 @@ async fn export_formats() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "formats": [
             {"id": "3dtiles_zip", "name": "3D Tiles (ZIP)", "extension": ".zip"},
-            {"id": "las", "name": "LAS 1.4", "extension": ".las"},
+            {"id": "las", "name": "LAS 1.2", "extension": ".las"},
             {"id": "laz", "name": "LAZ (compressed)", "extension": ".laz"},
             {"id": "terrain_bundle", "name": "Terrain Bundle", "extension": ".zip"},
             {"id": "geojson", "name": "GeoJSON", "extension": ".geojson"},

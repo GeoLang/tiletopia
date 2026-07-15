@@ -5104,10 +5104,21 @@ checksum = "48c2594be0d2ec4f04c944f5cb5160625cd1a69451db14de73b990065f97fb84"
 dependencies = [
  "byteorder",
  "chrono",
+ "laz",
  "log",
  "num-traits",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "laz"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4913af39d4e471d749fbcec0d726c5d4fc6f97cac851a62ff7a84300a7a7579"
+dependencies = [
+ "byteorder",
+ "num-traits",
 ]
 
 [[package]]
@@ -9715,6 +9726,7 @@ dependencies = [
  "itinera-graph",
  "itinera-match",
  "jsonwebtoken 9.3.1",
+ "las",
  "martin-core",
  "martin-tile-utils",
  "metrics",
@@ -9724,6 +9736,7 @@ dependencies = [
  "openraft",
  "petgraph 0.7.1",
  "printpdf",
+ "quick-xml 0.39.4",
  "rand 0.9.4",
  "reqwest 0.12.28",
  "serde",
@@ -9748,6 +9761,7 @@ dependencies = [
  "uuid",
  "video-rs",
  "wasmtime",
+ "zip",
 ]
 
 [[package]]
@@ -10320,6 +10334,12 @@ dependencies = [
  "sha1 0.10.6",
  "thiserror 2.0.18",
 ]
+
+[[package]]
+name = "typed-path"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
 
 [[package]]
 name = "typenum"
@@ -12082,6 +12102,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "zip"
+version = "8.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+dependencies = [
+ "crc32fast",
+ "indexmap 2.14.0",
+ "memchr",
+ "typed-path",
 ]
 
 [[package]]
