@@ -206,6 +206,16 @@ pub async fn require_admin(request: Request, next: Next) -> Result<Response, Sta
     Ok(next.run(request).await)
 }
 
+/// Middleware that requires the user to have Editor or Admin role. Same JWT
+/// claims check as `require_admin`, widened to the Edit permission tier.
+pub async fn require_editor(request: Request, next: Next) -> Result<Response, StatusCode> {
+    let claims = extract_claims(&request)?;
+    if claims.role != "editor" && claims.role != "admin" {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(next.run(request).await)
+}
+
 pub async fn signup(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SignupRequest>,

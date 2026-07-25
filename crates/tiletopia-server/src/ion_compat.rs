@@ -7,14 +7,15 @@ use axum::{
     Router,
     extract::{Path, State},
     http::StatusCode,
+    middleware,
     response::Json,
-    routing::get,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AppState, AssetType};
+use crate::{AppState, AssetType, users};
 
 // ─── Ion-format response types ───────────────────────────────────────────────
 
@@ -81,12 +82,32 @@ pub struct CreateIonTokenRequest {
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
-pub fn ion_compat_routes() -> Router<Arc<AppState>> {
+/// Anonymous Ion-compat reads. GET-only asset/token discovery that public
+/// CesiumJS clients use to resolve assets; served without auth like the native
+/// tile-data GETs. Kept separate from the mutating routes so a POST can never
+/// ride the read exemption.
+pub fn ion_compat_read_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/v1/assets", get(list_assets).post(create_asset))
+        .route("/v1/assets", get(list_assets))
         .route("/v1/assets/{id}", get(get_asset))
         .route("/v1/assets/{id}/endpoint", get(get_endpoint))
-        .route("/v1/tokens", get(list_tokens).post(create_token))
+        .route("/v1/tokens", get(list_tokens))
+}
+
+/// Mutating Ion-compat routes, behind the auth layer. Asset creation is an
+/// Edit-tier write (editor or admin); token minting issues a bearer credential
+/// so it is admin-only, matching how the rest of tiletopia gates privileged
+/// management behind require_admin.
+pub fn ion_compat_write_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route(
+            "/v1/assets",
+            post(create_asset).layer(middleware::from_fn(users::require_editor)),
+        )
+        .route(
+            "/v1/tokens",
+            post(create_token).layer(middleware::from_fn(users::require_admin)),
+        )
 }
 
 fn map_asset_type(asset_type: &AssetType) -> String {

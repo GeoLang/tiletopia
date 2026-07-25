@@ -617,4 +617,132 @@ mod tests {
         let (status, _) = login(&state, email, "wrong-password").await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
+
+    // -- ion-compat auth --
+
+    // signup a user, promote to editor in the db, then log in for a token
+    // carrying the editor role.
+    async fn bootstrap_editor(state: &Arc<AppState>, email: &str) -> String {
+        let (_token, uid) = signup(state, email).await;
+        let id = uuid::Uuid::parse_str(&uid).unwrap();
+        let mut user = state.db.get_user(id).await.unwrap().unwrap();
+        user.role = tiletopia_server::users::UserRole::Editor;
+        state.db.update_user(&user).await.unwrap();
+        let (status, body) = login(state, email, "pw123456").await;
+        assert_eq!(status, StatusCode::OK);
+        body["token"].as_str().unwrap().to_string()
+    }
+
+    async fn post_ion(
+        state: &Arc<AppState>,
+        uri: &str,
+        token: Option<&str>,
+        body: serde_json::Value,
+    ) -> StatusCode {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        router(Arc::clone(state))
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn ion_create_asset_anonymous_rejected() {
+        let state = test_state().await;
+        let status = post_ion(
+            &state,
+            "/v1/assets",
+            None,
+            serde_json::json!({ "name": "anon", "type": "3DTILES" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn ion_create_asset_viewer_forbidden() {
+        let state = test_state().await;
+        let (viewer_token, _) = signup(&state, "ion-viewer@example.com").await;
+        let status = post_ion(
+            &state,
+            "/v1/assets",
+            Some(&viewer_token),
+            serde_json::json!({ "name": "nope", "type": "3DTILES" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn ion_create_asset_editor_succeeds() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "ion-editor@example.com").await;
+        let status = post_ion(
+            &state,
+            "/v1/assets",
+            Some(&editor_token),
+            serde_json::json!({ "name": "yes", "type": "3DTILES" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn ion_list_assets_anonymous_ok() {
+        // a legitimate anonymous tile-data GET (the Ion read layer) still works
+        let state = test_state().await;
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/assets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn ion_create_token_requires_auth() {
+        let state = test_state().await;
+        // anonymous is rejected
+        let status = post_ion(
+            &state,
+            "/v1/tokens",
+            None,
+            serde_json::json!({ "name": "t", "scopes": [] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // editor is not enough (admin-only credential mint)
+        let editor_token = bootstrap_editor(&state, "ion-tok-editor@example.com").await;
+        let status = post_ion(
+            &state,
+            "/v1/tokens",
+            Some(&editor_token),
+            serde_json::json!({ "name": "t", "scopes": [] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // admin can mint
+        let admin_token = bootstrap_admin(&state, "ion-tok-admin@example.com").await;
+        let status = post_ion(
+            &state,
+            "/v1/tokens",
+            Some(&admin_token),
+            serde_json::json!({ "name": "t", "scopes": [] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
 }

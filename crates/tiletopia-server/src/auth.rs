@@ -82,15 +82,20 @@ pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, S
         || request.uri().path() == "/metrics"
         || request.uri().path().starts_with("/api/v1/auth/")
         || request.uri().path().starts_with("/api/v1/stories/share/")
-        || request.uri().path().starts_with("/v1/")
     {
         return Ok(next.run(request).await);
     }
 
-    // GET requests to tile data are public (CesiumJS needs unauthenticated access)
+    // GET requests to tile data are public (CesiumJS needs unauthenticated access).
+    // The /v1/* entries are the Ion-compat read routes; only GET is exempt, so the
+    // mutating POST /v1/assets and POST /v1/tokens stay behind auth. A new /v1/ route
+    // is protected by default unless added here explicitly.
     if request.method() == axum::http::Method::GET
         && (request.uri().path().contains("/tileset.json")
-            || request.uri().path().contains("/tiles/"))
+            || request.uri().path().contains("/tiles/")
+            || request.uri().path() == "/v1/assets"
+            || request.uri().path() == "/v1/tokens"
+            || request.uri().path().starts_with("/v1/assets/"))
     {
         return Ok(next.run(request).await);
     }
