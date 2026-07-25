@@ -33,7 +33,7 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Tile streaming** with geometric error-based LOD (client-side frustum culling via CesiumJS)
 - **CORS support** for cross-origin CesiumJS access
 - **WebSocket real-time layer** for live IoT/sensor data overlay
-- **JWT authentication** (opt-in via `TILETOPIA_JWT_SECRET`)
+- **JWT authentication** (`TILETOPIA_JWT_SECRET`, 32+ bytes, required to serve; `TILETOPIA_AUTH_DISABLED=true` to opt out)
 
 ### Terrain
 - **Quantized mesh terrain** from DEM/DTM heightmaps

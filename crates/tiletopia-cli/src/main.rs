@@ -132,6 +132,10 @@ async fn main() -> anyhow::Result<()> {
             host,
             port,
         } => {
+            // checked before anything else: serving with no JWT secret would
+            // leave every endpoint open, so refuse to start instead
+            tiletopia_server::auth::startup_check().map_err(anyhow::Error::msg)?;
+
             std::fs::create_dir_all(&data_dir)?;
 
             let db_url = format!(
