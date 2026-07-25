@@ -98,6 +98,9 @@ rand = "0.9"
 hmac = "0.12"
 sha2 = "0.10"
 
+# Password hashing (argon2id), matching collecta
+argon2 = { version = "0.5", features = ["std"] }
+
 # Graph algorithms (indoor routing)
 petgraph = "0.7"
 

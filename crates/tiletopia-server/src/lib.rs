@@ -179,6 +179,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/v1/admin/users/{id}",
             axum::routing::delete(admin::delete_user),
         )
+        .route(
+            "/api/v1/admin/users/{id}/role",
+            axum::routing::put(admin::set_user_role),
+        )
         .layer(middleware::from_fn(users::require_admin));
 
     // Org routes (admin only)

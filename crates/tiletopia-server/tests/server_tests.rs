@@ -426,4 +426,195 @@ mod tests {
         assert_eq!(ct.unwrap(), "image/png");
         image::load_from_memory(&bytes).expect("valid png");
     }
+
+    // -- role management --
+
+    async fn login(
+        state: &Arc<AppState>,
+        email: &str,
+        password: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let body = serde_json::json!({ "email": email, "password": password }).to_string();
+        let resp = router(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, v)
+    }
+
+    // signup a user, promote it to admin straight in the db (the CLI's offline
+    // bootstrap path), then log in for a token carrying the admin role.
+    async fn bootstrap_admin(state: &Arc<AppState>, email: &str) -> String {
+        let (_token, uid) = signup(state, email).await;
+        let id = uuid::Uuid::parse_str(&uid).unwrap();
+        let mut user = state.db.get_user(id).await.unwrap().unwrap();
+        user.role = tiletopia_server::users::UserRole::Admin;
+        state.db.update_user(&user).await.unwrap();
+        let (status, body) = login(state, email, "pw123456").await;
+        assert_eq!(status, StatusCode::OK);
+        body["token"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn non_admin_cannot_set_role() {
+        let state = test_state().await;
+        let (viewer_token, _) = signup(&state, "viewer-a@example.com").await;
+        let (_t, target_id) = signup(&state, "viewer-b@example.com").await;
+
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/admin/users/{target_id}/role"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {viewer_token}"))
+                    .body(Body::from(
+                        serde_json::json!({ "role": "editor" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_can_set_role_and_token_carries_it() {
+        let state = test_state().await;
+        let admin_token = bootstrap_admin(&state, "root@example.com").await;
+        let (_t, target_id) = signup(&state, "promote-me@example.com").await;
+
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/admin/users/{target_id}/role"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {admin_token}"))
+                    .body(Body::from(
+                        serde_json::json!({ "role": "admin" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["role"], "admin");
+
+        // a freshly minted token for the promoted user must carry the new role;
+        // prove it by using that token on an admin-only route.
+        let (status, body) = login(&state, "promote-me@example.com", "pw123456").await;
+        assert_eq!(status, StatusCode::OK);
+        let target_token = body["token"].as_str().unwrap().to_string();
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/users")
+                    .header("authorization", format!("Bearer {target_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn update_me_cannot_change_role() {
+        let state = test_state().await;
+        let (token, uid) = signup(&state, "self@example.com").await;
+
+        // try to sneak a role escalation through the self-service profile update
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(
+                        serde_json::json!({ "name": "New Name", "role": "admin" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["name"], "New Name");
+        assert_eq!(v["role"], "viewer");
+
+        // and it must not have been persisted either
+        let id = uuid::Uuid::parse_str(&uid).unwrap();
+        let stored = state.db.get_user(id).await.unwrap().unwrap();
+        assert_eq!(stored.role, tiletopia_server::users::UserRole::Viewer);
+    }
+
+    fn legacy_hash(password: &str) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let salt = [7u8; 16];
+        let mut mac = Hmac::<Sha256>::new_from_slice(&salt).unwrap();
+        mac.update(password.as_bytes());
+        let result = mac.finalize().into_bytes();
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        format!("{}:{}", hex(&salt), hex(&result))
+    }
+
+    #[tokio::test]
+    async fn legacy_password_hash_logs_in_and_is_rehashed() {
+        use tiletopia_server::users::{User, UserRole};
+        let state = test_state().await;
+
+        let email = "legacy@example.com";
+        let user = User {
+            id: uuid::Uuid::new_v4(),
+            email: email.to_string(),
+            name: "Legacy".into(),
+            role: UserRole::Viewer,
+            org_id: None,
+            created_at: chrono::Utc::now(),
+            last_login: None,
+        };
+        state
+            .db
+            .create_user(&user, &legacy_hash("pw123456"))
+            .await
+            .unwrap();
+
+        // old-format hash still authenticates
+        let (status, body) = login(&state, email, "pw123456").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["token"].as_str().is_some());
+
+        // and it was transparently upgraded to argon2id
+        let (_u, stored) = state.db.get_user_by_email(email).await.unwrap().unwrap();
+        assert!(
+            stored.starts_with("$argon2"),
+            "hash should be argon2id, got {stored}"
+        );
+
+        // wrong password still fails after migration
+        let (status, _) = login(&state, email, "wrong-password").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
 }

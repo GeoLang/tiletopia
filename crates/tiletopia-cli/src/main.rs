@@ -45,6 +45,21 @@ enum Commands {
         port: u16,
     },
 
+    /// Set a user's role (viewer/editor/admin). Works offline against the
+    /// sqlite database, so the first admin can be promoted before any admin
+    /// HTTP route is reachable.
+    SetRole {
+        /// User email or id
+        user: String,
+
+        /// New role: viewer, editor, or admin
+        role: String,
+
+        /// Data directory containing tiletopia.db
+        #[arg(short, long, default_value = "./data")]
+        data_dir: PathBuf,
+    },
+
     /// Show information about a tileset or source file
     Info {
         /// Path to tileset.json or source file
@@ -199,6 +214,36 @@ async fn main() -> anyhow::Result<()> {
 
             let listener = tokio::net::TcpListener::bind(&addr).await?;
             axum::serve(listener, app).await?;
+        }
+
+        Commands::SetRole {
+            user,
+            role,
+            data_dir,
+        } => {
+            use tiletopia_server::users::UserRole;
+
+            let role: UserRole = role.parse().map_err(anyhow::Error::msg)?;
+
+            let db_url = format!(
+                "sqlite://{}?mode=rwc",
+                data_dir.join("tiletopia.db").display()
+            );
+            let db = tiletopia_server::db::Database::new(&db_url).await?;
+            db.migrate().await?;
+
+            // accept either an email or a uuid
+            let mut record = match uuid::Uuid::parse_str(&user) {
+                Ok(id) => db.get_user(id).await?,
+                Err(_) => db.get_user_by_email(&user).await?.map(|(u, _)| u),
+            };
+            let Some(u) = record.as_mut() else {
+                anyhow::bail!("no user found matching '{user}'");
+            };
+
+            u.role = role;
+            db.update_user(u).await?;
+            println!("set {} ({}) to role {:?}", u.email, u.id, u.role);
         }
 
         Commands::Info { path } => {

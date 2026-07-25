@@ -523,6 +523,19 @@ impl Database {
         Ok(())
     }
 
+    pub async fn set_password_hash(
+        &self,
+        id: Uuid,
+        password_hash: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+            .bind(password_hash)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn list_users(&self) -> Result<Vec<User>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, email, name, password_hash, role, org_id, created_at, last_login FROM users ORDER BY created_at DESC",

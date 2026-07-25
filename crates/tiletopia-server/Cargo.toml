@@ -38,6 +38,7 @@ aes-gcm = { workspace = true }
 rand = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
+argon2 = { workspace = true }
 geo-types = { workspace = true }
 tiff = { workspace = true }
 aws-sdk-s3 = { workspace = true }
@@ -70,3 +71,7 @@ tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 tiletopia-store = { path = "../tiletopia-store" }
 quick-xml = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }

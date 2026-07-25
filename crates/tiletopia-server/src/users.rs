@@ -1,5 +1,8 @@
 //! User & organization management with authentication.
 
+use argon2::Argon2;
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use axum::{
     extract::{Request, State},
     http::StatusCode,
@@ -11,7 +14,7 @@ use hmac::{Hmac, Mac};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -34,6 +37,21 @@ pub enum UserRole {
     Admin,
     Editor,
     Viewer,
+}
+
+impl std::str::FromStr for UserRole {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "admin" => Ok(UserRole::Admin),
+            "editor" => Ok(UserRole::Editor),
+            "viewer" => Ok(UserRole::Viewer),
+            other => Err(format!(
+                "unknown role '{other}' (expected admin, editor, or viewer)"
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,14 +106,29 @@ fn from_hex(s: &str) -> Vec<u8> {
 }
 
 pub fn hash_password(password: &str) -> String {
-    let salt: [u8; 16] = rand::random();
-    let mut mac = Hmac::<Sha256>::new_from_slice(&salt).unwrap();
-    mac.update(password.as_bytes());
-    let result = mac.finalize().into_bytes();
-    format!("{}:{}", to_hex(&salt), to_hex(&result))
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .expect("argon2 hashing cannot fail with default params")
+        .to_string()
 }
 
 pub fn verify_password(password: &str, hash: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(hash) else {
+        return false;
+    };
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok()
+}
+
+// old salted-HMAC hashes look like `<hex-salt>:<hex-mac>`; argon2id hashes are
+// PHC strings starting with `$argon2`. login migrates the former on success.
+fn is_legacy_hash(hash: &str) -> bool {
+    !hash.starts_with("$argon2")
+}
+
+fn verify_legacy_password(password: &str, hash: &str) -> bool {
     let parts: Vec<&str> = hash.split(':').collect();
     if parts.len() != 2 {
         return false;
@@ -109,8 +142,20 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
     to_hex(&result) == parts[1]
 }
 
+// verified against when the email is unknown so login latency does not reveal
+// whether an account exists (matches collecta).
+static DUMMY_HASH: LazyLock<String> = LazyLock::new(|| hash_password("no-such-user"));
+
 fn jwt_secret() -> String {
-    std::env::var("TILETOPIA_JWT_SECRET").unwrap_or_else(|_| "dev-secret-change-me".into())
+    // the serve path refuses to start without TILETOPIA_JWT_SECRET (see
+    // auth::startup_check), so a missing secret only happens in tests / embedded
+    // use. fall back to a random per-process secret, never a known constant, so
+    // tokens can never be forged with a published value.
+    static EPHEMERAL: LazyLock<String> = LazyLock::new(|| {
+        let bytes: [u8; 32] = rand::random();
+        to_hex(&bytes)
+    });
+    std::env::var("TILETOPIA_JWT_SECRET").unwrap_or_else(|_| EPHEMERAL.clone())
 }
 
 fn create_jwt(user: &User) -> Result<String, StatusCode> {
@@ -199,14 +244,34 @@ pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, StatusCode> {
-    let (mut user, password_hash) = state
+    let Some((mut user, password_hash)) = state
         .db
         .get_user_by_email(&req.email)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    else {
+        // spend the same work on an unknown email so timing doesn't leak it
+        let _ = verify_password(&req.password, &DUMMY_HASH);
+        return Err(StatusCode::UNAUTHORIZED);
+    };
 
-    if !verify_password(&req.password, &password_hash) {
+    let ok = if is_legacy_hash(&password_hash) {
+        if verify_legacy_password(&req.password, &password_hash) {
+            // transparently upgrade old salted-HMAC hashes to argon2id
+            let new_hash = hash_password(&req.password);
+            state
+                .db
+                .set_password_hash(user.id, &new_hash)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            true
+        } else {
+            false
+        }
+    } else {
+        verify_password(&req.password, &password_hash)
+    };
+    if !ok {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -293,4 +358,39 @@ pub async fn create_org(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok((StatusCode::CREATED, Json(org)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn argon2_roundtrip() {
+        let hash = hash_password("correct horse battery staple");
+        assert!(hash.starts_with("$argon2id$"));
+        assert!(verify_password("correct horse battery staple", &hash));
+        assert!(!verify_password("wrong password", &hash));
+    }
+
+    #[test]
+    fn legacy_hash_detected_and_verified() {
+        // produce an old salted-HMAC hash the way the pre-argon2 code did
+        let salt = [3u8; 16];
+        let mut mac = Hmac::<Sha256>::new_from_slice(&salt).unwrap();
+        mac.update(b"hunter2");
+        let legacy = format!("{}:{}", to_hex(&salt), to_hex(&mac.finalize().into_bytes()));
+
+        assert!(is_legacy_hash(&legacy));
+        assert!(!is_legacy_hash(&hash_password("hunter2")));
+        assert!(verify_legacy_password("hunter2", &legacy));
+        assert!(!verify_legacy_password("nope", &legacy));
+    }
+
+    #[test]
+    fn role_from_str() {
+        assert_eq!("admin".parse::<UserRole>().unwrap(), UserRole::Admin);
+        assert_eq!("EDITOR".parse::<UserRole>().unwrap(), UserRole::Editor);
+        assert_eq!("viewer".parse::<UserRole>().unwrap(), UserRole::Viewer);
+        assert!("root".parse::<UserRole>().is_err());
+    }
 }

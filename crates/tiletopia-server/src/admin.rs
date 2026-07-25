@@ -5,13 +5,13 @@ use axum::{
     http::StatusCode,
     response::Json,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::db::JobRecord;
-use crate::users::User;
+use crate::users::{User, UserRole};
 use crate::{AppState, Asset};
 
 #[derive(Debug, Serialize)]
@@ -129,6 +129,35 @@ pub async fn list_jobs(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(jobs))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetRoleRequest {
+    pub role: UserRole,
+}
+
+/// Admin-only: set a user's role. Behind `require_admin`, so a viewer can never
+/// promote itself; the only self-service escalation path stays closed.
+pub async fn set_user_role(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SetRoleRequest>,
+) -> Result<Json<User>, StatusCode> {
+    let mut user = state
+        .db
+        .get_user(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    user.role = req.role;
+    state
+        .db
+        .update_user(&user)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(user))
 }
 
 pub async fn delete_user(
