@@ -876,6 +876,60 @@ mod tests {
         assert!(status != StatusCode::UNAUTHORIZED && status != StatusCode::FORBIDDEN);
     }
 
+    // -- catalog dataset add auth --
+
+    async fn catalog_add(state: &Arc<AppState>, token: Option<&str>) -> StatusCode {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/catalog/copernicus-dem-30/add")
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        let body = serde_json::json!({
+            "name": "dem tile",
+            "bounds": { "west": 0.0, "south": 0.0, "east": 1.0, "north": 1.0 },
+        });
+        router(Arc::clone(state))
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn catalog_add_anonymous_rejected() {
+        let state = test_state().await;
+        assert_eq!(catalog_add(&state, None).await, StatusCode::UNAUTHORIZED);
+        assert!(state.db.list_assets().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn catalog_add_viewer_forbidden() {
+        let state = test_state().await;
+        let (viewer_token, _) = signup(&state, "catalog-viewer@example.com").await;
+        assert_eq!(
+            catalog_add(&state, Some(&viewer_token)).await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(state.db.list_assets().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn catalog_add_editor_records_owner() {
+        let state = test_state().await;
+        let (editor_token, uid) =
+            bootstrap_editor_with_id(&state, "catalog-editor@example.com").await;
+        assert_eq!(
+            catalog_add(&state, Some(&editor_token)).await,
+            StatusCode::CREATED
+        );
+
+        let assets = state.db.list_assets().await.unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].owner_id.as_deref(), Some(uid.as_str()));
+    }
+
     // -- per-asset ownership --
 
     #[test]

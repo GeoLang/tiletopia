@@ -3,7 +3,7 @@
 //! Provides one-click access to global terrain, 3D buildings, satellite imagery,
 //! and community datasets without requiring any paid service subscriptions.
 
-use axum::{Router, extract::State, response::Json, routing::get};
+use axum::{Router, extract::State, middleware, response::Json, routing::get};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -362,11 +362,12 @@ pub fn catalog_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/catalog/{id}", get(get_dataset))
 }
 
-/// Additional catalog routes that need auth (dataset add triggers jobs).
+/// Additional catalog routes that need auth. Adding a dataset creates an asset
+/// and queues a job, so it sits on the Edit tier like the other create paths.
 pub fn add_dataset_routes() -> Router<Arc<AppState>> {
     Router::new().route(
         "/api/v1/catalog/{dataset_id}/add",
-        axum::routing::post(add_dataset),
+        axum::routing::post(add_dataset).layer(middleware::from_fn(crate::users::require_editor)),
     )
 }
 
@@ -430,11 +431,8 @@ async fn add_dataset(
     headers: axum::http::HeaderMap,
     Json(req): Json<AddDatasetRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), axum::http::StatusCode> {
-    // this route carries no role gate, so an unauthenticated run leaves the
-    // asset ownerless rather than failing the request
-    let owner_id = crate::users::claims_from_headers(&headers)
-        .ok()
-        .map(|c| c.sub);
+    // the route sits behind require_editor, so a valid token is always present
+    let owner_id = crate::users::claims_from_headers(&headers)?.sub;
 
     let dataset = state
         .catalog
@@ -466,7 +464,7 @@ async fn add_dataset(
             dataset.name, req.bounds.west, req.bounds.south, req.bounds.east, req.bounds.north
         ),
         tags: vec!["catalog".into(), dataset.category_str()],
-        owner_id,
+        owner_id: Some(owner_id),
     };
 
     state
