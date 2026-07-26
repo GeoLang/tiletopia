@@ -220,6 +220,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .layer(middleware::from_fn(users::require_editor));
 
+    // Realtime collaboration websocket. Any valid JWT may join a room; the gate
+    // is a layer of its own so an anonymous handshake is refused before the
+    // upgrade, and so it holds in the no-secret development mode too.
+    let realtime_routes = Router::new()
+        .route("/api/v1/realtime/{room}", get(realtime::ws_handler))
+        .layer(middleware::from_fn(realtime::require_room_join));
+
     Router::new()
         .route("/api/v1/assets", get(list_assets))
         .route("/api/v1/assets/{id}", get(get_asset))
@@ -237,6 +244,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/jobs/{id}", get(get_job_status))
         .route("/api/v1/users/me", get(users::get_me).put(users::update_me))
         .merge(asset_write_routes)
+        .merge(realtime_routes)
         .merge(admin_routes)
         .merge(org_routes)
         .route("/api/v1/health", get(health))

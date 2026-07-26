@@ -1,22 +1,28 @@
 //! WebSocket real-time data layer.
 //!
-//! Clients connect to /api/v1/realtime/{asset_id} and receive
+//! Clients connect to /api/v1/realtime/{room} and receive
 //! live sensor/IoT data updates as JSON messages.
 //!
 //! Also supports collaboration: presence tracking, cursor sharing, and chat.
+//!
+//! The room id is whatever string the viewer joins on, usually an asset uuid.
+//! It is only ever a map key, never a path or a query.
 
 use axum::{
     extract::{
-        Path, State,
+        Path, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    http::StatusCode,
+    middleware::Next,
     response::Response,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
-use uuid::Uuid;
+
+use crate::AppState;
 
 // ─── Collaboration message types ─────────────────────────────────────────────
 
@@ -130,10 +136,10 @@ impl Default for PresenceTracker {
 
 // ─── Real-time state ─────────────────────────────────────────────────────────
 
-/// Real-time state — broadcast channel per asset.
+/// Real-time state — broadcast channel per room.
 pub struct RealtimeState {
-    /// Broadcast sender for real-time updates. Keyed by asset ID.
-    pub channels: RwLock<HashMap<Uuid, broadcast::Sender<String>>>,
+    /// Broadcast sender for real-time updates. Keyed by room id.
+    pub channels: RwLock<HashMap<String, broadcast::Sender<String>>>,
     /// Presence tracker for collaboration.
     pub presence: PresenceTracker,
 }
@@ -146,22 +152,22 @@ impl RealtimeState {
         }
     }
 
-    pub async fn get_or_create_channel(&self, asset_id: Uuid) -> broadcast::Sender<String> {
+    pub async fn get_or_create_channel(&self, room: &str) -> broadcast::Sender<String> {
         let channels = self.channels.read().await;
-        if let Some(tx) = channels.get(&asset_id) {
+        if let Some(tx) = channels.get(room) {
             return tx.clone();
         }
         drop(channels);
 
         let mut channels = self.channels.write().await;
         let (tx, _) = broadcast::channel(256);
-        channels.entry(asset_id).or_insert(tx).clone()
+        channels.entry(room.to_string()).or_insert(tx).clone()
     }
 
-    /// Push a real-time update to all connected clients for an asset.
-    pub async fn push_update(&self, asset_id: Uuid, data: String) {
+    /// Push a real-time update to all connected clients in a room.
+    pub async fn push_update(&self, room: &str, data: String) {
         let channels = self.channels.read().await;
-        if let Some(tx) = channels.get(&asset_id) {
+        if let Some(tx) = channels.get(room) {
             let _ = tx.send(data);
         }
     }
@@ -173,26 +179,47 @@ impl Default for RealtimeState {
     }
 }
 
+/// Longest room id we accept. Rooms are created on demand and each one holds a
+/// broadcast channel, so the key is bounded.
+const MAX_ROOM_ID_LEN: usize = 128;
+
+/// Room join gate: any valid JWT may connect, viewer role included, because
+/// collaboration is presence, cursors and chat rather than a write to stored
+/// data. That matches the annotation routes. Anonymous is rejected.
+///
+/// This is a layer rather than a check inside [`ws_handler`] so the rejection
+/// happens before the upgrade handshake is looked at, and so it holds even in
+/// the no-secret development mode where [`crate::auth::auth_middleware`] passes
+/// everything through.
+pub async fn require_room_join(request: Request, next: Next) -> Result<Response, StatusCode> {
+    let token = crate::auth::request_token(request.headers(), request.uri())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    crate::users::claims_from_token(token)?;
+    Ok(next.run(request).await)
+}
+
 /// WebSocket upgrade handler.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
-    Path(asset_id): Path<Uuid>,
-    State(state): State<Arc<RealtimeState>>,
-) -> Response {
-    let tx = state.get_or_create_channel(asset_id).await;
+    Path(room): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Response, StatusCode> {
+    if room.len() > MAX_ROOM_ID_LEN {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let tx = state.realtime.get_or_create_channel(&room).await;
     let rx = tx.subscribe();
-    ws.on_upgrade(move |socket| handle_socket(socket, tx, rx, asset_id, state))
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, tx, rx, room, state)))
 }
 
 async fn handle_socket(
     mut socket: WebSocket,
     tx: broadcast::Sender<String>,
     mut rx: broadcast::Receiver<String>,
-    asset_id: Uuid,
-    state: Arc<RealtimeState>,
+    room: String,
+    state: Arc<AppState>,
 ) {
     let mut current_user_id: Option<String> = None;
-    let asset_key = asset_id.to_string();
 
     loop {
         tokio::select! {
@@ -216,18 +243,18 @@ async fn handle_socket(
                         if let Ok(collab_msg) = serde_json::from_str::<CollabMessage>(&text) {
                             match &collab_msg {
                                 CollabMessage::Join { user_id, user_name, .. } => {
-                                    state.presence.join(&asset_key, user_id, user_name).await;
+                                    state.realtime.presence.join(&room, user_id, user_name).await;
                                     current_user_id = Some(user_id.clone());
                                     // Broadcast presence update
-                                    let users = state.presence.get_presence(&asset_key).await;
+                                    let users = state.realtime.presence.get_presence(&room).await;
                                     let presence_msg = CollabMessage::Presence { users };
                                     if let Ok(json) = serde_json::to_string(&presence_msg) {
                                         let _ = tx.send(json);
                                     }
                                 }
                                 CollabMessage::Leave { user_id, .. } => {
-                                    state.presence.leave(&asset_key, user_id).await;
-                                    let users = state.presence.get_presence(&asset_key).await;
+                                    state.realtime.presence.leave(&room, user_id).await;
+                                    let users = state.realtime.presence.get_presence(&room).await;
                                     let presence_msg = CollabMessage::Presence { users };
                                     if let Ok(json) = serde_json::to_string(&presence_msg) {
                                         let _ = tx.send(json);
@@ -255,11 +282,11 @@ async fn handle_socket(
 
     // Clean up presence on disconnect
     if let Some(user_id) = current_user_id {
-        state.presence.leave(&asset_key, &user_id).await;
-        let users = state.presence.get_presence(&asset_key).await;
+        state.realtime.presence.leave(&room, &user_id).await;
+        let users = state.realtime.presence.get_presence(&room).await;
         let presence_msg = CollabMessage::Presence { users };
         if let Ok(json) = serde_json::to_string(&presence_msg) {
-            let _ = state.push_update(asset_id, json).await;
+            state.realtime.push_update(&room, json).await;
         }
     }
 }

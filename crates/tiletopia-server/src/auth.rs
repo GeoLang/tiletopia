@@ -2,7 +2,7 @@
 
 use axum::{
     extract::Request,
-    http::{Method, StatusCode},
+    http::{HeaderMap, Method, StatusCode, Uri},
     middleware::Next,
     response::Response,
 };
@@ -64,6 +64,9 @@ pub fn check_secret(secret: Option<&str>, auth_disabled: bool) -> Result<(), Str
     Ok(())
 }
 
+/// Path prefix of the realtime collaboration WebSocket.
+pub const REALTIME_PREFIX: &str = "/api/v1/realtime/";
+
 /// Whether this request is an anonymous tile-DATA read. CesiumJS and deck.gl
 /// fetch these with no Authorization header, so they stay open.
 ///
@@ -83,6 +86,28 @@ pub fn is_public_read(method: &Method, path: &str) -> bool {
         || path == "/v1/assets"
         || path == "/v1/tokens"
         || path.starts_with("/v1/assets/")
+}
+
+/// Bearer token for a request: the `Authorization` header, or the `token` query
+/// parameter on the realtime WebSocket path.
+///
+/// The query fallback is there because a browser cannot set headers on a
+/// WebSocket handshake. It is scoped to that one path, and it does mean a
+/// realtime token can land in proxy access logs.
+pub fn request_token<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> Option<&'a str> {
+    let header_token = headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    let token = match header_token {
+        Some(token) => Some(token),
+        None if uri.path().starts_with(REALTIME_PREFIX) => uri
+            .query()
+            .and_then(|q| q.split('&').find_map(|p| p.strip_prefix("token="))),
+        None => None,
+    };
+    token.filter(|t| !t.is_empty())
 }
 
 /// Auth middleware — extracts and validates JWT from Authorization header.
@@ -116,15 +141,7 @@ pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, S
         return Ok(next.run(request).await);
     }
 
-    let auth_header = request
-        .headers()
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let token = request_token(request.headers(), request.uri()).ok_or(StatusCode::UNAUTHORIZED)?;
 
     let _claims = decode::<Claims>(
         token,
@@ -208,5 +225,50 @@ mod tests {
         ));
         assert!(!is_public_read(&Method::GET, "/api/v1/elevation/point"));
         assert!(!is_public_read(&Method::GET, "/api/v1/portal/items"));
+        // the realtime websocket needs a token like any other non-tile route
+        assert!(!is_public_read(&Method::GET, "/api/v1/realtime/room-1"));
+    }
+
+    fn uri(s: &str) -> Uri {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn query_token_is_only_read_on_the_realtime_path() {
+        let headers = HeaderMap::new();
+        assert_eq!(
+            request_token(&headers, &uri("/api/v1/realtime/room-1?token=abc")),
+            Some("abc")
+        );
+        // anywhere else a query string is not a credential
+        assert_eq!(
+            request_token(&headers, &uri("/api/v1/portal/items?token=abc")),
+            None
+        );
+        assert_eq!(
+            request_token(&headers, &uri("/api/v1/realtime/room-1?token=")),
+            None
+        );
+        assert_eq!(
+            request_token(&headers, &uri("/api/v1/realtime/room-1")),
+            None
+        );
+    }
+
+    #[test]
+    fn header_token_wins_over_the_query() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Bearer from-header".parse().unwrap());
+        assert_eq!(
+            request_token(&headers, &uri("/api/v1/realtime/room-1?token=from-query")),
+            Some("from-header")
+        );
+    }
+
+    #[test]
+    fn non_bearer_header_is_no_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Basic dXNlcjpwdw==".parse().unwrap());
+        assert_eq!(request_token(&headers, &uri("/api/v1/portal/items")), None);
     }
 }

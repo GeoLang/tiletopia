@@ -68,6 +68,8 @@ martin = ["martin-core", "martin-tile-utils", "tilejson", "object_store"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+tokio-tungstenite = "0.29"
+futures = { workspace = true }
 tempfile = "3"
 tiletopia-store = { path = "../tiletopia-store" }
 quick-xml = { workspace = true }

@@ -287,7 +287,7 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `POST` | `/api/v1/assets/{id}/tile` | Start tiling job |
 | `GET` | `/api/v1/assets/{id}/tileset.json` | Serve tileset |
 | `GET` | `/api/v1/assets/{id}/tiles/{path}` | Serve individual tile |
-| `WS` | `/api/v1/realtime/{id}` | WebSocket for live data |
+| `WS` | `/api/v1/realtime/{room}` | WebSocket for live data and collaboration |
 | `GET` | `/api/v1/tiles/sources` | List 2D tile sources (OSM, etc.) |
 | `GET` | `/api/v1/tiles/styles` | MapLibre GL style JSON |
 | `GET` | `/api/v1/stac` | STAC catalog root |
@@ -312,6 +312,14 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `GET` | `/api/v1/geostatistics/methods` | List interpolation methods |
 | `GET` | `/api/v1/multispectral/indices` | Spectral indices (NDVI, etc.) |
 | `GET` | `/metrics` | Prometheus metrics |
+
+Tile data reads are anonymous: `tileset.json`, `tiles/{path}` and the
+`/api/v1/terrain/` quantized-mesh routes. Everything else needs
+`Authorization: Bearer <jwt>`, and writes need the editor or admin role.
+
+The realtime websocket needs any valid JWT. Browsers cannot set headers on a
+websocket handshake, so it also accepts `?token=<jwt>`, the only path where a
+query token is a credential.
 
 ---
 

@@ -192,14 +192,20 @@ pub fn claims_from_headers(headers: &axum::http::HeaderMap) -> Result<Claims, St
         .strip_prefix("Bearer ")
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let data = decode::<Claims>(
+    claims_from_token(token)
+}
+
+/// Validate a bare JWT, for callers that receive the token somewhere other than
+/// the `Authorization` header. Same key and validation as
+/// [`claims_from_headers`].
+pub fn claims_from_token(token: &str) -> Result<Claims, StatusCode> {
+    decode::<Claims>(
         token,
         &DecodingKey::from_secret(jwt_secret().as_bytes()),
         &Validation::default(),
     )
-    .map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-    Ok(data.claims)
+    .map(|data| data.claims)
+    .map_err(|_| StatusCode::UNAUTHORIZED)
 }
 
 /// Middleware that requires the user to have Admin role.

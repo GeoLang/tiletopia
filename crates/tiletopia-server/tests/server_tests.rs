@@ -1000,6 +1000,109 @@ mod tests {
         assert_eq!(assets[0].owner_id.as_deref(), Some(uid.as_str()));
     }
 
+    // -- realtime collaboration websocket --
+
+    // serve the router on a loopback port so a real websocket handshake can run.
+    async fn serve(state: &Arc<AppState>) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router(Arc::clone(state));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn realtime_route_is_mounted_and_rejects_anonymous() {
+        let state = test_state().await;
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/realtime/room-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // 401, not 404: the route exists and the join gate is what refused
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn realtime_anonymous_handshake_never_upgrades() {
+        let state = test_state().await;
+        let addr = serve(&state).await;
+
+        let attempt =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/api/v1/realtime/room-1")).await;
+        match attempt {
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+                assert_eq!(resp.status().as_u16(), 401);
+            }
+            Err(e) => panic!("expected an http rejection, got {e:?}"),
+            Ok(_) => panic!("anonymous handshake must not upgrade"),
+        }
+    }
+
+    #[tokio::test]
+    async fn realtime_join_round_trip_with_viewer_token() {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let state = test_state().await;
+        // a plain signup is a viewer, which is enough to join a room
+        let (token, _uid) = signup(&state, "collab@example.com").await;
+        let addr = serve(&state).await;
+
+        // a browser cannot set headers on a ws handshake, so the token rides the
+        // query string
+        let (mut ws, resp) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/api/v1/realtime/room-1?token={token}"
+        ))
+        .await
+        .unwrap();
+        assert_eq!(resp.status().as_u16(), 101);
+
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "Join",
+                "user_id": "u1",
+                "asset_id": "room-1",
+                "user_name": "Ann",
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        // the server answers a join by broadcasting the room presence list
+        let msg = ws.next().await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert_eq!(v["type"], "Presence");
+        assert_eq!(v["users"][0]["user_id"], "u1");
+        assert_eq!(v["users"][0]["user_name"], "Ann");
+    }
+
+    #[tokio::test]
+    async fn realtime_bad_token_rejected() {
+        let state = test_state().await;
+        let addr = serve(&state).await;
+
+        let attempt = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/api/v1/realtime/room-1?token=not-a-jwt"
+        ))
+        .await;
+        match attempt {
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+                assert_eq!(resp.status().as_u16(), 401);
+            }
+            Err(e) => panic!("expected an http rejection, got {e:?}"),
+            Ok(_) => panic!("a forged token must not upgrade"),
+        }
+    }
+
     // -- per-asset ownership --
 
     #[test]
