@@ -67,6 +67,10 @@ pub fn check_secret(secret: Option<&str>, auth_disabled: bool) -> Result<(), Str
 /// Path prefix of the realtime collaboration WebSocket.
 pub const REALTIME_PREFIX: &str = "/api/v1/realtime/";
 
+/// Subprotocol name that marks a WebSocket handshake as carrying a bearer token.
+/// See [`request_token`] for the full contract.
+pub const BEARER_SUBPROTOCOL: &str = "bearer";
+
 /// Whether this request is an anonymous tile-DATA read. CesiumJS and deck.gl
 /// fetch these with no Authorization header, so they stay open.
 ///
@@ -88,12 +92,13 @@ pub fn is_public_read(method: &Method, path: &str) -> bool {
         || path.starts_with("/v1/assets/")
 }
 
-/// Bearer token for a request: the `Authorization` header, or the `token` query
-/// parameter on the realtime WebSocket path.
+/// Bearer token for a request: the `Authorization` header, or on the realtime
+/// WebSocket path a `Sec-WebSocket-Protocol: bearer, <jwt>` offer.
 ///
-/// The query fallback is there because a browser cannot set headers on a
-/// WebSocket handshake. It is scoped to that one path, and it does mean a
-/// realtime token can land in proxy access logs.
+/// The subprotocol form is there because a browser cannot set the Authorization
+/// header on a WebSocket handshake. It is preferred over a query parameter
+/// because proxies do not log request headers. It is scoped to the realtime
+/// path, so nowhere else does a subprotocol act as a credential.
 pub fn request_token<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> Option<&'a str> {
     let header_token = headers
         .get("Authorization")
@@ -102,12 +107,22 @@ pub fn request_token<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> Option<&'a str
 
     let token = match header_token {
         Some(token) => Some(token),
-        None if uri.path().starts_with(REALTIME_PREFIX) => uri
-            .query()
-            .and_then(|q| q.split('&').find_map(|p| p.strip_prefix("token="))),
+        None if uri.path().starts_with(REALTIME_PREFIX) => subprotocol_token(headers),
         None => None,
     };
     token.filter(|t| !t.is_empty())
+}
+
+/// Token out of a `Sec-WebSocket-Protocol: bearer, <jwt>` offer. Order is fixed:
+/// the marker first, the token second, both in one header value, which is what
+/// `new WebSocket(url, ["bearer", jwt])` sends.
+fn subprotocol_token(headers: &HeaderMap) -> Option<&str> {
+    let offered = headers.get("Sec-WebSocket-Protocol")?.to_str().ok()?;
+    let mut entries = offered.split(',').map(str::trim);
+    if entries.next()? != BEARER_SUBPROTOCOL {
+        return None;
+    }
+    entries.next()
 }
 
 /// Auth middleware — extracts and validates JWT from Authorization header.
@@ -233,34 +248,57 @@ mod tests {
         s.parse().unwrap()
     }
 
+    fn subprotocol(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("Sec-WebSocket-Protocol", value.parse().unwrap());
+        headers
+    }
+
     #[test]
-    fn query_token_is_only_read_on_the_realtime_path() {
+    fn subprotocol_token_is_only_read_on_the_realtime_path() {
+        let headers = subprotocol("bearer, jwt-here");
+        assert_eq!(
+            request_token(&headers, &uri("/api/v1/realtime/room-1")),
+            Some("jwt-here")
+        );
+        // anywhere else a subprotocol offer is not a credential
+        assert_eq!(request_token(&headers, &uri("/api/v1/portal/items")), None);
+    }
+
+    #[test]
+    fn malformed_subprotocol_offers_carry_no_token() {
+        let realtime = uri("/api/v1/realtime/room-1");
+        // marker without a token
+        assert_eq!(request_token(&subprotocol("bearer"), &realtime), None);
+        assert_eq!(request_token(&subprotocol("bearer, "), &realtime), None);
+        // a bare token with no marker, and an unrelated subprotocol
+        assert_eq!(request_token(&subprotocol("jwt-here"), &realtime), None);
+        assert_eq!(request_token(&subprotocol("graphql-ws"), &realtime), None);
+        // the marker has to come first
+        assert_eq!(request_token(&subprotocol("jwt, bearer"), &realtime), None);
+        assert_eq!(request_token(&HeaderMap::new(), &realtime), None);
+    }
+
+    #[test]
+    fn query_string_is_never_a_credential() {
+        // the realtime handshake used to accept ?token=; it must not any more
         let headers = HeaderMap::new();
         assert_eq!(
             request_token(&headers, &uri("/api/v1/realtime/room-1?token=abc")),
-            Some("abc")
+            None
         );
-        // anywhere else a query string is not a credential
         assert_eq!(
             request_token(&headers, &uri("/api/v1/portal/items?token=abc")),
-            None
-        );
-        assert_eq!(
-            request_token(&headers, &uri("/api/v1/realtime/room-1?token=")),
-            None
-        );
-        assert_eq!(
-            request_token(&headers, &uri("/api/v1/realtime/room-1")),
             None
         );
     }
 
     #[test]
-    fn header_token_wins_over_the_query() {
-        let mut headers = HeaderMap::new();
+    fn header_token_wins_over_the_subprotocol() {
+        let mut headers = subprotocol("bearer, from-subprotocol");
         headers.insert("Authorization", "Bearer from-header".parse().unwrap());
         assert_eq!(
-            request_token(&headers, &uri("/api/v1/realtime/room-1?token=from-query")),
+            request_token(&headers, &uri("/api/v1/realtime/room-1")),
             Some("from-header")
         );
     }

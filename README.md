@@ -317,9 +317,18 @@ Tile data reads are anonymous: `tileset.json`, `tiles/{path}` and the
 `/api/v1/terrain/` quantized-mesh routes. Everything else needs
 `Authorization: Bearer <jwt>`, and writes need the editor or admin role.
 
-The realtime websocket needs any valid JWT. Browsers cannot set headers on a
-websocket handshake, so it also accepts `?token=<jwt>`, the only path where a
-query token is a credential.
+The realtime websocket needs any valid JWT. Browsers cannot set the
+Authorization header on a websocket handshake, so the token is offered as a
+subprotocol instead:
+
+```js
+new WebSocket(`ws://host/api/v1/realtime/${room}`, ["bearer", jwt])
+```
+
+That sends `Sec-WebSocket-Protocol: bearer, <jwt>`. The order is fixed, marker
+first. The 101 response echoes `Sec-WebSocket-Protocol: bearer`, never the token.
+Non-browser clients can send `Authorization: Bearer <jwt>` and offer no
+subprotocol. Query strings are never credentials.
 
 ---
 

@@ -1029,19 +1029,93 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    // a handshake request. into_client_request fills in the five required ws
+    // headers; `subprotocol` is the raw Sec-WebSocket-Protocol offer so a test
+    // can send a malformed one.
+    fn ws_request(
+        addr: std::net::SocketAddr,
+        path: &str,
+        subprotocol: Option<&str>,
+        bearer: Option<&str>,
+    ) -> tokio_tungstenite::tungstenite::http::Request<()> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::http::header::{AUTHORIZATION, HeaderName};
+
+        let mut req = format!("ws://{addr}{path}").into_client_request().unwrap();
+        if let Some(p) = subprotocol {
+            req.headers_mut().insert(
+                HeaderName::from_static("sec-websocket-protocol"),
+                p.parse().unwrap(),
+            );
+        }
+        if let Some(t) = bearer {
+            req.headers_mut()
+                .insert(AUTHORIZATION, format!("Bearer {t}").parse().unwrap());
+        }
+        req
+    }
+
+    fn room_request(
+        addr: std::net::SocketAddr,
+        subprotocol: Option<&str>,
+    ) -> tokio_tungstenite::tungstenite::http::Request<()> {
+        ws_request(addr, "/api/v1/realtime/room-1", subprotocol, None)
+    }
+
+    // the handshake a browser sends: new WebSocket(url, ["bearer", jwt])
+    fn bearer_offer(token: &str) -> String {
+        format!("bearer, {token}")
+    }
+
+    async fn expect_handshake_rejected(
+        addr: std::net::SocketAddr,
+        protocol: Option<&str>,
+        what: &str,
+    ) {
+        match tokio_tungstenite::connect_async(room_request(addr, protocol)).await {
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+                assert_eq!(resp.status().as_u16(), 401, "{what}");
+            }
+            Err(e) => panic!("{what}: expected an http rejection, got {e:?}"),
+            Ok(_) => panic!("{what}: must not upgrade"),
+        }
+    }
+
     #[tokio::test]
-    async fn realtime_anonymous_handshake_never_upgrades() {
+    async fn realtime_handshake_rejects_missing_and_bad_credentials() {
         let state = test_state().await;
+        let (token, _uid) = signup(&state, "collab-reject@example.com").await;
         let addr = serve(&state).await;
 
-        let attempt =
-            tokio_tungstenite::connect_async(format!("ws://{addr}/api/v1/realtime/room-1")).await;
-        match attempt {
+        expect_handshake_rejected(addr, None, "no credential").await;
+        expect_handshake_rejected(addr, Some("bearer, not-a-jwt"), "forged token").await;
+        // the marker alone carries no token
+        expect_handshake_rejected(addr, Some("bearer"), "marker only").await;
+        // a bare token with no marker is not the contract
+        expect_handshake_rejected(addr, Some(&token), "token without marker").await;
+        // an unrelated subprotocol is not a credential
+        expect_handshake_rejected(addr, Some("graphql-ws"), "wrong subprotocol").await;
+    }
+
+    #[tokio::test]
+    async fn realtime_query_string_token_is_rejected() {
+        let state = test_state().await;
+        let (token, _uid) = signup(&state, "collab-query@example.com").await;
+        let addr = serve(&state).await;
+
+        // a query string is not a credential on any path, including this one
+        let req = ws_request(
+            addr,
+            &format!("/api/v1/realtime/room-1?token={token}"),
+            None,
+            None,
+        );
+        match tokio_tungstenite::connect_async(req).await {
             Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
                 assert_eq!(resp.status().as_u16(), 401);
             }
             Err(e) => panic!("expected an http rejection, got {e:?}"),
-            Ok(_) => panic!("anonymous handshake must not upgrade"),
+            Ok(_) => panic!("a query-string token must not upgrade"),
         }
     }
 
@@ -1055,14 +1129,18 @@ mod tests {
         let (token, _uid) = signup(&state, "collab@example.com").await;
         let addr = serve(&state).await;
 
-        // a browser cannot set headers on a ws handshake, so the token rides the
-        // query string
-        let (mut ws, resp) = tokio_tungstenite::connect_async(format!(
-            "ws://{addr}/api/v1/realtime/room-1?token={token}"
-        ))
-        .await
-        .unwrap();
+        let (mut ws, resp) =
+            tokio_tungstenite::connect_async(room_request(addr, Some(&bearer_offer(&token))))
+                .await
+                .unwrap();
         assert_eq!(resp.status().as_u16(), 101);
+        // the marker is echoed so a browser accepts the upgrade, the token is not
+        assert_eq!(
+            resp.headers()
+                .get("sec-websocket-protocol")
+                .and_then(|v| v.to_str().ok()),
+            Some("bearer")
+        );
 
         ws.send(Message::Text(
             serde_json::json!({
@@ -1086,21 +1164,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn realtime_bad_token_rejected() {
+    async fn realtime_authorization_header_also_works() {
         let state = test_state().await;
+        let (token, _uid) = signup(&state, "collab-hdr@example.com").await;
         let addr = serve(&state).await;
 
-        let attempt = tokio_tungstenite::connect_async(format!(
-            "ws://{addr}/api/v1/realtime/room-1?token=not-a-jwt"
-        ))
-        .await;
-        match attempt {
-            Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
-                assert_eq!(resp.status().as_u16(), 401);
-            }
-            Err(e) => panic!("expected an http rejection, got {e:?}"),
-            Ok(_) => panic!("a forged token must not upgrade"),
-        }
+        // non-browser clients can use the header and offer no subprotocol
+        let req = ws_request(addr, "/api/v1/realtime/room-1", None, Some(&token));
+        let (_ws, resp) = tokio_tungstenite::connect_async(req).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 101);
+        // nothing was offered, so nothing is selected
+        assert!(resp.headers().get("sec-websocket-protocol").is_none());
     }
 
     // -- per-asset ownership --

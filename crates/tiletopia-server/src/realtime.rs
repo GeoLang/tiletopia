@@ -7,6 +7,23 @@
 //!
 //! The room id is whatever string the viewer joins on, usually an asset uuid.
 //! It is only ever a map key, never a path or a query.
+//!
+//! # Handshake contract
+//!
+//! A connection needs a valid JWT of any role. A browser cannot set the
+//! Authorization header on a WebSocket handshake, so the token is offered as a
+//! subprotocol instead:
+//!
+//! ```js
+//! new WebSocket(`ws://host/api/v1/realtime/${room}`, ["bearer", jwt])
+//! ```
+//!
+//! which sends `Sec-WebSocket-Protocol: bearer, <jwt>`. The order is fixed: the
+//! marker `bearer` first, the token second. The 101 response echoes
+//! `Sec-WebSocket-Protocol: bearer` and never the token. Non-browser clients may
+//! send `Authorization: Bearer <jwt>` instead and offer no subprotocol, in which
+//! case the response carries no subprotocol either. No credential, or one that
+//! does not validate, is 401 before the upgrade.
 
 use axum::{
     extract::{
@@ -209,7 +226,11 @@ pub async fn ws_handler(
     }
     let tx = state.realtime.get_or_create_channel(&room).await;
     let rx = tx.subscribe();
-    Ok(ws.on_upgrade(move |socket| handle_socket(socket, tx, rx, room, state)))
+    // echoing the marker is required for a browser to accept the 101; the token
+    // itself is never echoed
+    Ok(ws
+        .protocols([crate::auth::BEARER_SUBPROTOCOL])
+        .on_upgrade(move |socket| handle_socket(socket, tx, rx, room, state)))
 }
 
 async fn handle_socket(
