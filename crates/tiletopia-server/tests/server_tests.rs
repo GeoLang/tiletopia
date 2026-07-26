@@ -623,6 +623,10 @@ mod tests {
     // signup a user, promote to editor in the db, then log in for a token
     // carrying the editor role.
     async fn bootstrap_editor(state: &Arc<AppState>, email: &str) -> String {
+        bootstrap_editor_with_id(state, email).await.0
+    }
+
+    async fn bootstrap_editor_with_id(state: &Arc<AppState>, email: &str) -> (String, String) {
         let (_token, uid) = signup(state, email).await;
         let id = uuid::Uuid::parse_str(&uid).unwrap();
         let mut user = state.db.get_user(id).await.unwrap().unwrap();
@@ -630,7 +634,7 @@ mod tests {
         state.db.update_user(&user).await.unwrap();
         let (status, body) = login(state, email, "pw123456").await;
         assert_eq!(status, StatusCode::OK);
-        body["token"].as_str().unwrap().to_string()
+        (body["token"].as_str().unwrap().to_string(), uid)
     }
 
     async fn post_ion(
@@ -870,5 +874,151 @@ mod tests {
         // the editor gets past authz; the job itself may still fail on content
         let status = asset_write(&state, "POST", &uri, Some(&editor_token)).await;
         assert!(status != StatusCode::UNAUTHORIZED && status != StatusCode::FORBIDDEN);
+    }
+
+    // -- per-asset ownership --
+
+    #[test]
+    fn may_modify_asset_policy() {
+        use tiletopia_server::{auth::Claims, may_modify_asset};
+        let claims = |sub: &str, role: &str| Claims {
+            sub: sub.into(),
+            exp: 0,
+            role: role.into(),
+        };
+        let owner = claims("user-a", "editor");
+        let other = claims("user-b", "editor");
+        let admin = claims("user-c", "admin");
+
+        assert!(may_modify_asset(&owner, Some("user-a")));
+        assert!(!may_modify_asset(&other, Some("user-a")));
+        assert!(may_modify_asset(&admin, Some("user-a")));
+        // legacy rows have no owner and stay writable for any editor
+        assert!(may_modify_asset(&other, None));
+    }
+
+    #[tokio::test]
+    async fn upload_records_owner_id() {
+        let state = test_state().await;
+        let (editor_token, uid) = bootstrap_editor_with_id(&state, "own-create@example.com").await;
+        let (status, asset) = upload_glb(&state, Some(&editor_token)).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // owner_id is authz-internal and must not be exposed in the response
+        assert!(asset.get("owner_id").is_none(), "owner_id must not leak");
+
+        let id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+        let stored = state.db.get_asset(id).await.unwrap().unwrap();
+        assert_eq!(stored.owner_id.as_deref(), Some(uid.as_str()));
+    }
+
+    #[tokio::test]
+    async fn ion_create_records_owner_id() {
+        let state = test_state().await;
+        let (editor_token, uid) =
+            bootstrap_editor_with_id(&state, "own-ion-editor@example.com").await;
+        let status = post_ion(
+            &state,
+            "/v1/assets",
+            Some(&editor_token),
+            serde_json::json!({ "name": "owned", "type": "3DTILES" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let assets = state.db.list_assets().await.unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].owner_id.as_deref(), Some(uid.as_str()));
+    }
+
+    #[tokio::test]
+    async fn asset_delete_is_owner_or_admin_only() {
+        let state = test_state().await;
+        let owner_token = bootstrap_editor(&state, "own-del-owner@example.com").await;
+        let other_token = bootstrap_editor(&state, "own-del-other@example.com").await;
+
+        let (_s, asset) = upload_glb(&state, Some(&owner_token)).await;
+        let uri = format!("/api/v1/assets/{}", asset["id"].as_str().unwrap());
+
+        // a second editor is not trusted with someone else's asset
+        assert_eq!(
+            asset_write(&state, "DELETE", &uri, Some(&other_token)).await,
+            StatusCode::FORBIDDEN
+        );
+        let id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+        assert!(state.db.get_asset(id).await.unwrap().is_some());
+
+        // the owner can
+        assert_eq!(
+            asset_write(&state, "DELETE", &uri, Some(&owner_token)).await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(state.db.get_asset(id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn admin_can_delete_another_users_asset() {
+        let state = test_state().await;
+        let owner_token = bootstrap_editor(&state, "own-del-admin-owner@example.com").await;
+        let admin_token = bootstrap_admin(&state, "own-del-admin@example.com").await;
+
+        let (_s, asset) = upload_glb(&state, Some(&owner_token)).await;
+        let uri = format!("/api/v1/assets/{}", asset["id"].as_str().unwrap());
+        assert_eq!(
+            asset_write(&state, "DELETE", &uri, Some(&admin_token)).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_ownerless_asset_accepts_any_editor() {
+        use tiletopia_server::{Asset, AssetStatus, AssetType};
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "own-legacy-editor@example.com").await;
+
+        // a row from before owner_id existed
+        let asset = Asset {
+            id: uuid::Uuid::new_v4(),
+            name: "legacy.glb".into(),
+            asset_type: AssetType::Model,
+            status: AssetStatus::Ready,
+            created_at: chrono::Utc::now(),
+            tile_count: 0,
+            size_bytes: 0,
+            description: String::new(),
+            tags: vec![],
+            owner_id: None,
+        };
+        state.db.create_asset(&asset).await.unwrap();
+
+        let uri = format!("/api/v1/assets/{}", asset.id);
+        assert_eq!(
+            asset_write(&state, "DELETE", &uri, Some(&editor_token)).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn retile_is_owner_or_admin_only() {
+        let state = test_state().await;
+        let owner_token = bootstrap_editor(&state, "own-tile-owner@example.com").await;
+        let other_token = bootstrap_editor(&state, "own-tile-other@example.com").await;
+        let admin_token = bootstrap_admin(&state, "own-tile-admin@example.com").await;
+
+        let (_s, asset) = upload_glb(&state, Some(&owner_token)).await;
+        let uri = format!("/api/v1/assets/{}/tile", asset["id"].as_str().unwrap());
+
+        assert_eq!(
+            asset_write(&state, "POST", &uri, Some(&other_token)).await,
+            StatusCode::FORBIDDEN
+        );
+        // owner and admin get past authz; the job itself may still fail on content
+        for token in [&owner_token, &admin_token] {
+            let status = asset_write(&state, "POST", &uri, Some(token)).await;
+            assert!(
+                status != StatusCode::UNAUTHORIZED && status != StatusCode::FORBIDDEN,
+                "unexpected {status}"
+            );
+        }
     }
 }

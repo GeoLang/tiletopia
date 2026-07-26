@@ -141,6 +141,22 @@ pub struct Asset {
     pub description: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// JWT `sub` of the creator, `None` for rows created before ownership
+    /// existed. Never serialized: it is an internal authz field and would leak
+    /// user ids to every reader of the asset list.
+    #[serde(default, skip_serializing)]
+    pub owner_id: Option<String>,
+}
+
+/// Whether these claims may run a destructive write on an asset with this
+/// owner. Admins may touch anything; a `None` owner is a legacy row from
+/// before ownership existed, so any caller that got past the Edit-tier gate
+/// may modify it.
+pub fn may_modify_asset(claims: &auth::Claims, owner_id: Option<&str>) -> bool {
+    match owner_id {
+        None => true,
+        Some(owner) => claims.role == "admin" || owner == claims.sub,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -337,7 +353,19 @@ async fn get_asset(
 async fn delete_asset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
+    let asset = state
+        .db
+        .get_asset(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let claims = users::claims_from_headers(&headers)?;
+    if !may_modify_asset(&claims, asset.owner_id.as_deref()) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     state
         .db
         .delete_asset(id)
@@ -387,14 +415,18 @@ async fn get_tile(
 async fn start_tiling(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
 ) -> Result<(StatusCode, Json<db::JobRecord>), StatusCode> {
-    // Check asset exists
-    state
+    let asset = state
         .db
         .get_asset(id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    let claims = users::claims_from_headers(&headers)?;
+    if !may_modify_asset(&claims, asset.owner_id.as_deref()) {
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     // Find the input file
     let input_dir = state.data_dir.join(id.to_string()).join("input");

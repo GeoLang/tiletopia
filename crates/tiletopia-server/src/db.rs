@@ -105,11 +105,25 @@ impl Database {
                 tile_count INTEGER DEFAULT 0,
                 size_bytes INTEGER DEFAULT 0,
                 description TEXT DEFAULT '',
-                tags TEXT DEFAULT '[]'
+                tags TEXT DEFAULT '[]',
+                owner_id TEXT
             )",
         )
         .execute(&self.pool)
         .await?;
+
+        // assets predates owner_id, so existing databases need it added. sqlite
+        // has no ADD COLUMN IF NOT EXISTS; rows created before this stay NULL.
+        let has_owner_id =
+            sqlx::query("SELECT 1 FROM pragma_table_info('assets') WHERE name = 'owner_id'")
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some();
+        if !has_owner_id {
+            sqlx::query("ALTER TABLE assets ADD COLUMN owner_id TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS jobs (
@@ -242,8 +256,8 @@ impl Database {
         let tags = serde_json::to_string(&asset.tags).unwrap_or_else(|_| "[]".into());
 
         sqlx::query(
-            "INSERT INTO assets (id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO assets (id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&asset.name)
@@ -254,6 +268,7 @@ impl Database {
         .bind(asset.size_bytes as i64)
         .bind(&asset.description)
         .bind(&tags)
+        .bind(&asset.owner_id)
         .execute(&self.pool)
         .await?;
 
@@ -262,7 +277,7 @@ impl Database {
 
     pub async fn get_asset(&self, id: Uuid) -> Result<Option<Asset>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags FROM assets WHERE id = ?",
+            "SELECT id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id FROM assets WHERE id = ?",
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -273,7 +288,7 @@ impl Database {
 
     pub async fn list_assets(&self) -> Result<Vec<Asset>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags FROM assets ORDER BY created_at DESC",
+            "SELECT id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id FROM assets ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -287,6 +302,8 @@ impl Database {
         let status = enum_to_str(&asset.status);
         let tags = serde_json::to_string(&asset.tags).unwrap_or_else(|_| "[]".into());
 
+        // owner_id is set once at create and deliberately left out here, so an
+        // update carrying a stale Asset can never reassign or clear ownership
         sqlx::query(
             "UPDATE assets SET name = ?, asset_type = ?, status = ?, tile_count = ?, size_bytes = ?, description = ?, tags = ? WHERE id = ?",
         )
@@ -610,7 +627,7 @@ impl Database {
 
     pub async fn recent_assets(&self, limit: u32) -> Result<Vec<Asset>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags FROM assets ORDER BY created_at DESC LIMIT ?",
+            "SELECT id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id FROM assets ORDER BY created_at DESC LIMIT ?",
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -640,7 +657,7 @@ impl Database {
         status: Option<&str>,
     ) -> Result<Vec<Asset>, sqlx::Error> {
         let mut sql = String::from(
-            "SELECT id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags FROM assets WHERE 1=1",
+            "SELECT id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id FROM assets WHERE 1=1",
         );
         let mut binds: Vec<String> = Vec::new();
 
@@ -997,6 +1014,7 @@ fn row_to_asset(row: &sqlx::sqlite::SqliteRow) -> Asset {
         size_bytes: row.get::<i64, _>("size_bytes") as u64,
         description: row.get("description"),
         tags: serde_json::from_str(&tags_str).unwrap_or_default(),
+        owner_id: row.get("owner_id"),
     }
 }
 

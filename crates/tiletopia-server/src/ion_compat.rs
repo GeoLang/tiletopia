@@ -190,8 +190,12 @@ async fn get_asset(
 
 async fn create_asset(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<CreateIonAssetRequest>,
 ) -> Result<(StatusCode, Json<IonAsset>), StatusCode> {
+    // the route sits behind require_editor, so a valid token is always present
+    let owner_id = users::claims_from_headers(&headers)?.sub;
+
     let asset_type = match req.asset_type.as_deref() {
         Some("3DTILES") => AssetType::Model,
         Some("TERRAIN") => AssetType::Terrain,
@@ -209,6 +213,7 @@ async fn create_asset(
         size_bytes: 0,
         description: req.description,
         tags: Vec::new(),
+        owner_id: Some(owner_id),
     };
 
     state

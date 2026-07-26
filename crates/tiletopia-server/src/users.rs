@@ -177,8 +177,13 @@ fn create_jwt(user: &User) -> Result<String, StatusCode> {
 }
 
 pub fn extract_claims(request: &Request) -> Result<Claims, StatusCode> {
-    let auth_header = request
-        .headers()
+    claims_from_headers(request.headers())
+}
+
+/// Same check as [`extract_claims`] against bare headers, for handlers that
+/// take a body extractor and so cannot take the whole `Request`.
+pub fn claims_from_headers(headers: &axum::http::HeaderMap) -> Result<Claims, StatusCode> {
+    let auth_header = headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::UNAUTHORIZED)?;

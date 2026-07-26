@@ -2,19 +2,23 @@
 
 use axum::{
     extract::{Multipart, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::Json,
 };
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AppState, Asset, AssetStatus, AssetType};
+use crate::{AppState, Asset, AssetStatus, AssetType, users};
 
 /// Handle multipart file upload.
 pub async fn upload_asset(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<Asset>), StatusCode> {
+    // the route sits behind require_editor, so a valid token is always present
+    let owner_id = users::claims_from_headers(&headers)?.sub;
+
     let mut name = None;
     let mut data = None;
 
@@ -70,6 +74,7 @@ pub async fn upload_asset(
         size_bytes: file_data.len() as u64,
         description: String::new(),
         tags: vec![],
+        owner_id: Some(owner_id),
     };
 
     state

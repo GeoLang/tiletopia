@@ -427,8 +427,15 @@ async fn get_dataset(
 async fn add_dataset(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(dataset_id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<AddDatasetRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), axum::http::StatusCode> {
+    // this route carries no role gate, so an unauthenticated run leaves the
+    // asset ownerless rather than failing the request
+    let owner_id = crate::users::claims_from_headers(&headers)
+        .ok()
+        .map(|c| c.sub);
+
     let dataset = state
         .catalog
         .get(&dataset_id)
@@ -459,6 +466,7 @@ async fn add_dataset(
             dataset.name, req.bounds.west, req.bounds.south, req.bounds.east, req.bounds.north
         ),
         tags: vec!["catalog".into(), dataset.category_str()],
+        owner_id,
     };
 
     state
