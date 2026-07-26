@@ -24,10 +24,17 @@
 //! send `Authorization: Bearer <jwt>` instead and offer no subprotocol, in which
 //! case the response carries no subprotocol either. No credential, or one that
 //! does not validate, is 401 before the upgrade.
+//!
+//! # Identity
+//!
+//! Every message a client sends is re-serialized with `user_id` set to the JWT
+//! `sub` before it reaches anyone else, so a room member cannot act as another
+//! member. A client's own `user_id` is ignored, including in the echo it gets
+//! back. `user_name` stays client-chosen: it is a display label, not identity.
 
 use axum::{
     extract::{
-        Path, Request, State,
+        Extension, Path, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
@@ -39,7 +46,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 
-use crate::AppState;
+use crate::{AppState, auth::Claims};
 
 // ─── Collaboration message types ─────────────────────────────────────────────
 
@@ -74,6 +81,24 @@ pub enum CollabMessage {
         user_id: String,
         camera: CameraPosition,
     },
+}
+
+impl CollabMessage {
+    /// Force the sender id to the authenticated subject, so nothing a client
+    /// claims about who it is survives. `user_name` is left alone: it is a
+    /// display label the client picks, not identity.
+    fn with_sender(mut self, sub: &str) -> Self {
+        match &mut self {
+            CollabMessage::Join { user_id, .. }
+            | CollabMessage::Leave { user_id, .. }
+            | CollabMessage::Cursor { user_id, .. }
+            | CollabMessage::Chat { user_id, .. }
+            | CollabMessage::ViewChanged { user_id, .. } => *user_id = sub.to_string(),
+            // server-originated, a client never sends one
+            CollabMessage::Presence { .. } => {}
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,10 +233,12 @@ const MAX_ROOM_ID_LEN: usize = 128;
 /// happens before the upgrade handshake is looked at, and so it holds even in
 /// the no-secret development mode where [`crate::auth::auth_middleware`] passes
 /// everything through.
-pub async fn require_room_join(request: Request, next: Next) -> Result<Response, StatusCode> {
+pub async fn require_room_join(mut request: Request, next: Next) -> Result<Response, StatusCode> {
     let token = crate::auth::request_token(request.headers(), request.uri())
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    crate::users::claims_from_token(token)?;
+    let claims = crate::users::claims_from_token(token)?;
+    // the handler stamps every message with these claims
+    request.extensions_mut().insert(claims);
     Ok(next.run(request).await)
 }
 
@@ -219,6 +246,7 @@ pub async fn require_room_join(request: Request, next: Next) -> Result<Response,
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Path(room): Path<String>,
+    Extension(claims): Extension<Claims>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Response, StatusCode> {
     if room.len() > MAX_ROOM_ID_LEN {
@@ -230,7 +258,15 @@ pub async fn ws_handler(
     // itself is never echoed
     Ok(ws
         .protocols([crate::auth::BEARER_SUBPROTOCOL])
-        .on_upgrade(move |socket| handle_socket(socket, tx, rx, room, state)))
+        .on_upgrade(move |socket| handle_socket(socket, tx, rx, room, claims.sub, state)))
+}
+
+/// Send the room's presence list to everyone in it.
+async fn broadcast_presence(tx: &broadcast::Sender<String>, state: &AppState, room: &str) {
+    let users = state.realtime.presence.get_presence(room).await;
+    if let Ok(json) = serde_json::to_string(&CollabMessage::Presence { users }) {
+        let _ = tx.send(json);
+    }
 }
 
 async fn handle_socket(
@@ -238,9 +274,10 @@ async fn handle_socket(
     tx: broadcast::Sender<String>,
     mut rx: broadcast::Receiver<String>,
     room: String,
+    sub: String,
     state: Arc<AppState>,
 ) {
-    let mut current_user_id: Option<String> = None;
+    let mut joined = false;
 
     loop {
         tokio::select! {
@@ -262,30 +299,26 @@ async fn handle_socket(
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(collab_msg) = serde_json::from_str::<CollabMessage>(&text) {
+                            // the client's own idea of who it is never leaves this line
+                            let collab_msg = collab_msg.with_sender(&sub);
                             match &collab_msg {
-                                CollabMessage::Join { user_id, user_name, .. } => {
-                                    state.realtime.presence.join(&room, user_id, user_name).await;
-                                    current_user_id = Some(user_id.clone());
-                                    // Broadcast presence update
-                                    let users = state.realtime.presence.get_presence(&room).await;
-                                    let presence_msg = CollabMessage::Presence { users };
-                                    if let Ok(json) = serde_json::to_string(&presence_msg) {
-                                        let _ = tx.send(json);
-                                    }
+                                CollabMessage::Join { user_name, .. } => {
+                                    state.realtime.presence.join(&room, &sub, user_name).await;
+                                    joined = true;
+                                    broadcast_presence(&tx, &state, &room).await;
                                 }
-                                CollabMessage::Leave { user_id, .. } => {
-                                    state.realtime.presence.leave(&room, user_id).await;
-                                    let users = state.realtime.presence.get_presence(&room).await;
-                                    let presence_msg = CollabMessage::Presence { users };
-                                    if let Ok(json) = serde_json::to_string(&presence_msg) {
-                                        let _ = tx.send(json);
-                                    }
+                                CollabMessage::Leave { .. } => {
+                                    state.realtime.presence.leave(&room, &sub).await;
+                                    joined = false;
+                                    broadcast_presence(&tx, &state, &room).await;
                                 }
                                 CollabMessage::Cursor { .. }
                                 | CollabMessage::Chat { .. }
                                 | CollabMessage::ViewChanged { .. } => {
-                                    // Broadcast to all other clients
-                                    let _ = tx.send(text.to_string());
+                                    // rebroadcast the stamped message, never the client's text
+                                    if let Ok(json) = serde_json::to_string(&collab_msg) {
+                                        let _ = tx.send(json);
+                                    }
                                 }
                                 CollabMessage::Presence { .. } => {
                                     // Server-originated only, ignore from clients
@@ -302,12 +335,8 @@ async fn handle_socket(
     }
 
     // Clean up presence on disconnect
-    if let Some(user_id) = current_user_id {
-        state.realtime.presence.leave(&room, &user_id).await;
-        let users = state.realtime.presence.get_presence(&room).await;
-        let presence_msg = CollabMessage::Presence { users };
-        if let Ok(json) = serde_json::to_string(&presence_msg) {
-            state.realtime.push_update(&room, json).await;
-        }
+    if joined {
+        state.realtime.presence.leave(&room, &sub).await;
+        broadcast_presence(&tx, &state, &room).await;
     }
 }

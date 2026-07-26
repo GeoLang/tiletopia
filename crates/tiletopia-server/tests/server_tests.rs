@@ -1103,7 +1103,7 @@ mod tests {
         let (token, _uid) = signup(&state, "collab-query@example.com").await;
         let addr = serve(&state).await;
 
-        // a query string is not a credential on any path, including this one
+        // ?token= used to authenticate here; it must not any more
         let req = ws_request(
             addr,
             &format!("/api/v1/realtime/room-1?token={token}"),
@@ -1126,7 +1126,7 @@ mod tests {
 
         let state = test_state().await;
         // a plain signup is a viewer, which is enough to join a room
-        let (token, _uid) = signup(&state, "collab@example.com").await;
+        let (token, uid) = signup(&state, "collab@example.com").await;
         let addr = serve(&state).await;
 
         let (mut ws, resp) =
@@ -1145,7 +1145,7 @@ mod tests {
         ws.send(Message::Text(
             serde_json::json!({
                 "type": "Join",
-                "user_id": "u1",
+                "user_id": "self-assigned-id",
                 "asset_id": "room-1",
                 "user_name": "Ann",
             })
@@ -1155,11 +1155,12 @@ mod tests {
         .await
         .unwrap();
 
-        // the server answers a join by broadcasting the room presence list
+        // the server answers a join by broadcasting the room presence list, with
+        // the id taken from the token rather than the one the client picked
         let msg = ws.next().await.unwrap().unwrap();
         let v: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
         assert_eq!(v["type"], "Presence");
-        assert_eq!(v["users"][0]["user_id"], "u1");
+        assert_eq!(v["users"][0]["user_id"], uid);
         assert_eq!(v["users"][0]["user_name"], "Ann");
     }
 
@@ -1175,6 +1176,71 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 101);
         // nothing was offered, so nothing is selected
         assert!(resp.headers().get("sec-websocket-protocol").is_none());
+    }
+
+    #[tokio::test]
+    async fn realtime_sender_cannot_impersonate_another_member() {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let state = test_state().await;
+        let (token_a, uid_a) = signup(&state, "collab-a@example.com").await;
+        let (token_b, uid_b) = signup(&state, "collab-b@example.com").await;
+        assert_ne!(uid_a, uid_b);
+        let addr = serve(&state).await;
+
+        let (mut a, _) =
+            tokio_tungstenite::connect_async(room_request(addr, Some(&bearer_offer(&token_a))))
+                .await
+                .unwrap();
+        let (mut b, _) =
+            tokio_tungstenite::connect_async(room_request(addr, Some(&bearer_offer(&token_b))))
+                .await
+                .unwrap();
+
+        // A joins claiming to be B
+        a.send(Message::Text(
+            serde_json::json!({
+                "type": "Join",
+                "user_id": uid_b,
+                "asset_id": "room-1",
+                "user_name": "Impostor",
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        // B sees the presence entry attributed to A, not to itself
+        let msg = b.next().await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert_eq!(v["type"], "Presence");
+        assert_eq!(v["users"].as_array().unwrap().len(), 1);
+        assert_eq!(v["users"][0]["user_id"], uid_a);
+
+        // and a chat claiming B's id is rebroadcast under A's real sub
+        a.send(Message::Text(
+            serde_json::json!({
+                "type": "Chat",
+                "user_id": uid_b,
+                "user_name": "Impostor",
+                "message": "transfer the assets",
+                "timestamp": "2026-07-26T00:00:00Z",
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        let msg = b.next().await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert_eq!(v["type"], "Chat");
+        assert_eq!(v["user_id"], uid_a, "sender id must come from the token");
+        assert_eq!(v["message"], "transfer the assets");
+        // the display name is the client's to choose, only the id is stamped
+        assert_eq!(v["user_name"], "Impostor");
     }
 
     // -- per-asset ownership --

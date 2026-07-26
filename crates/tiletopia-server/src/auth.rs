@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 pub const MIN_SECRET_LEN: usize = 32;
 
 /// JWT claims.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
     pub exp: usize,

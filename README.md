@@ -330,6 +330,10 @@ first. The 101 response echoes `Sec-WebSocket-Protocol: bearer`, never the token
 Non-browser clients can send `Authorization: Bearer <jwt>` and offer no
 subprotocol. Query strings are never credentials.
 
+The server stamps every collaboration message with the sender's JWT `sub` as
+`user_id` before rebroadcasting it, so a client's own `user_id` is ignored.
+`user_name` stays client-chosen.
+
 ---
 
 ## GPU Acceleration
