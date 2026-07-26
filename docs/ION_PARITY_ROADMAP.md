@@ -6,7 +6,7 @@ Tiletopia has **real, working** code for:
 - Point cloud tiling pipeline (LAS/LAZ/E57/PLY → octree → .pnts 3D Tiles)
 - 20+ format readers (point clouds, meshes, terrain, vector)
 - Quantized-mesh terrain generation from heightmaps
-- HTTP tile server (Axum) with JWT auth, streaming upload, Prometheus metrics
+- HTTP tile server (Axum) with JWT auth, multipart upload, Prometheus metrics
 - Storage backends (local, S3, GCS, Azure) with hot/cold tiering
 - CesiumJS/deck.gl/MapLibre web viewer with asset management
 - Implicit tiling, Draco/meshopt compression

@@ -69,7 +69,6 @@ pub mod stac;
 pub mod static_map;
 pub mod stories;
 pub mod stories_api;
-pub mod streaming;
 pub mod temporal;
 pub mod tenant;
 pub mod terrain_analysis;
@@ -202,18 +201,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/assets/{id}/tile",
             axum::routing::post(start_tiling),
-        )
-        .route(
-            "/api/v1/assets/{id}/upload/init",
-            axum::routing::post(streaming::init_streaming_upload),
-        )
-        .route(
-            "/api/v1/assets/{id}/upload/chunk",
-            axum::routing::post(streaming::upload_chunk),
-        )
-        .route(
-            "/api/v1/assets/{id}/upload/complete",
-            axum::routing::post(streaming::complete_streaming_upload),
         )
         .layer(middleware::from_fn(users::require_editor));
 

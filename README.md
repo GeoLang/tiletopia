@@ -354,7 +354,6 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 | **Custom CRS / reprojection** | ✅ | ❌ |
 | **Diff-based incremental tiling** | ✅ | ❌ |
 | **Native BIM/IFC with metadata** | ✅ | ❌ |
-| **Streaming upload (no file size limit)** | ✅ | ❌ |
 | **Multi-tenant isolation** | ✅ | ❌ |
 | **3D annotation layers** | ✅ | ❌ |
 | **Offline viewer export (USB delivery)** | ✅ | ❌ |
