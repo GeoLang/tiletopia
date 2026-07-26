@@ -70,8 +70,8 @@ async fn terrain_layer_info() -> impl IntoResponse {
 /// Serve a terrain tile as quantized-mesh binary.
 ///
 /// If local DEM data is available, generates high-quality terrain from it.
-/// Falls back to downloading SRTM tiles via DemCache if no local data exists.
-/// Returns a flat tile as last resort.
+/// Falls back to downloading a bounded set of SRTM tiles via DemCache if no
+/// local data exists. Returns a flat tile as last resort.
 async fn serve_terrain_tile(
     State(state): State<Arc<AppState>>,
     Path((z, x, y)): Path<(u32, u32, u32)>,
@@ -92,10 +92,7 @@ async fn serve_terrain_tile(
     if dem_tiles.is_empty() {
         let cache_dir = state.data_dir.join("dem_cache");
         let cache = tiletopia_terrain::dem_cache::DemCache::new(cache_dir);
-        let required = tiletopia_terrain::dem_cache::required_srtm_tiles(
-            bounds[0], bounds[1], bounds[2], bounds[3],
-        );
-        for (lat, lon) in required {
+        for (lat, lon) in srtm_tiles_to_fetch(bounds) {
             match cache.get_srtm_tile(lat, lon).await {
                 Ok(hgt_path) => {
                     if let Ok(hm) = tiletopia_ingest::hgt_reader::read(&hgt_path) {
@@ -138,6 +135,31 @@ async fn serve_terrain_tile(
     );
 
     Ok((headers, qm_bytes))
+}
+
+/// Most one-degree SRTM tiles a single terrain request may pull from upstream.
+///
+/// These reads are anonymous, and a low-zoom terrain tile covers tens of
+/// thousands of one-degree cells, so an unbounded fetch turns one GET into a
+/// multi-terabyte download loop. Above the bound the request renders from local
+/// DEM or flat terrain instead, which is what a wide tile did in practice
+/// anyway: it never finished.
+const MAX_SRTM_TILES_PER_REQUEST: usize = 16;
+
+/// SRTM tiles to fetch for these bounds, empty when the area is too wide to
+/// serve from upstream downloads.
+fn srtm_tiles_to_fetch(bounds: [f64; 4]) -> Vec<(i32, i32)> {
+    let required = tiletopia_terrain::dem_cache::required_srtm_tiles(
+        bounds[0], bounds[1], bounds[2], bounds[3],
+    );
+    if required.len() > MAX_SRTM_TILES_PER_REQUEST {
+        tracing::debug!(
+            "terrain tile spans {} SRTM tiles, over the {MAX_SRTM_TILES_PER_REQUEST} fetch bound",
+            required.len()
+        );
+        return Vec::new();
+    }
+    required
 }
 
 /// Load DEM tiles from disk for the given bounds.
@@ -399,6 +421,36 @@ mod tests {
             available: vec![],
         };
         assert_eq!(info.maxzoom, 15);
+    }
+
+    #[test]
+    fn wide_tiles_do_not_fetch_srtm() {
+        // zoom 0 spans the globe: ~62k one-degree tiles, so nothing is fetched
+        let world = TerrainTileCoord {
+            zoom: 0,
+            x: 0,
+            y: 0,
+        };
+        assert!(srtm_tiles_to_fetch(world.bounds()).is_empty());
+
+        let zoom_4 = TerrainTileCoord {
+            zoom: 4,
+            x: 8,
+            y: 5,
+        };
+        assert!(srtm_tiles_to_fetch(zoom_4.bounds()).is_empty());
+    }
+
+    #[test]
+    fn narrow_tiles_fetch_a_bounded_set() {
+        let coord = TerrainTileCoord {
+            zoom: 12,
+            x: 2200,
+            y: 1400,
+        };
+        let tiles = srtm_tiles_to_fetch(coord.bounds());
+        assert!(!tiles.is_empty());
+        assert!(tiles.len() <= MAX_SRTM_TILES_PER_REQUEST);
     }
 
     #[test]
