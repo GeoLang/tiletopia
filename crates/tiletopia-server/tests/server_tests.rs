@@ -745,4 +745,181 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CREATED);
     }
+
+    // -- native asset write auth --
+
+    // send a bodyless native asset write and return just the status.
+    async fn asset_write(
+        state: &Arc<AppState>,
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+    ) -> StatusCode {
+        let mut req = Request::builder().method(method).uri(uri);
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        router(Arc::clone(state))
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    // multipart upload of a tiny .glb, which detects as Model so no tiling job
+    // is queued by the upload itself.
+    async fn upload_glb(
+        state: &Arc<AppState>,
+        token: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let boundary = "tiletopiatestboundary";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
+             filename=\"t.glb\"\r\n\r\nglTF-bytes\r\n--{boundary}--\r\n"
+        );
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/assets")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            );
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        let resp = router(Arc::clone(state))
+            .oneshot(req.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, v)
+    }
+
+    #[tokio::test]
+    async fn native_create_asset_anonymous_rejected() {
+        let state = test_state().await;
+        let (status, _) = upload_glb(&state, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn native_create_asset_viewer_forbidden() {
+        let state = test_state().await;
+        let (viewer_token, _) = signup(&state, "native-viewer@example.com").await;
+        let (status, _) = upload_glb(&state, Some(&viewer_token)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn native_create_asset_editor_succeeds() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "native-editor@example.com").await;
+        let (status, asset) = upload_glb(&state, Some(&editor_token)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(asset["id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn native_delete_asset_requires_editor() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "native-del-editor@example.com").await;
+        let (status, asset) = upload_glb(&state, Some(&editor_token)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let uri = format!("/api/v1/assets/{}", asset["id"].as_str().unwrap());
+
+        assert_eq!(
+            asset_write(&state, "DELETE", &uri, None).await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let (viewer_token, _) = signup(&state, "native-del-viewer@example.com").await;
+        assert_eq!(
+            asset_write(&state, "DELETE", &uri, Some(&viewer_token)).await,
+            StatusCode::FORBIDDEN
+        );
+
+        assert_eq!(
+            asset_write(&state, "DELETE", &uri, Some(&editor_token)).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn native_start_tiling_requires_editor() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "native-tile-editor@example.com").await;
+        let (status, asset) = upload_glb(&state, Some(&editor_token)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let uri = format!("/api/v1/assets/{}/tile", asset["id"].as_str().unwrap());
+
+        assert_eq!(
+            asset_write(&state, "POST", &uri, None).await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let (viewer_token, _) = signup(&state, "native-tile-viewer@example.com").await;
+        assert_eq!(
+            asset_write(&state, "POST", &uri, Some(&viewer_token)).await,
+            StatusCode::FORBIDDEN
+        );
+
+        // the editor gets past authz; the job itself may still fail on content
+        let status = asset_write(&state, "POST", &uri, Some(&editor_token)).await;
+        assert!(status != StatusCode::UNAUTHORIZED && status != StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn native_streaming_upload_requires_editor() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "native-stream-editor@example.com").await;
+        let (viewer_token, _) = signup(&state, "native-stream-viewer@example.com").await;
+
+        // init creates the session and the on-disk upload file
+        let init_uri = "/api/v1/assets/00000000-0000-0000-0000-000000000000/upload/init";
+        assert_eq!(
+            asset_write(&state, "POST", init_uri, None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            asset_write(&state, "POST", init_uri, Some(&viewer_token)).await,
+            StatusCode::FORBIDDEN
+        );
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(init_uri)
+                    .header("authorization", format!("Bearer {editor_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let init: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let asset_id = init["asset_id"].as_str().unwrap();
+
+        for suffix in ["upload/chunk", "upload/complete"] {
+            let uri = format!("/api/v1/assets/{asset_id}/{suffix}");
+            assert_eq!(
+                asset_write(&state, "POST", &uri, None).await,
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                asset_write(&state, "POST", &uri, Some(&viewer_token)).await,
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(
+                asset_write(&state, "POST", &uri, Some(&editor_token)).await,
+                StatusCode::OK
+            );
+        }
+    }
 }

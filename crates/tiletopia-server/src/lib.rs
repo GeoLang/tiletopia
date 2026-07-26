@@ -193,28 +193,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .layer(middleware::from_fn(users::require_admin));
 
-    Router::new()
-        .route(
-            "/api/v1/assets",
-            get(list_assets).post(upload::upload_asset),
-        )
-        .route("/api/v1/assets/{id}", get(get_asset).delete(delete_asset))
-        .route("/api/v1/assets/{id}/tileset.json", get(get_tileset))
-        .route("/api/v1/assets/{id}/tiles/{path}", get(get_tile))
-        .route("/api/v1/assets/{id}/thumbnail", get(get_thumbnail))
+    // Native asset writes — Edit tier, same gate as the Ion-compat
+    // POST /v1/assets so an upload cannot be done at viewer level by going
+    // through the native API instead. Asset reads stay on the main router.
+    let asset_write_routes = Router::new()
+        .route("/api/v1/assets", axum::routing::post(upload::upload_asset))
+        .route("/api/v1/assets/{id}", axum::routing::delete(delete_asset))
         .route(
             "/api/v1/assets/{id}/tile",
             axum::routing::post(start_tiling),
         )
-        .route(
-            "/api/v1/assets/{id}/annotations",
-            get(list_annotations).post(create_annotation),
-        )
-        .route(
-            "/api/v1/assets/{id}/annotations/{annotation_id}",
-            axum::routing::delete(delete_annotation),
-        )
-        .route("/api/v1/jobs/{id}", get(get_job_status))
         .route(
             "/api/v1/assets/{id}/upload/init",
             axum::routing::post(streaming::init_streaming_upload),
@@ -227,7 +215,25 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/v1/assets/{id}/upload/complete",
             axum::routing::post(streaming::complete_streaming_upload),
         )
+        .layer(middleware::from_fn(users::require_editor));
+
+    Router::new()
+        .route("/api/v1/assets", get(list_assets))
+        .route("/api/v1/assets/{id}", get(get_asset))
+        .route("/api/v1/assets/{id}/tileset.json", get(get_tileset))
+        .route("/api/v1/assets/{id}/tiles/{path}", get(get_tile))
+        .route("/api/v1/assets/{id}/thumbnail", get(get_thumbnail))
+        .route(
+            "/api/v1/assets/{id}/annotations",
+            get(list_annotations).post(create_annotation),
+        )
+        .route(
+            "/api/v1/assets/{id}/annotations/{annotation_id}",
+            axum::routing::delete(delete_annotation),
+        )
+        .route("/api/v1/jobs/{id}", get(get_job_status))
         .route("/api/v1/users/me", get(users::get_me).put(users::update_me))
+        .merge(asset_write_routes)
         .merge(admin_routes)
         .merge(org_routes)
         .route("/api/v1/health", get(health))
