@@ -129,6 +129,76 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    // -- terrain reads --
+    //
+    // the exemption rule itself is unit-tested in auth::tests (the middleware
+    // only enforces when TILETOPIA_JWT_SECRET is set, which a test cannot do
+    // without racing every other test in the process). these two cover that the
+    // routes exist and answer a tokenless GET.
+
+    #[tokio::test]
+    async fn terrain_layer_json_anonymous_ok() {
+        let state = test_state().await;
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/terrain/layer.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["tiles"][0], "/api/v1/terrain/{z}/{x}/{y}");
+    }
+
+    #[tokio::test]
+    async fn terrain_tile_anonymous_ok() {
+        use tiletopia_terrain::global_dem::{TerrainTileCoord, required_dem_tiles};
+
+        let state = test_state().await;
+
+        // seed a local DEM so the handler never reaches for SRTM over the network
+        let coord = TerrainTileCoord {
+            zoom: 12,
+            x: 2200,
+            y: 1400,
+        };
+        let dem_dir = state.data_dir.join("dem");
+        std::fs::create_dir_all(&dem_dir).unwrap();
+        let elevations: Vec<u8> = (0..16u32 * 16)
+            .flat_map(|i| (i as f32).to_le_bytes())
+            .collect();
+        for (lat, lon) in required_dem_tiles(coord.bounds()) {
+            std::fs::write(dem_dir.join(format!("{lat}_{lon}.bin")), &elevations).unwrap();
+        }
+
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/terrain/12/2200/1400")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/vnd.quantized-mesh")
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(bytes.len() > 88, "quantized mesh header plus vertex data");
+    }
+
     // signs up a user and returns (bearer_token, user_id).
     async fn signup(state: &Arc<AppState>, email: &str) -> (String, String) {
         let body =

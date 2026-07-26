@@ -1,6 +1,11 @@
 //! JWT authentication middleware.
 
-use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
+use axum::{
+    extract::Request,
+    http::{Method, StatusCode},
+    middleware::Next,
+    response::Response,
+};
 use jsonwebtoken::{DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +64,27 @@ pub fn check_secret(secret: Option<&str>, auth_disabled: bool) -> Result<(), Str
     Ok(())
 }
 
+/// Whether this request is an anonymous tile-DATA read. CesiumJS and deck.gl
+/// fetch these with no Authorization header, so they stay open.
+///
+/// GET only, so the mutating `POST /v1/assets` and `POST /v1/tokens` stay
+/// behind auth. Anything not listed here is protected by default.
+pub fn is_public_read(method: &Method, path: &str) -> bool {
+    if *method != Method::GET {
+        return false;
+    }
+    path.contains("/tileset.json")
+        || path.contains("/tiles/")
+        // quantized-mesh terrain: layer.json plus the {z}/{x}/{y} tiles it
+        // advertises. same data tier as tileset.json. the trailing slash keeps
+        // the /api/v1/terrain-analysis/ compute routes gated.
+        || path.starts_with("/api/v1/terrain/")
+        // the /v1/* entries are the Ion-compat read routes
+        || path == "/v1/assets"
+        || path == "/v1/tokens"
+        || path.starts_with("/v1/assets/")
+}
+
 /// Auth middleware — extracts and validates JWT from Authorization header.
 /// If `TILETOPIA_JWT_SECRET` is not set, auth is disabled (open access);
 /// [`startup_check`] is what keeps the serve path from reaching that state by
@@ -86,17 +112,7 @@ pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, S
         return Ok(next.run(request).await);
     }
 
-    // GET requests to tile data are public (CesiumJS needs unauthenticated access).
-    // The /v1/* entries are the Ion-compat read routes; only GET is exempt, so the
-    // mutating POST /v1/assets and POST /v1/tokens stay behind auth. A new /v1/ route
-    // is protected by default unless added here explicitly.
-    if request.method() == axum::http::Method::GET
-        && (request.uri().path().contains("/tileset.json")
-            || request.uri().path().contains("/tiles/")
-            || request.uri().path() == "/v1/assets"
-            || request.uri().path() == "/v1/tokens"
-            || request.uri().path().starts_with("/v1/assets/"))
-    {
+    if is_public_read(request.method(), request.uri().path()) {
         return Ok(next.run(request).await);
     }
 
@@ -147,5 +163,50 @@ mod tests {
     #[test]
     fn explicit_opt_out_starts_without_secret() {
         assert!(check_secret(None, true).is_ok());
+    }
+
+    #[test]
+    fn tile_data_reads_are_public() {
+        assert!(is_public_read(
+            &Method::GET,
+            "/api/v1/assets/abc/tileset.json"
+        ));
+        assert!(is_public_read(
+            &Method::GET,
+            "/api/v1/assets/abc/tiles/0/0/0.b3dm"
+        ));
+        assert!(is_public_read(&Method::GET, "/v1/assets"));
+        assert!(is_public_read(&Method::GET, "/v1/assets/1/endpoint"));
+    }
+
+    #[test]
+    fn terrain_reads_are_public() {
+        assert!(is_public_read(&Method::GET, "/api/v1/terrain/layer.json"));
+        assert!(is_public_read(&Method::GET, "/api/v1/terrain/12/2200/1400"));
+    }
+
+    #[test]
+    fn writes_never_ride_the_read_exemption() {
+        for path in [
+            "/api/v1/terrain/layer.json",
+            "/api/v1/assets/abc/tileset.json",
+            "/v1/assets",
+            "/v1/tokens",
+        ] {
+            assert!(!is_public_read(&Method::POST, path), "POST {path}");
+            assert!(!is_public_read(&Method::PUT, path), "PUT {path}");
+            assert!(!is_public_read(&Method::DELETE, path), "DELETE {path}");
+        }
+    }
+
+    #[test]
+    fn non_tile_reads_stay_gated() {
+        // terrain-analysis is compute, not tile data
+        assert!(!is_public_read(
+            &Method::GET,
+            "/api/v1/terrain-analysis/operations"
+        ));
+        assert!(!is_public_read(&Method::GET, "/api/v1/elevation/point"));
+        assert!(!is_public_read(&Method::GET, "/api/v1/portal/items"));
     }
 }
