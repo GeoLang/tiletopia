@@ -2,7 +2,8 @@
 //!
 //! Web Mercator XYZ, unlike the geographic quantized-mesh endpoint next door in
 //! [`crate::terrain_api`]. Both read the same DEM through
-//! [`crate::terrain_api::dem_tiles_for_bounds`]; only the tile indexing differs.
+//! `terrain_api::dem_tiles_for_bounds` (private, so not linked); only the tile
+//! indexing differs.
 
 use axum::{
     Router,
