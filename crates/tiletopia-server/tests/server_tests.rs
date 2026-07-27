@@ -199,6 +199,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terrain_rgb_tile_anonymous_ok() {
+        let state = test_state().await;
+
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/terrain/rgb/9/266/186.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("image/png")
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "not a PNG");
+    }
+
+    #[tokio::test]
+    async fn terrain_rgb_rejects_malformed_coords() {
+        let state = test_state().await;
+
+        for uri in [
+            "/api/v1/terrain/rgb/0/1/0.png",  // only one tile at zoom 0
+            "/api/v1/terrain/rgb/16/0/0.png", // past the zoom cap
+            "/api/v1/terrain/rgb/9/266/abc.png",
+            "/api/v1/terrain/rgb/9/266/186.jpg",
+        ] {
+            let resp = router(Arc::clone(&state))
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    #[tokio::test]
     async fn terrain_tile_anonymous_ok() {
         use tiletopia_terrain::global_dem::{TerrainTileCoord, required_dem_tiles};
 

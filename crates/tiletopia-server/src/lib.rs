@@ -73,6 +73,7 @@ pub mod temporal;
 pub mod tenant;
 pub mod terrain_analysis;
 pub mod terrain_api;
+pub mod terrain_rgb;
 pub mod upload;
 pub mod users;
 pub mod versioning;
@@ -252,6 +253,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(demo::demo_routes())
         .merge(catalog::catalog_routes())
         .merge(terrain_api::terrain_routes())
+        .merge(terrain_rgb::terrain_rgb_routes())
         .merge(premium_routes::api_key_routes())
         .merge(premium_routes::metering_routes())
         .merge(premium_routes::webhook_routes())

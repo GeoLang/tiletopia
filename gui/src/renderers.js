@@ -204,9 +204,12 @@ function initMapLibre(container) {
         },
         'terrain-dem': {
           type: 'raster-dem',
-          tiles: [`${window.location.origin}${API}/terrain/{z}/{x}/{y}.terrain`],
+          // terrain-RGB, not the quantized mesh: that one is geographic and
+          // binary, and MapLibre reads neither
+          tiles: [`${window.location.origin}${API}/terrain/rgb/{z}/{x}/{y}.png`],
+          encoding: 'mapbox',
           tileSize: 256,
-          maxzoom: 14,
+          maxzoom: 15,
         },
       },
       layers: [

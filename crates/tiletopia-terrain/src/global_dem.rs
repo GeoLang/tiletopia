@@ -83,8 +83,9 @@ impl DemSource {
 
 /// A DEM tile (1°×1° cell).
 ///
-/// Built only through [`DemTile::new`], so [`DemTile::sample`] can index the
-/// grid without checking it.
+/// Built only through [`DemTile::from_south_up`] or [`DemTile::from_north_up`],
+/// so [`DemTile::sample`] can index the grid without checking it, and so every
+/// caller has to state which way up its rows are.
 #[derive(Debug, Clone)]
 pub struct DemTile {
     /// Southwest corner latitude (integer degrees).
@@ -100,11 +101,13 @@ pub struct DemTile {
 }
 
 impl DemTile {
-    /// Build a tile, or `None` when the grid cannot be sampled: bilinear
-    /// interpolation needs at least 2 samples per axis and exactly `samples²`
-    /// elevations. A DEM file read while it was still being written arrives
-    /// here as a 0×0 grid.
-    pub fn new(
+    /// Build a tile from a south-up grid, row 0 along the tile's south edge.
+    ///
+    /// Returns `None` when the grid cannot be sampled: bilinear interpolation
+    /// needs at least 2 samples per axis and exactly `samples²` elevations. A
+    /// DEM file read while it was still being written arrives here as a 0×0
+    /// grid.
+    pub fn from_south_up(
         lat: i32,
         lon: i32,
         elevations: Vec<f32>,
@@ -121,6 +124,27 @@ impl DemTile {
             samples,
             nodata,
         })
+    }
+
+    /// Build a tile from a north-up grid, row 0 along the tile's north edge.
+    ///
+    /// HGT files and [`tiletopia_ingest::Heightmap`] are stored this way, so
+    /// the rows are reversed into the south-up order [`DemTile::sample`]
+    /// indexes. Handing a north-up grid to [`DemTile::from_south_up`] mirrors
+    /// every elevation about the tile's mid-latitude.
+    pub fn from_north_up(
+        lat: i32,
+        lon: i32,
+        elevations: Vec<f32>,
+        samples: u32,
+        nodata: f32,
+    ) -> Option<Self> {
+        let stride = samples as usize;
+        if samples < 2 || elevations.len() != stride * stride {
+            return None;
+        }
+        let south_up = elevations.chunks_exact(stride).rev().flatten().copied();
+        Self::from_south_up(lat, lon, south_up.collect(), samples, nodata)
     }
 
     /// Get elevation at a geographic coordinate (bilinear interpolation).
@@ -146,9 +170,13 @@ impl DemTile {
         let v01 = self.elevations[(y1 * self.samples + x0) as usize];
         let v11 = self.elevations[(y1 * self.samples + x1) as usize];
 
-        // Skip nodata
-        if v00 == self.nodata || v10 == self.nodata || v01 == self.nodata || v11 == self.nodata {
-            return None;
+        // Skip nodata. HGT voids arrive as NaN rather than the sentinel, and a
+        // NaN corner would otherwise poison the interpolation, so `Some` here
+        // always means a real elevation.
+        for corner in [v00, v10, v01, v11] {
+            if corner == self.nodata || !corner.is_finite() {
+                return None;
+            }
         }
 
         let val = v00 as f64 * (1.0 - dx) * (1.0 - dy)
@@ -304,9 +332,8 @@ pub fn check_dem_availability(
         .collect()
 }
 
-// --- Internal helpers ---
-
-fn sample_dem_tiles(tiles: &[DemTile], lat: f64, lon: f64) -> Option<f32> {
+/// Elevation from the first tile covering this coordinate.
+pub fn sample_dem_tiles(tiles: &[DemTile], lat: f64, lon: f64) -> Option<f32> {
     for tile in tiles {
         if let Some(v) = tile.sample(lat, lon) {
             return Some(v);
@@ -321,7 +348,7 @@ mod tests {
 
     fn flat_dem_tile(lat: i32, lon: i32, elevation: f32) -> DemTile {
         let samples = 10;
-        DemTile::new(
+        DemTile::from_south_up(
             lat,
             lon,
             vec![elevation; (samples * samples) as usize],
@@ -335,18 +362,47 @@ mod tests {
     fn dem_tile_rejects_grids_it_cannot_sample() {
         // the live crash: a DEM file read mid-write yields a 0×0 grid, and
         // sampling it underflowed `samples - 1` into a wild index
-        assert!(DemTile::new(43, 7, vec![], 0, -9999.0).is_none());
-        assert!(DemTile::new(43, 7, vec![1.0], 1, -9999.0).is_none());
+        assert!(DemTile::from_south_up(43, 7, vec![], 0, -9999.0).is_none());
+        assert!(DemTile::from_south_up(43, 7, vec![1.0], 1, -9999.0).is_none());
         // elevation count must match the declared grid
-        assert!(DemTile::new(43, 7, vec![1.0; 3], 2, -9999.0).is_none());
-        assert!(DemTile::new(43, 7, vec![1.0; 4], 2, -9999.0).is_some());
+        assert!(DemTile::from_south_up(43, 7, vec![1.0; 3], 2, -9999.0).is_none());
+        assert!(DemTile::from_south_up(43, 7, vec![1.0; 4], 2, -9999.0).is_some());
+    }
+
+    #[test]
+    fn north_up_rows_land_at_the_north_edge() {
+        // N43E007: Mediterranean along the south edge, Maritime Alps to the
+        // north. In an HGT file that means row 0 holds the mountain.
+        let north_up = vec![
+            1658.0, 1658.0, // north row
+            0.0, 0.0, // south row
+        ];
+        let tile = DemTile::from_north_up(43, 7, north_up.clone(), 2, -9999.0).unwrap();
+        assert!(tile.sample(43.97, 7.4).unwrap() > 1500.0, "north is alpine");
+        assert!(tile.sample(43.03, 7.4).unwrap() < 100.0, "south is coast");
+
+        // and the mistake this replaced: the same rows read as south-up put the
+        // mountain in the sea
+        let wrong = DemTile::from_south_up(43, 7, north_up, 2, -9999.0).unwrap();
+        assert!(wrong.sample(43.03, 7.4).unwrap() > 1500.0);
+    }
+
+    #[test]
+    fn nodata_and_voids_do_not_leak_into_samples() {
+        // HGT voids reach DemTile as NaN, not as the sentinel
+        let tile =
+            DemTile::from_south_up(43, 7, vec![f32::NAN, 1.0, 2.0, 3.0], 2, -9999.0).unwrap();
+        assert!(tile.sample(43.1, 7.1).is_none());
+
+        let sentinel = DemTile::from_south_up(43, 7, vec![-9999.0; 4], 2, -9999.0).unwrap();
+        assert!(sentinel.sample(43.5, 7.5).is_none());
     }
 
     #[test]
     fn every_in_tile_coordinate_samples_in_bounds() {
-        // the invariant DemTile::new buys: no coordinate inside the cell can
+        // the invariant the constructors buy: no coordinate inside the cell can
         // index past the grid, for the smallest grid there is
-        let tile = DemTile::new(43, 7, vec![10.0, 20.0, 30.0, 40.0], 2, -9999.0).unwrap();
+        let tile = DemTile::from_south_up(43, 7, vec![10.0, 20.0, 30.0, 40.0], 2, -9999.0).unwrap();
         for step in 0..=100 {
             let t = step as f64 / 100.0;
             assert!(tile.sample(43.0 + t, 7.0 + t).is_some());

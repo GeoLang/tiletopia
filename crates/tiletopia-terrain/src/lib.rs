@@ -5,6 +5,7 @@
 
 pub mod dem_cache;
 pub mod global_dem;
+pub mod mercator;
 
 /// Heightmap grid (row-major, top-left origin).
 pub struct Heightmap {

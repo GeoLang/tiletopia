@@ -104,38 +104,7 @@ async fn serve_terrain_tile(
     Path((z, x, y)): Path<(u32, u32, String)>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let coord = parse_tile_coord(z, x, &y).ok_or(StatusCode::BAD_REQUEST)?;
-    let bounds = coord.bounds();
-
-    // Try to load DEM from data directory
-    let mut dem_tiles = load_dem_tiles_for_bounds(&state.data_dir, bounds);
-
-    // If no local DEM tiles, try downloading SRTM via DemCache
-    if dem_tiles.is_empty() {
-        let cache_dir = state.data_dir.join("dem_cache");
-        let cache = tiletopia_terrain::dem_cache::DemCache::new(cache_dir);
-        for (lat, lon) in srtm_tiles_to_fetch(bounds) {
-            match cache.get_srtm_tile(lat, lon).await {
-                Ok(hgt_path) => match tiletopia_ingest::hgt_reader::read(&hgt_path) {
-                    Ok(hm) => {
-                        let elevations = hm.elevations.iter().map(|&e| e as f32).collect();
-                        match DemTile::new(lat, lon, elevations, hm.width as u32, -9999.0) {
-                            Some(tile) => dem_tiles.push(tile),
-                            None => tracing::warn!(
-                                "unusable SRTM grid in {}, rendering without it",
-                                hgt_path.display()
-                            ),
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("SRTM tile {} unreadable: {e}", hgt_path.display());
-                    }
-                },
-                Err(e) => {
-                    tracing::debug!("SRTM tile download failed for ({lat},{lon}): {e}");
-                }
-            }
-        }
-    }
+    let dem_tiles = dem_tiles_for_bounds(&state, coord.bounds()).await;
 
     // Generate terrain mesh (uses flat elevation if no DEM tiles found)
     let grid_size = match z {
@@ -173,6 +142,52 @@ fn parse_tile_coord(z: u32, x: u32, y: &str) -> Option<TerrainTileCoord> {
         return None;
     }
     Some(TerrainTileCoord { zoom: z, x, y })
+}
+
+/// DEM tiles covering these bounds: local files first, then a bounded set of
+/// SRTM downloads when there is nothing on disk.
+///
+/// Shared by the quantized-mesh and terrain-RGB endpoints so the fetch bound
+/// and the HGT orientation are decided in one place.
+pub(crate) async fn dem_tiles_for_bounds(state: &AppState, bounds: [f64; 4]) -> Vec<DemTile> {
+    let mut dem_tiles = load_dem_tiles_for_bounds(&state.data_dir, bounds);
+    if !dem_tiles.is_empty() {
+        return dem_tiles;
+    }
+
+    let cache = tiletopia_terrain::dem_cache::DemCache::new(state.data_dir.join("dem_cache"));
+    for (lat, lon) in srtm_tiles_to_fetch(bounds) {
+        match cache.get_srtm_tile(lat, lon).await {
+            Ok(hgt_path) => match dem_tile_from_hgt(&hgt_path, lat, lon) {
+                Ok(tile) => dem_tiles.push(tile),
+                Err(e) => tracing::warn!("SRTM tile {} unusable: {e}", hgt_path.display()),
+            },
+            Err(e) => tracing::debug!("SRTM tile download failed for ({lat},{lon}): {e}"),
+        }
+    }
+    dem_tiles
+}
+
+/// Read a cached HGT file into a DEM tile.
+///
+/// HGT rows run north-to-south, the opposite of the order [`DemTile`] samples,
+/// so this must go through [`DemTile::from_north_up`]. Getting it wrong mirrors
+/// every elevation about the tile's mid-latitude, which reads as plausible
+/// terrain in the wrong place rather than as an error.
+fn dem_tile_from_hgt(
+    path: &std::path::Path,
+    lat: i32,
+    lon: i32,
+) -> Result<DemTile, std::io::Error> {
+    let hm = tiletopia_ingest::hgt_reader::read(path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    let elevations = hm.elevations.iter().map(|&e| e as f32).collect();
+    DemTile::from_north_up(lat, lon, elevations, hm.width as u32, -9999.0).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{}×{} is not a usable DEM grid", hm.width, hm.height),
+        )
+    })
 }
 
 /// Most one-degree SRTM tiles a single terrain request may pull from upstream.
@@ -226,7 +241,7 @@ fn load_dem_tile_from_file(path: &std::path::Path, lat: i32, lon: i32) -> std::i
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect();
 
-    DemTile::new(lat, lon, elevations, samples, -9999.0).ok_or_else(|| {
+    DemTile::from_south_up(lat, lon, elevations, samples, -9999.0).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("{}: not a square f32 DEM grid", path.display()),
@@ -488,6 +503,38 @@ mod tests {
         let tiles = srtm_tiles_to_fetch(coord.bounds());
         assert!(!tiles.is_empty());
         assert!(tiles.len() <= MAX_SRTM_TILES_PER_REQUEST);
+    }
+
+    #[test]
+    fn hgt_rows_keep_their_latitude_through_the_reader() {
+        // guards the seam the flip lived in: hgt_reader hands back north-up
+        // rows, DemTile samples south-up
+        let dir = std::env::temp_dir().join("tiletopia_hgt_orientation_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("N43E007.hgt");
+
+        // 61×61, alpine along the north edge and sea level along the south
+        let side = 61usize;
+        let mut raw = Vec::with_capacity(side * side * 2);
+        for row in 0..side {
+            let height = (1658.0 * (1.0 - row as f64 / (side - 1) as f64)) as i16;
+            for _ in 0..side {
+                raw.extend_from_slice(&height.to_be_bytes());
+            }
+        }
+        std::fs::write(&path, &raw).unwrap();
+
+        let tile = dem_tile_from_hgt(&path, 43, 7).unwrap();
+        assert!(
+            tile.sample(43.97, 7.4).unwrap() > 1500.0,
+            "north edge must stay alpine"
+        );
+        assert!(
+            tile.sample(43.03, 7.4).unwrap() < 100.0,
+            "south edge must stay coast"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
