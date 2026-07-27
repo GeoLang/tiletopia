@@ -62,7 +62,8 @@ async fn terrain_layer_info() -> impl IntoResponse {
         tilejson: "2.1.0",
         name: "TileTopia Open Terrain",
         description: "Global terrain from Copernicus DEM GLO-30 + SRTM, served as quantized mesh",
-        version: "1.0.0",
+        // bumped past 1.0.0: tiles are cached 24h and pre-1.0.1 meshes were latitude-mirrored
+        version: "1.0.1",
         format: "quantized-mesh-1.0",
         projection: "EPSG:4326",
         scheme: "tms",
