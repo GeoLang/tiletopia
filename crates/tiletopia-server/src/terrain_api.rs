@@ -16,13 +16,19 @@ use tiletopia_terrain::global_dem::{DemTile, TerrainTileCoord, generate_terrain_
 
 use crate::AppState;
 
-/// Terrain layer metadata (TileJSON-like).
+/// Deepest zoom the tile route serves, and the deepest level layer.json
+/// advertises as available.
+const MAX_TERRAIN_ZOOM: u32 = 15;
+
+/// Terrain layer metadata, as CesiumTerrainProvider's layer.json parser reads it.
 #[derive(Debug, Serialize)]
 pub struct TerrainLayerInfo {
     pub tilejson: &'static str,
     pub name: &'static str,
     pub description: &'static str,
     pub version: &'static str,
+    pub format: &'static str,
+    pub projection: &'static str,
     pub scheme: &'static str,
     pub tiles: Vec<String>,
     pub minzoom: u32,
@@ -57,14 +63,35 @@ async fn terrain_layer_info() -> impl IntoResponse {
         name: "TileTopia Open Terrain",
         description: "Global terrain from Copernicus DEM GLO-30 + SRTM, served as quantized mesh",
         version: "1.0.0",
+        format: "quantized-mesh-1.0",
+        projection: "EPSG:4326",
         scheme: "tms",
-        tiles: vec!["/api/v1/terrain/{z}/{x}/{y}".to_string()],
+        // relative to the layer.json URL, so it survives any proxy prefix
+        tiles: vec!["{z}/{x}/{y}.terrain?v={version}".to_string()],
         minzoom: 0,
-        maxzoom: 15,
+        maxzoom: MAX_TERRAIN_ZOOM,
         bounds: [-180.0, -90.0, 180.0, 90.0],
-        available: vec![], // Client discovers availability via requests
+        available: full_availability(MAX_TERRAIN_ZOOM),
     };
     axum::response::Json(info)
+}
+
+/// Every tile of every level is generated on demand, so availability is the
+/// full pyramid. Cesium needs it to know how deep it may refine: with no
+/// `available` array it treats depth as unknown and keeps requesting past
+/// maxzoom.
+fn full_availability(max_zoom: u32) -> Vec<Vec<AvailableRange>> {
+    (0..=max_zoom)
+        .map(|z| {
+            let (x_tiles, y_tiles) = TerrainTileCoord::grid_at_zoom(z);
+            vec![AvailableRange {
+                start_x: 0,
+                start_y: 0,
+                end_x: x_tiles - 1,
+                end_y: y_tiles - 1,
+            }]
+        })
+        .collect()
 }
 
 /// Serve a terrain tile as quantized-mesh binary.
@@ -74,15 +101,9 @@ async fn terrain_layer_info() -> impl IntoResponse {
 /// local data exists. Returns a flat tile as last resort.
 async fn serve_terrain_tile(
     State(state): State<Arc<AppState>>,
-    Path((z, x, y)): Path<(u32, u32, u32)>,
+    Path((z, x, y)): Path<(u32, u32, String)>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    // Validate coordinates
-    let max_tile = 2u32.checked_pow(z).unwrap_or(u32::MAX);
-    if x >= max_tile || y >= max_tile {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    let coord = TerrainTileCoord { zoom: z, x, y };
+    let coord = parse_tile_coord(z, x, &y).ok_or(StatusCode::BAD_REQUEST)?;
     let bounds = coord.bounds();
 
     // Try to load DEM from data directory
@@ -135,6 +156,19 @@ async fn serve_terrain_tile(
     );
 
     Ok((headers, qm_bytes))
+}
+
+/// Parse a tile coordinate from the path, where Cesium sends y as `{y}.terrain`.
+fn parse_tile_coord(z: u32, x: u32, y: &str) -> Option<TerrainTileCoord> {
+    let y: u32 = y.strip_suffix(".terrain").unwrap_or(y).parse().ok()?;
+    if z > MAX_TERRAIN_ZOOM {
+        return None;
+    }
+    let (x_tiles, y_tiles) = TerrainTileCoord::grid_at_zoom(z);
+    if x >= x_tiles || y >= y_tiles {
+        return None;
+    }
+    Some(TerrainTileCoord { zoom: z, x, y })
 }
 
 /// Most one-degree SRTM tiles a single terrain request may pull from upstream.
@@ -207,6 +241,10 @@ fn encode_quantized_mesh(
     let bounds = coord.bounds();
     let mut buf = Vec::with_capacity(4096);
 
+    // Cesium decodes indices with a high-water mark, which only works when
+    // vertices are numbered in order of first use.
+    let (positions, flat_indices) = reorder_by_first_use(mesh);
+
     // --- Header (88 bytes) ---
     // Center of tile in ECEF (approximate)
     let center_lon = (bounds[0] + bounds[2]) / 2.0;
@@ -217,8 +255,7 @@ fn encode_quantized_mesh(
     buf.extend_from_slice(&cz.to_le_bytes()); // CenterZ
 
     // Find min/max elevation
-    let (min_h, max_h): (f64, f64) = mesh
-        .vertices
+    let (min_h, max_h): (f64, f64) = positions
         .iter()
         .fold((f64::MAX, f64::MIN), |(mn, mx): (f64, f64), v| {
             (mn.min(v[2]), mx.max(v[2]))
@@ -239,8 +276,7 @@ fn encode_quantized_mesh(
     buf.extend_from_slice(&cz.to_le_bytes()); // HorizonOcclusionPointZ
 
     // --- Vertex Data ---
-    let vertex_count = mesh.vertices.len() as u32;
-    buf.extend_from_slice(&vertex_count.to_le_bytes());
+    buf.extend_from_slice(&(positions.len() as u32).to_le_bytes());
 
     // Quantize positions to u16 (0..32767)
     let lon_range = bounds[2] - bounds[0];
@@ -251,96 +287,80 @@ fn encode_quantized_mesh(
         max_h - min_h
     };
 
-    // u (longitude) array - delta encoded
-    let mut u_values: Vec<u16> = Vec::with_capacity(mesh.vertices.len());
-    for v in &mesh.vertices {
-        let u = ((v[0] - bounds[0]) / lon_range * 32767.0) as u16;
-        u_values.push(u);
-    }
-    let u_deltas = delta_encode_u16(&u_values);
-    for d in &u_deltas {
-        buf.extend_from_slice(&d.to_le_bytes());
-    }
+    let quantize =
+        |value: f64, origin: f64, range: f64| ((value - origin) / range * 32767.0) as u16;
+    let u_values: Vec<u16> = positions
+        .iter()
+        .map(|v| quantize(v[0], bounds[0], lon_range))
+        .collect();
+    let v_values: Vec<u16> = positions
+        .iter()
+        .map(|v| quantize(v[1], bounds[1], lat_range))
+        .collect();
+    let h_values: Vec<u16> = positions
+        .iter()
+        .map(|v| quantize(v[2], min_h, h_range))
+        .collect();
 
-    // v (latitude) array - delta encoded
-    let mut v_values: Vec<u16> = Vec::with_capacity(mesh.vertices.len());
-    for v in &mesh.vertices {
-        let val = ((v[1] - bounds[1]) / lat_range * 32767.0) as u16;
-        v_values.push(val);
-    }
-    let v_deltas = delta_encode_u16(&v_values);
-    for d in &v_deltas {
-        buf.extend_from_slice(&d.to_le_bytes());
-    }
-
-    // height array - delta encoded
-    let mut h_values: Vec<u16> = Vec::with_capacity(mesh.vertices.len());
-    for v in &mesh.vertices {
-        let h = ((v[2] - min_h) / h_range * 32767.0) as u16;
-        h_values.push(h);
-    }
-    let h_deltas = delta_encode_u16(&h_values);
-    for d in &h_deltas {
-        buf.extend_from_slice(&d.to_le_bytes());
+    for values in [&u_values, &v_values, &h_values] {
+        for d in delta_encode_u16(values) {
+            buf.extend_from_slice(&d.to_le_bytes());
+        }
     }
 
     // --- Index data ---
-    let triangle_count = mesh.indices.len() as u32;
-    buf.extend_from_slice(&triangle_count.to_le_bytes());
-
-    // Use 16-bit indices (high-water mark encoded)
-    let flat_indices: Vec<u32> = mesh
-        .indices
-        .iter()
-        .flat_map(|t: &[u32; 3]| t.iter().copied())
-        .collect();
-    let hwm_indices = high_water_mark_encode(&flat_indices);
-    for idx in &hwm_indices {
-        buf.extend_from_slice(&(*idx as u16).to_le_bytes());
+    buf.extend_from_slice(&(mesh.indices.len() as u32).to_le_bytes());
+    for idx in high_water_mark_encode(&flat_indices) {
+        buf.extend_from_slice(&(idx as u16).to_le_bytes());
     }
 
     // --- Edge indices (for tile stitching) ---
-    // West edge
-    let west_indices: Vec<u16> = (0..vertex_count)
-        .filter(|&i| u_values[i as usize] == 0)
-        .map(|i| i as u16)
-        .collect();
-    buf.extend_from_slice(&(west_indices.len() as u32).to_le_bytes());
-    for idx in &west_indices {
-        buf.extend_from_slice(&idx.to_le_bytes());
-    }
-
-    // South edge
-    let south_indices: Vec<u16> = (0..vertex_count)
-        .filter(|&i| v_values[i as usize] == 0)
-        .map(|i| i as u16)
-        .collect();
-    buf.extend_from_slice(&(south_indices.len() as u32).to_le_bytes());
-    for idx in &south_indices {
-        buf.extend_from_slice(&idx.to_le_bytes());
-    }
-
-    // East edge
-    let east_indices: Vec<u16> = (0..vertex_count)
-        .filter(|&i| u_values[i as usize] == 32767)
-        .map(|i| i as u16)
-        .collect();
-    buf.extend_from_slice(&(east_indices.len() as u32).to_le_bytes());
-    for idx in &east_indices {
-        buf.extend_from_slice(&idx.to_le_bytes());
-    }
-
-    // North edge
-    let north_indices: Vec<u16> = (0..vertex_count)
-        .filter(|&i| v_values[i as usize] == 32767)
-        .map(|i| i as u16)
-        .collect();
-    buf.extend_from_slice(&(north_indices.len() as u32).to_le_bytes());
-    for idx in &north_indices {
-        buf.extend_from_slice(&idx.to_le_bytes());
+    let west = edge_indices(&u_values, 0, &v_values);
+    let south = edge_indices(&v_values, 0, &u_values);
+    let east = edge_indices(&u_values, 32767, &v_values);
+    let north = edge_indices(&v_values, 32767, &u_values);
+    for edge in [west, south, east, north] {
+        buf.extend_from_slice(&(edge.len() as u32).to_le_bytes());
+        for idx in edge {
+            buf.extend_from_slice(&idx.to_le_bytes());
+        }
     }
 
     buf
+}
+
+/// Renumber the mesh's vertices in order of first use by its triangle list,
+/// returning the reordered positions and the flat index list.
+///
+/// High-water-mark encoding can only express an index that has been seen
+/// before or is exactly the next unused one, so any other numbering decodes to
+/// garbage. Vertices no triangle references are dropped.
+fn reorder_by_first_use(
+    mesh: &tiletopia_terrain::global_dem::TerrainMesh,
+) -> (Vec<[f64; 3]>, Vec<u32>) {
+    let mut new_of_old = vec![u32::MAX; mesh.vertices.len()];
+    let mut positions = Vec::with_capacity(mesh.vertices.len());
+    let mut flat = Vec::with_capacity(mesh.indices.len() * 3);
+
+    for old in mesh.indices.iter().flatten().copied() {
+        let slot = &mut new_of_old[old as usize];
+        if *slot == u32::MAX {
+            *slot = positions.len() as u32;
+            positions.push(mesh.vertices[old as usize]);
+        }
+        flat.push(*slot);
+    }
+    (positions, flat)
+}
+
+/// Vertices lying on one tile edge, sorted along the edge as the quantized-mesh
+/// spec requires so Cesium can stitch and skirt them.
+fn edge_indices(across: &[u16], across_value: u16, along: &[u16]) -> Vec<u16> {
+    let mut indices: Vec<u16> = (0..across.len() as u16)
+        .filter(|&i| across[i as usize] == across_value)
+        .collect();
+    indices.sort_by_key(|&i| along[i as usize]);
+    indices
 }
 
 /// Delta-encode u16 values using zigzag encoding.
@@ -358,15 +378,17 @@ fn delta_encode_u16(values: &[u16]) -> Vec<u16> {
 }
 
 /// High-water-mark encoding for triangle indices.
-/// Each index is encoded as `highest + 1 - code`, where highest is the running max.
+///
+/// Each index is written as `highest - index`, and the high-water mark advances
+/// whenever that code is zero, mirroring Cesium's decoder. Requires indices
+/// numbered in order of first use, so `index <= highest` always holds.
 fn high_water_mark_encode(indices: &[u32]) -> Vec<u32> {
     let mut result = Vec::with_capacity(indices.len());
-    let mut highest: i64 = 0;
+    let mut highest: u32 = 0;
     for &idx in indices {
-        let code = (highest - idx as i64) as u32;
-        result.push(code);
-        if idx as i64 > highest {
-            highest = idx as i64;
+        result.push(highest - idx);
+        if idx == highest {
+            highest += 1;
         }
     }
     result
@@ -406,21 +428,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_terrain_layer_info_endpoint() {
-        // Just verify the static data is well-formed
-        let info = TerrainLayerInfo {
-            tilejson: "2.1.0",
-            name: "test",
-            description: "test",
-            version: "1.0.0",
-            scheme: "tms",
-            tiles: vec!["/api/v1/terrain/{z}/{x}/{y}.terrain".into()],
-            minzoom: 0,
-            maxzoom: 15,
-            bounds: [-180.0, -90.0, 180.0, 90.0],
-            available: vec![],
-        };
-        assert_eq!(info.maxzoom, 15);
+    fn availability_covers_every_level() {
+        let levels = full_availability(MAX_TERRAIN_ZOOM);
+        assert_eq!(levels.len() as u32, MAX_TERRAIN_ZOOM + 1);
+
+        let root = &levels[0][0];
+        assert_eq!(
+            (root.start_x, root.start_y, root.end_x, root.end_y),
+            (0, 0, 1, 0)
+        );
+
+        let deepest = &levels[MAX_TERRAIN_ZOOM as usize][0];
+        let (x_tiles, y_tiles) = TerrainTileCoord::grid_at_zoom(MAX_TERRAIN_ZOOM);
+        assert_eq!((deepest.end_x, deepest.end_y), (x_tiles - 1, y_tiles - 1));
+    }
+
+    #[test]
+    fn tile_path_accepts_what_cesium_sends() {
+        // both zoom-0 roots of the geographic scheme
+        assert!(parse_tile_coord(0, 0, "0.terrain").is_some());
+        assert!(parse_tile_coord(0, 1, "0.terrain").is_some());
+        // bare form, still served for deck.gl and manual pokes
+        assert!(parse_tile_coord(0, 1, "0").is_some());
+
+        assert!(parse_tile_coord(0, 2, "0").is_none()); // past 2 tiles at zoom 0
+        assert!(parse_tile_coord(0, 0, "1").is_none()); // past 1 tile at zoom 0
+        assert!(parse_tile_coord(MAX_TERRAIN_ZOOM + 1, 0, "0").is_none());
+        assert!(parse_tile_coord(0, 0, "0.png").is_none());
     }
 
     #[test]
@@ -491,5 +525,139 @@ mod tests {
         let bytes = encode_quantized_mesh(&mesh, &coord);
         // Should produce non-empty binary
         assert!(bytes.len() > 88); // At least header size
+    }
+
+    /// Decode a quantized mesh the way CesiumTerrainProvider does, so the
+    /// encoder is checked against the reader it has to satisfy.
+    fn decode_quantized_mesh(bytes: &[u8]) -> DecodedMesh {
+        let mut pos = 88; // header
+        let u32_at = |pos: &mut usize| {
+            let v = u32::from_le_bytes(bytes[*pos..*pos + 4].try_into().unwrap());
+            *pos += 4;
+            v
+        };
+        let vertex_count = u32_at(&mut pos) as usize;
+
+        let zigzag_delta = |pos: &mut usize| {
+            let mut values = Vec::with_capacity(vertex_count);
+            let mut running: i32 = 0;
+            for _ in 0..vertex_count {
+                let raw = u16::from_le_bytes(bytes[*pos..*pos + 2].try_into().unwrap()) as i32;
+                running += (raw >> 1) ^ -(raw & 1);
+                values.push(running as u16);
+                *pos += 2;
+            }
+            values
+        };
+        let u = zigzag_delta(&mut pos);
+        let v = zigzag_delta(&mut pos);
+        let heights = zigzag_delta(&mut pos);
+
+        let triangle_count = u32_at(&mut pos) as usize;
+        let mut indices = Vec::with_capacity(triangle_count * 3);
+        let mut highest: u32 = 0;
+        for _ in 0..triangle_count * 3 {
+            let code = u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap()) as u32;
+            indices.push(highest.wrapping_sub(code));
+            if code == 0 {
+                highest += 1;
+            }
+            pos += 2;
+        }
+
+        let mut edges = Vec::new();
+        for _ in 0..4 {
+            let count = u32_at(&mut pos) as usize;
+            let mut edge = Vec::with_capacity(count);
+            for _ in 0..count {
+                edge.push(u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap()));
+                pos += 2;
+            }
+            edges.push(edge);
+        }
+
+        assert_eq!(pos, bytes.len(), "decoder consumed the whole buffer");
+        DecodedMesh {
+            u,
+            v,
+            heights,
+            indices,
+            edges,
+        }
+    }
+
+    struct DecodedMesh {
+        u: Vec<u16>,
+        v: Vec<u16>,
+        heights: Vec<u16>,
+        indices: Vec<u32>,
+        edges: Vec<Vec<u16>>,
+    }
+
+    #[test]
+    fn quantized_mesh_round_trips_through_cesiums_decoding() {
+        let coord = TerrainTileCoord {
+            zoom: 0,
+            x: 1,
+            y: 0,
+        };
+        let grid = 16;
+        let mut mesh = tiletopia_terrain::global_dem::generate_terrain_tile(&coord, &[], grid);
+        // vary the elevations so the height quantization is exercised too
+        for (i, v) in mesh.vertices.iter_mut().enumerate() {
+            v[2] = (i % 37) as f64 * 41.0;
+        }
+        let decoded = decode_quantized_mesh(&encode_quantized_mesh(&mesh, &coord));
+
+        let vertex_count = grid as usize * grid as usize;
+        assert_eq!(decoded.u.len(), vertex_count);
+        assert_eq!(decoded.heights.len(), vertex_count);
+        assert_eq!(decoded.indices.len(), mesh.indices.len() * 3);
+        assert!(decoded.indices.iter().all(|&i| (i as usize) < vertex_count));
+
+        // decoded triangles must address the same positions the mesh had
+        let (positions, _) = reorder_by_first_use(&mesh);
+        for (triangle, decoded) in mesh.indices.iter().zip(decoded.indices.chunks(3)) {
+            for (&old, &new) in triangle.iter().zip(decoded) {
+                assert_eq!(positions[new as usize], mesh.vertices[old as usize]);
+            }
+        }
+
+        // dequantizing must land back on the original lon/lat/height
+        let bounds = coord.bounds();
+        let (min_h, max_h) = (0.0, 36.0 * 41.0);
+        for (i, position) in positions.iter().enumerate() {
+            let lon = bounds[0] + decoded.u[i] as f64 / 32767.0 * (bounds[2] - bounds[0]);
+            let lat = bounds[1] + decoded.v[i] as f64 / 32767.0 * (bounds[3] - bounds[1]);
+            let height = min_h + decoded.heights[i] as f64 / 32767.0 * (max_h - min_h);
+            assert!(
+                (lon - position[0]).abs() < 0.01,
+                "lon {lon} vs {}",
+                position[0]
+            );
+            assert!(
+                (lat - position[1]).abs() < 0.01,
+                "lat {lat} vs {}",
+                position[1]
+            );
+            assert!(
+                (height - position[2]).abs() < 0.1,
+                "height {height} vs {}",
+                position[2]
+            );
+        }
+
+        // each edge of a full grid holds one row, sorted along the edge
+        for (edge, along) in decoded
+            .edges
+            .iter()
+            .zip([&decoded.v, &decoded.u, &decoded.v, &decoded.u])
+        {
+            assert_eq!(edge.len(), grid as usize);
+            assert!(
+                edge.windows(2)
+                    .all(|w| along[w[0] as usize] < along[w[1] as usize])
+            );
+        }
     }
 }

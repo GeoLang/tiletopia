@@ -149,7 +149,9 @@ pub struct GlobalTerrainConfig {
     pub apply_ocean_mask: bool,
 }
 
-/// A terrain tile at a specific zoom/x/y (TMS scheme).
+/// A terrain tile in the geographic (EPSG:4326) TMS scheme Cesium's
+/// quantized-mesh terrain uses: two square tiles at zoom 0, y counting north
+/// from the south pole.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerrainTileCoord {
     pub zoom: u32,
@@ -158,27 +160,32 @@ pub struct TerrainTileCoord {
 }
 
 impl TerrainTileCoord {
+    /// Tile counts on each axis at a zoom level: (x, y).
+    pub fn grid_at_zoom(zoom: u32) -> (u32, u32) {
+        let y_tiles = 1u32.checked_shl(zoom).unwrap_or(u32::MAX);
+        (y_tiles.saturating_mul(2), y_tiles)
+    }
+
     /// Get geographic bounds of this tile.
     pub fn bounds(&self) -> [f64; 4] {
-        let n = 2u32.pow(self.zoom) as f64;
-        let west = self.x as f64 / n * 360.0 - 180.0;
-        let east = (self.x + 1) as f64 / n * 360.0 - 180.0;
-        let south = tile_y_to_lat((self.y + 1) as f64 / n);
-        let north = tile_y_to_lat(self.y as f64 / n);
-        [west, south, east, north]
+        let span = 180.0 / 2f64.powi(self.zoom as i32);
+        let west = self.x as f64 * span - 180.0;
+        let south = self.y as f64 * span - 90.0;
+        [west, south, west + span, south + span]
     }
 
     /// List all tiles at a given zoom level within bounds.
     pub fn tiles_in_bounds(zoom: u32, bounds: [f64; 4]) -> Vec<Self> {
-        let n = 2u32.pow(zoom);
-        let x_min = ((bounds[0] + 180.0) / 360.0 * n as f64).floor() as u32;
-        let x_max = ((bounds[2] + 180.0) / 360.0 * n as f64).ceil() as u32;
-        let y_min = (lat_to_tile_y(bounds[3]) * n as f64).floor() as u32;
-        let y_max = (lat_to_tile_y(bounds[1]) * n as f64).ceil() as u32;
+        let (x_tiles, y_tiles) = Self::grid_at_zoom(zoom);
+        let span = 180.0 / 2f64.powi(zoom as i32);
+        let x_min = ((bounds[0] + 180.0) / span).floor().max(0.0) as u32;
+        let x_max = ((bounds[2] + 180.0) / span).ceil() as u32;
+        let y_min = ((bounds[1] + 90.0) / span).floor().max(0.0) as u32;
+        let y_max = ((bounds[3] + 90.0) / span).ceil() as u32;
 
         let mut tiles = Vec::new();
-        for x in x_min..x_max.min(n) {
-            for y in y_min..y_max.min(n) {
+        for x in x_min..x_max.min(x_tiles) {
+            for y in y_min..y_max.min(y_tiles) {
                 tiles.push(Self { zoom, x, y });
             }
         }
@@ -282,16 +289,6 @@ fn sample_dem_tiles(tiles: &[DemTile], lat: f64, lon: f64) -> Option<f32> {
     None
 }
 
-fn lat_to_tile_y(lat: f64) -> f64 {
-    let lat_rad = lat.to_radians();
-    (1.0 - lat_rad.tan().asinh() / std::f64::consts::PI) / 2.0
-}
-
-fn tile_y_to_lat(y: f64) -> f64 {
-    let n = std::f64::consts::PI * (1.0 - 2.0 * y);
-    n.sinh().atan().to_degrees()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,15 +328,33 @@ mod tests {
 
     #[test]
     fn test_terrain_tile_bounds() {
+        // zoom 0 is two square tiles covering the whole globe
+        let west_root = TerrainTileCoord {
+            zoom: 0,
+            x: 0,
+            y: 0,
+        };
+        assert_eq!(west_root.bounds(), [-180.0, -90.0, 0.0, 90.0]);
+        let east_root = TerrainTileCoord {
+            zoom: 0,
+            x: 1,
+            y: 0,
+        };
+        assert_eq!(east_root.bounds(), [0.0, -90.0, 180.0, 90.0]);
+
+        // y counts north from the south pole
         let coord = TerrainTileCoord {
             zoom: 1,
             x: 0,
             y: 0,
         };
-        let bounds = coord.bounds();
-        // At zoom 1, tile (0,0) covers western hemisphere, northern half
-        assert!((bounds[0] - (-180.0)).abs() < 0.01);
-        assert!((bounds[2] - 0.0).abs() < 0.01);
+        assert_eq!(coord.bounds(), [-180.0, -90.0, -90.0, 0.0]);
+    }
+
+    #[test]
+    fn test_grid_at_zoom() {
+        assert_eq!(TerrainTileCoord::grid_at_zoom(0), (2, 1));
+        assert_eq!(TerrainTileCoord::grid_at_zoom(3), (16, 8));
     }
 
     #[test]

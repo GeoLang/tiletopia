@@ -153,7 +153,49 @@ mod tests {
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["tiles"][0], "/api/v1/terrain/{z}/{x}/{y}");
+        // what CesiumTerrainProvider's layer.json parser insists on
+        assert_eq!(v["format"], "quantized-mesh-1.0");
+        assert_eq!(v["projection"], "EPSG:4326");
+        assert_eq!(v["scheme"], "tms");
+        // relative, so it resolves against layer.json behind any proxy prefix
+        assert_eq!(v["tiles"][0], "{z}/{x}/{y}.terrain?v={version}");
+        assert_eq!(v["available"][0][0]["endX"], 1);
+        assert_eq!(v["available"].as_array().unwrap().len() as u64, 16);
+    }
+
+    #[tokio::test]
+    async fn terrain_root_tiles_serve_cesiums_request() {
+        let state = test_state().await;
+
+        for uri in [
+            "/api/v1/terrain/0/0/0.terrain?v=1.0.0",
+            "/api/v1/terrain/0/1/0.terrain?v=1.0.0",
+        ] {
+            let resp = router(Arc::clone(&state))
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(
+                            "accept",
+                            "application/vnd.quantized-mesh,application/octet-stream;q=0.9,*/*;q=0.01",
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                resp.headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok()),
+                Some("application/vnd.quantized-mesh")
+            );
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(bytes.len() > 88, "{uri} returned only a header");
+        }
     }
 
     #[tokio::test]
