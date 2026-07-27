@@ -4,6 +4,7 @@
 //! and caches them locally for terrain generation.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 /// DEM cache errors.
@@ -71,7 +72,7 @@ impl DemCache {
             .read_to_end(&mut decompressed)
             .map_err(|e| DemError::Decompress(e.to_string()))?;
 
-        std::fs::write(&hgt_path, &decompressed)?;
+        write_atomic(&hgt_path, &decompressed)?;
         tracing::info!("Cached SRTM tile: {}", hgt_path.display());
 
         Ok(hgt_path)
@@ -114,6 +115,31 @@ impl DemCache {
         // Mosaic multiple tiles
         Ok(mosaic_heightmaps(&tile_data, west, south, east, north))
     }
+}
+
+/// Write a cache file so no reader ever observes it half-written.
+///
+/// Concurrent terrain requests hit the same tile at once, and a plain write
+/// leaves the destination truncated for as long as it takes to fill: readers
+/// were picking up 0-byte DEMs. Filling a per-writer temp file next to the
+/// destination and renaming makes the swap atomic.
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let temp = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    std::fs::write(&temp, bytes)?;
+    if let Err(e) = std::fs::rename(&temp, path) {
+        std::fs::remove_file(&temp).ok();
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Compute the SRTM tile name for given integer lat/lon.
@@ -313,6 +339,43 @@ mod tests {
         // When east/north fall exactly on integer boundaries
         let tiles = required_srtm_tiles(8.0, 47.0, 9.0, 48.0);
         assert_eq!(tiles, vec![(47, 8)]);
+    }
+
+    #[test]
+    fn readers_never_see_a_half_written_cache_file() {
+        // one writer replacing the file while a reader hammers it: with a plain
+        // write the reader catches the truncated window and gets a short file
+        let dir = std::env::temp_dir().join("tiletopia_atomic_write_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("N43E007.hgt");
+        const LEN: usize = 512 * 1024;
+
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            for round in 0..40u8 {
+                write_atomic(&writer_path, &vec![round; LEN]).unwrap();
+            }
+        });
+
+        let mut reads = 0;
+        while !writer.is_finished() {
+            if let Ok(bytes) = std::fs::read(&path) {
+                assert_eq!(bytes.len(), LEN, "reader saw a partially written file");
+                reads += 1;
+            }
+        }
+        writer.join().unwrap();
+        assert!(reads > 0, "the reader never observed the file");
+
+        // and no temp files are left behind
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left in the cache dir");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

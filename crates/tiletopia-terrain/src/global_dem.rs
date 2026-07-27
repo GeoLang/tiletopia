@@ -82,21 +82,47 @@ impl DemSource {
 }
 
 /// A DEM tile (1°×1° cell).
+///
+/// Built only through [`DemTile::new`], so [`DemTile::sample`] can index the
+/// grid without checking it.
 #[derive(Debug, Clone)]
 pub struct DemTile {
     /// Southwest corner latitude (integer degrees).
-    pub lat: i32,
+    lat: i32,
     /// Southwest corner longitude (integer degrees).
-    pub lon: i32,
+    lon: i32,
     /// Elevation data (row-major, south to north).
-    pub elevations: Vec<f32>,
+    elevations: Vec<f32>,
     /// Number of samples in each direction.
-    pub samples: u32,
+    samples: u32,
     /// No-data value.
-    pub nodata: f32,
+    nodata: f32,
 }
 
 impl DemTile {
+    /// Build a tile, or `None` when the grid cannot be sampled: bilinear
+    /// interpolation needs at least 2 samples per axis and exactly `samples²`
+    /// elevations. A DEM file read while it was still being written arrives
+    /// here as a 0×0 grid.
+    pub fn new(
+        lat: i32,
+        lon: i32,
+        elevations: Vec<f32>,
+        samples: u32,
+        nodata: f32,
+    ) -> Option<Self> {
+        if samples < 2 || elevations.len() != (samples as usize).pow(2) {
+            return None;
+        }
+        Some(Self {
+            lat,
+            lon,
+            elevations,
+            samples,
+            nodata,
+        })
+    }
+
     /// Get elevation at a geographic coordinate (bilinear interpolation).
     pub fn sample(&self, lat: f64, lon: f64) -> Option<f32> {
         let local_lat = lat - self.lat as f64;
@@ -295,12 +321,36 @@ mod tests {
 
     fn flat_dem_tile(lat: i32, lon: i32, elevation: f32) -> DemTile {
         let samples = 10;
-        DemTile {
+        DemTile::new(
             lat,
             lon,
-            elevations: vec![elevation; (samples * samples) as usize],
+            vec![elevation; (samples * samples) as usize],
             samples,
-            nodata: -9999.0,
+            -9999.0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn dem_tile_rejects_grids_it_cannot_sample() {
+        // the live crash: a DEM file read mid-write yields a 0×0 grid, and
+        // sampling it underflowed `samples - 1` into a wild index
+        assert!(DemTile::new(43, 7, vec![], 0, -9999.0).is_none());
+        assert!(DemTile::new(43, 7, vec![1.0], 1, -9999.0).is_none());
+        // elevation count must match the declared grid
+        assert!(DemTile::new(43, 7, vec![1.0; 3], 2, -9999.0).is_none());
+        assert!(DemTile::new(43, 7, vec![1.0; 4], 2, -9999.0).is_some());
+    }
+
+    #[test]
+    fn every_in_tile_coordinate_samples_in_bounds() {
+        // the invariant DemTile::new buys: no coordinate inside the cell can
+        // index past the grid, for the smallest grid there is
+        let tile = DemTile::new(43, 7, vec![10.0, 20.0, 30.0, 40.0], 2, -9999.0).unwrap();
+        for step in 0..=100 {
+            let t = step as f64 / 100.0;
+            assert!(tile.sample(43.0 + t, 7.0 + t).is_some());
+            assert!(tile.sample(43.0 + t, 8.0 - t).is_some());
         }
     }
 

@@ -37,6 +37,14 @@ pub fn read(path: &Path) -> Result<Heightmap, IngestError> {
         }
     };
 
+    // a truncated or still-being-written file can measure as a valid square,
+    // and 0×0 is the one that gets through: reject anything too small to sample
+    if side < 2 {
+        return Err(IngestError::ParseError(format!(
+            "HGT: {file_len} bytes is too small to be a heightmap"
+        )));
+    }
+
     let mut raw = vec![0u8; file_len];
     file.read_exact(&mut raw)?;
 
@@ -132,6 +140,24 @@ mod tests {
         assert!((hm.elevations[1] - 10.0).abs() < 1e-10);
         assert!((hm.bounds[0] - 0.0).abs() < 1e-10);
         assert!((hm.bounds[3] - 1.0).abs() < 1e-10);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn empty_file_is_rejected() {
+        // a tile read while it was still being cached measured as a valid 0×0
+        // square, and the sampler then indexed a 0-length grid
+        let dir = std::env::temp_dir().join("tiletopia_hgt_empty_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("N43E007.hgt");
+
+        std::fs::write(&path, []).unwrap();
+        assert!(read(&path).is_err(), "0 bytes must not read as a heightmap");
+
+        // one sample is a square too, and just as unsamplable
+        std::fs::write(&path, 0i16.to_be_bytes()).unwrap();
+        assert!(read(&path).is_err());
 
         std::fs::remove_dir_all(&dir).ok();
     }

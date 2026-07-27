@@ -115,17 +115,21 @@ async fn serve_terrain_tile(
         let cache = tiletopia_terrain::dem_cache::DemCache::new(cache_dir);
         for (lat, lon) in srtm_tiles_to_fetch(bounds) {
             match cache.get_srtm_tile(lat, lon).await {
-                Ok(hgt_path) => {
-                    if let Ok(hm) = tiletopia_ingest::hgt_reader::read(&hgt_path) {
-                        dem_tiles.push(DemTile {
-                            lat,
-                            lon,
-                            elevations: hm.elevations.iter().map(|&e| e as f32).collect(),
-                            samples: hm.width as u32,
-                            nodata: -9999.0,
-                        });
+                Ok(hgt_path) => match tiletopia_ingest::hgt_reader::read(&hgt_path) {
+                    Ok(hm) => {
+                        let elevations = hm.elevations.iter().map(|&e| e as f32).collect();
+                        match DemTile::new(lat, lon, elevations, hm.width as u32, -9999.0) {
+                            Some(tile) => dem_tiles.push(tile),
+                            None => tracing::warn!(
+                                "unusable SRTM grid in {}, rendering without it",
+                                hgt_path.display()
+                            ),
+                        }
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!("SRTM tile {} unreadable: {e}", hgt_path.display());
+                    }
+                },
                 Err(e) => {
                     tracing::debug!("SRTM tile download failed for ({lat},{lon}): {e}");
                 }
@@ -222,12 +226,11 @@ fn load_dem_tile_from_file(path: &std::path::Path, lat: i32, lon: i32) -> std::i
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect();
 
-    Ok(DemTile {
-        lat,
-        lon,
-        elevations,
-        samples,
-        nodata: -9999.0,
+    DemTile::new(lat, lon, elevations, samples, -9999.0).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{}: not a square f32 DEM grid", path.display()),
+        )
     })
 }
 
@@ -485,6 +488,28 @@ mod tests {
         let tiles = srtm_tiles_to_fetch(coord.bounds());
         assert!(!tiles.is_empty());
         assert!(tiles.len() <= MAX_SRTM_TILES_PER_REQUEST);
+    }
+
+    #[test]
+    fn truncated_dem_files_are_skipped_not_sampled() {
+        let dir = std::env::temp_dir().join("tiletopia_truncated_dem_test/dem");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // empty file: the shape that crashed the sampler
+        let empty = dir.join("43_7.bin");
+        std::fs::write(&empty, []).unwrap();
+        assert!(load_dem_tile_from_file(&empty, 43, 7).is_err());
+
+        // half a grid written so far
+        let partial = dir.join("43_8.bin");
+        std::fs::write(&partial, vec![0u8; 4 * 10]).unwrap();
+        assert!(load_dem_tile_from_file(&partial, 43, 8).is_err());
+
+        // the bounds scan drops both rather than propagating a failure
+        let data_dir = dir.parent().unwrap();
+        assert!(load_dem_tiles_for_bounds(data_dir, [7.0, 43.0, 9.0, 44.0]).is_empty());
+
+        std::fs::remove_dir_all(data_dir).ok();
     }
 
     #[test]
