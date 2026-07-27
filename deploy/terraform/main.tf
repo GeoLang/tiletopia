@@ -205,8 +205,8 @@ resource "aws_cloudfront_distribution" "tiles_cdn" {
     }
 
     min_ttl     = 0
-    default_ttl = 3600    # 1 hour for API responses
-    max_ttl     = 86400   # 24 hours max
+    default_ttl = 3600  # 1 hour for API responses
+    max_ttl     = 86400 # 24 hours max
   }
 
   # Cache terrain tiles aggressively (they rarely change)
@@ -224,30 +224,33 @@ resource "aws_cloudfront_distribution" "tiles_cdn" {
       }
     }
 
-    min_ttl     = 86400    # 1 day minimum
-    default_ttl = 604800   # 7 days
-    max_ttl     = 2592000  # 30 days
+    min_ttl     = 86400   # 1 day minimum
+    default_ttl = 604800  # 7 days
+    max_ttl     = 2592000 # 30 days
     compress    = true
   }
 
-  # Cache catalog data for 1 hour
+  # Catalog: reads need a JWT and /catalog/{id}/add is a POST, so the whole path
+  # is uncached and Authorization goes to the origin. TTL 0 keeps an authorized
+  # response from being replayed to another token or after that token expires.
   ordered_cache_behavior {
     path_pattern           = "/api/v1/catalog*"
-    allowed_methods        = ["GET", "HEAD"]
+    allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
     cached_methods         = ["GET", "HEAD"]
     target_origin_id       = "alb"
     viewer_protocol_policy = "redirect-to-https"
 
     forwarded_values {
       query_string = true
+      headers      = ["Authorization", "Origin"]
       cookies {
         forward = "none"
       }
     }
 
-    min_ttl     = 300     # 5 min
-    default_ttl = 3600    # 1 hour
-    max_ttl     = 86400   # 24 hours
+    min_ttl     = 0
+    default_ttl = 0
+    max_ttl     = 0
     compress    = true
   }
 
