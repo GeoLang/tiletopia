@@ -1153,6 +1153,50 @@ mod tests {
         format!("bearer, {token}")
     }
 
+    type ClientWs = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn connect_room(addr: std::net::SocketAddr, room: &str, token: &str) -> ClientWs {
+        let req = ws_request(
+            addr,
+            &format!("/api/v1/realtime/{room}"),
+            Some(&bearer_offer(token)),
+            None,
+        );
+        tokio_tungstenite::connect_async(req).await.unwrap().0
+    }
+
+    async fn send_join(ws: &mut ClientWs, room: &str, user_name: &str) {
+        use futures::SinkExt;
+        let msg = serde_json::json!({
+            "type": "Join",
+            "user_id": "self-assigned-id",
+            "asset_id": room,
+            "user_name": user_name,
+        })
+        .to_string();
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(msg.into()))
+            .await
+            .unwrap();
+    }
+
+    // sorted user ids of the next Presence broadcast this connection receives
+    async fn next_roster(ws: &mut ClientWs) -> Vec<String> {
+        use futures::StreamExt;
+        let msg = ws.next().await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert_eq!(v["type"], "Presence");
+        let mut ids: Vec<String> = v["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["user_id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    }
+
     async fn expect_handshake_rejected(
         addr: std::net::SocketAddr,
         protocol: Option<&str>,
@@ -1327,6 +1371,94 @@ mod tests {
         assert_eq!(v["message"], "transfer the assets");
         // the display name is the client's to choose, only the id is stamped
         assert_eq!(v["user_name"], "Impostor");
+    }
+
+    #[tokio::test]
+    async fn realtime_presence_is_per_connection_not_per_account() {
+        let state = test_state().await;
+        let (token_a, uid_a) = signup(&state, "collab-tabs@example.com").await;
+        let (token_b, uid_b) = signup(&state, "collab-watcher@example.com").await;
+        let addr = serve(&state).await;
+
+        // the watcher stays connected, so every roster change is observable
+        let mut watcher = connect_room(addr, "room-1", &token_b).await;
+        send_join(&mut watcher, "room-1", "Watcher").await;
+        assert_eq!(
+            next_roster(&mut watcher).await,
+            std::slice::from_ref(&uid_b)
+        );
+
+        // two tabs of one account
+        let mut expected = vec![uid_a, uid_b.clone()];
+        expected.sort();
+
+        let mut tab1 = connect_room(addr, "room-1", &token_a).await;
+        send_join(&mut tab1, "room-1", "Ann").await;
+        assert_eq!(next_roster(&mut watcher).await, expected);
+
+        let mut tab2 = connect_room(addr, "room-1", &token_a).await;
+        send_join(&mut tab2, "room-1", "Ann").await;
+        assert_eq!(next_roster(&mut watcher).await, expected);
+
+        // one tab closes: the account is still present on the other one
+        tab1.close(None).await.unwrap();
+        assert_eq!(
+            next_roster(&mut watcher).await,
+            expected,
+            "one closed tab must not remove an account that is still connected"
+        );
+
+        // the last tab closes: now the departure is announced
+        tab2.close(None).await.unwrap();
+        assert_eq!(next_roster(&mut watcher).await, [uid_b]);
+    }
+
+    #[tokio::test]
+    async fn realtime_rejects_rooms_past_the_per_user_cap() {
+        use futures::StreamExt;
+        use tiletopia_server::realtime::{MAX_ROOMS_PER_USER, ROOM_LIMIT_CLOSE_CODE};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let state = test_state().await;
+        let (token, _uid) = signup(&state, "collab-cap@example.com").await;
+        let addr = serve(&state).await;
+
+        // rooms live only while a connection holds them, so hold them all open
+        let mut held = Vec::new();
+        for i in 0..MAX_ROOMS_PER_USER {
+            held.push(connect_room(addr, &format!("room-{i}"), &token).await);
+        }
+
+        // the next room is refused with a code the client can branch on
+        let mut over = connect_room(addr, "over-the-cap", &token).await;
+        match over.next().await {
+            Some(Ok(Message::Close(Some(frame)))) => {
+                assert_eq!(u16::from(frame.code), ROOM_LIMIT_CLOSE_CODE);
+            }
+            other => panic!("expected a room-limit close, got {other:?}"),
+        }
+
+        // freeing a room frees the slot. the server's cleanup runs after our
+        // close is delivered, so retry until it has.
+        held.pop().unwrap().close(None).await.unwrap();
+        let mut accepted = false;
+        for _ in 0..40 {
+            let mut ws = connect_room(addr, "after-freeing-one", &token).await;
+            send_join(&mut ws, "after-freeing-one", "Ann").await;
+            match ws.next().await {
+                Some(Ok(Message::Close(_))) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Some(Ok(Message::Text(text))) => {
+                    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(v["type"], "Presence");
+                    accepted = true;
+                    break;
+                }
+                other => panic!("unexpected reply: {other:?}"),
+            }
+        }
+        assert!(accepted, "a freed room slot must let a new room through");
     }
 
     // -- per-asset ownership --
