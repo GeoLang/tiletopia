@@ -210,6 +210,7 @@ pub fn encode_frames_to_video(
         Encoder::new(output_path, settings).map_err(|e| format!("Encoder creation error: {e}"))?;
 
     let frame_duration = Time::from_nth_of_a_second(fps as usize);
+    let mut position = Time::zero();
 
     for (i, rgba_data) in frames.iter().enumerate() {
         // Convert RGBA to RGB
@@ -219,15 +220,15 @@ pub fn encode_frames_to_video(
             .copied()
             .collect();
 
-        let frame = ndarray::Array3::from_shape_vec((height as usize, width as usize, 3), rgb_data)
-            .map_err(|e| format!("Frame shape error: {e}"))?;
+        // video_rs::Frame is its re-exported ndarray Array3<u8>
+        let frame =
+            video_rs::Frame::from_shape_vec((height as usize, width as usize, 3), rgb_data)
+                .map_err(|e| format!("Frame shape error: {e}"))?;
 
-        let timestamp = frame_duration
-            .aligned_with(&Time::zero())
-            .offset_with(i as i64);
         encoder
-            .encode(&frame, timestamp)
+            .encode(&frame, position)
             .map_err(|e| format!("Encode frame {} error: {e}", i))?;
+        position = position.aligned_with(frame_duration).add();
     }
 
     encoder
