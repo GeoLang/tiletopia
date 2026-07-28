@@ -74,22 +74,50 @@ pub const BEARER_SUBPROTOCOL: &str = "bearer";
 /// Whether this request is an anonymous tile-DATA read. CesiumJS and deck.gl
 /// fetch these with no Authorization header, so they stay open.
 ///
+/// Every arm matches whole path segments anchored at the root, and each one is a
+/// route that exists. This used to be substring matching, where any path holding
+/// `/tiles/` or `tileset.json` anywhere went public, so `/api/v1/users/me/tiles/`
+/// or the whole API mounted under a second `/tiles/v1` prefix would have skipped
+/// auth for every GET. Adding a public route is now a deliberate edit here
+/// rather than a side effect of what the route is called.
+///
 /// GET only, so the mutating `POST /v1/assets` and `POST /v1/tokens` stay
 /// behind auth. Anything not listed here is protected by default.
 pub fn is_public_read(method: &Method, path: &str) -> bool {
     if *method != Method::GET {
         return false;
     }
-    path.contains("/tileset.json")
-        || path.contains("/tiles/")
-        // quantized-mesh terrain: layer.json plus the {z}/{x}/{y} tiles it
-        // advertises. same data tier as tileset.json. the trailing slash keeps
-        // the /api/v1/terrain-analysis/ compute routes gated.
-        || path.starts_with("/api/v1/terrain/")
-        // the /v1/* entries are the Ion-compat read routes
-        || path == "/v1/assets"
-        || path == "/v1/tokens"
-        || path.starts_with("/v1/assets/")
+    // axum never matches a route with an empty segment, so dropping them keeps a
+    // doubled slash from shifting the positions the patterns below rely on
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    match segments.as_slice() {
+        // 3D Tiles: the tileset and the tile payloads it references. get_tile
+        // takes a single trailing segment today, but a tileset may reference
+        // nested child URIs, so the tail stays open under this one prefix.
+        ["api", "v1", "assets", _, "tileset.json"] => true,
+        ["api", "v1", "assets", _, "tiles", rest @ ..] => !rest.is_empty(),
+
+        // quantized-mesh terrain: layer.json, the {z}/{x}/{y} tiles it
+        // advertises, and the terrain-rgb variant. Matching "terrain" as a whole
+        // segment is what keeps the /api/v1/terrain-analysis/ compute routes
+        // gated, rather than the trailing slash this used to lean on.
+        ["api", "v1", "terrain", rest @ ..] => !rest.is_empty(),
+
+        // Vector tile source metadata. Public only because the old substring
+        // reached it, so it is listed to keep this change from moving any route.
+        ["api", "v1", "tiles", "sources"] => true,
+        ["api", "v1", "tiles", "styles"] => true,
+        ["api", "v1", "tiles", "layers"] => true,
+        ["api", "v1", "tiles", "cache", "stats"] => true,
+        ["api", "v1", "tiles", _, "tilejson"] => true,
+
+        // Ion-compat reads
+        ["v1", "tokens"] => true,
+        ["v1", "assets", ..] => true,
+
+        _ => false,
+    }
 }
 
 /// Bearer token for a request: the `Authorization` header, or on the realtime
@@ -242,6 +270,106 @@ mod tests {
         assert!(!is_public_read(&Method::GET, "/api/v1/portal/items"));
         // the realtime websocket needs a token like any other non-tile route
         assert!(!is_public_read(&Method::GET, "/api/v1/realtime/room-1"));
+    }
+
+    /// Every GET the router serves anonymously, so a tightening of the matcher
+    /// that would break the viewer's golden path fails here first.
+    #[test]
+    fn every_public_route_still_classifies_public() {
+        for path in [
+            // lib.rs:234-235
+            "/api/v1/assets/8d1f/tileset.json",
+            "/api/v1/assets/8d1f/tiles/0.b3dm",
+            "/api/v1/assets/8d1f/tiles/0/0/0.b3dm",
+            // terrain_api.rs:55-56, terrain_rgb.rs:29
+            "/api/v1/terrain/layer.json",
+            "/api/v1/terrain/12/2200/1400",
+            "/api/v1/terrain/rgb/12/2200/1400",
+            // premium_routes.rs:487-491
+            "/api/v1/tiles/sources",
+            "/api/v1/tiles/styles",
+            "/api/v1/tiles/layers",
+            "/api/v1/tiles/cache/stats",
+            "/api/v1/tiles/basemap/tilejson",
+            // ion_compat.rs:91-94
+            "/v1/assets",
+            "/v1/assets/42",
+            "/v1/assets/42/endpoint",
+            "/v1/tokens",
+        ] {
+            assert!(is_public_read(&Method::GET, path), "GET {path}");
+        }
+    }
+
+    /// The shapes the old substring matcher let through. Each of these would
+    /// have been an anonymous read of an authenticated route.
+    #[test]
+    fn crafted_paths_no_longer_ride_the_exemption() {
+        for path in [
+            // "/tiles/" under an authenticated prefix
+            "/api/v1/users/me/tiles/",
+            "/api/v1/users/me/tiles/1",
+            "/api/v1/orgs/acme/tiles/x",
+            "/api/v1/admin/stats/tiles/x",
+            // the whole API mounted under a second prefix, the alias shape
+            "/tiles/v1/catalog",
+            "/tiles/v1/users/me",
+            "/tiles/v1/assets/8d1f/tiles/0.b3dm",
+            "/tiles/v1/terrain/layer.json",
+            // a crafted suffix or segment named like the public ones
+            "/api/v1/admin/stats/tileset.json",
+            "/api/v1/portal/items/tileset.json",
+            "/api/v1/catalog/tileset.json",
+            // near-misses on the anchored prefixes
+            "/api/v1/assets",
+            "/api/v1/assets/8d1f",
+            "/api/v1/assets/8d1f/annotations",
+            "/api/v1/terrain",
+            "/api/v1/terrain-analysis/operations",
+            "/v1/assetsandmore",
+            "/v1/tokens/42",
+            // not anchored at the root
+            "/proxy/api/v1/terrain/layer.json",
+            "/proxy/api/v1/assets/8d1f/tileset.json",
+        ] {
+            assert!(!is_public_read(&Method::GET, path), "GET {path}");
+        }
+    }
+
+    /// A query string never reaches this function (axum hands it the path only),
+    /// but assert it anyway so a caller that passes a full URI cannot open a hole.
+    #[test]
+    fn query_strings_do_not_make_a_path_public() {
+        for path in [
+            "/api/v1/catalog?x=/tileset.json",
+            "/api/v1/catalog?x=/tiles/",
+            "/api/v1/users/me?file=tileset.json",
+        ] {
+            assert!(!is_public_read(&Method::GET, path), "GET {path}");
+        }
+    }
+
+    /// Writes never ride the exemption, including on the public-shaped paths.
+    #[test]
+    fn writes_on_public_shaped_paths_stay_gated() {
+        for path in [
+            "/api/v1/assets/8d1f/tiles/0.b3dm",
+            "/api/v1/assets/8d1f/tileset.json",
+            "/api/v1/terrain/12/2200/1400",
+            "/api/v1/tiles/sources",
+            "/v1/assets/42",
+        ] {
+            for method in [
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::PATCH,
+                Method::HEAD,
+                Method::OPTIONS,
+            ] {
+                assert!(!is_public_read(&method, path), "{method} {path}");
+            }
+        }
     }
 
     fn uri(s: &str) -> Uri {
