@@ -5,6 +5,7 @@
 use axum::{
     Json, Router,
     extract::{Query, State},
+    middleware,
     routing::get,
 };
 use serde::Deserialize;
@@ -483,12 +484,19 @@ async fn compute_route(
 
 /// Routes for 2D map tiles (XYZ, MVT, styles).
 pub fn map_tile_routes() -> Router<Arc<AppState>> {
+    // Cache hit rates and size are operational telemetry, not map data, so this
+    // takes the same Admin gate as /api/v1/admin/stats. The rest of the group is
+    // tile-source metadata a viewer reads anonymously.
+    let cache_stats = Router::new()
+        .route("/api/v1/tiles/cache/stats", get(tile_cache_stats))
+        .layer(middleware::from_fn(crate::users::require_admin));
+
     Router::new()
         .route("/api/v1/tiles/sources", get(list_tile_sources))
         .route("/api/v1/tiles/styles", get(list_tile_styles))
-        .route("/api/v1/tiles/cache/stats", get(tile_cache_stats))
         .route("/api/v1/tiles/layers", get(list_vector_layers))
         .route("/api/v1/tiles/{source_id}/tilejson", get(get_tilejson))
+        .merge(cache_stats)
 }
 
 async fn list_tile_sources(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
