@@ -232,6 +232,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/assets", get(list_assets))
         .route("/api/v1/assets/{id}", get(get_asset))
         .route("/api/v1/assets/{id}/tileset.json", get(get_tileset))
+        // {path} captures one segment, which is all a tile name ever is: the
+        // tilers encode octree depth into the filename rather than into
+        // directories, so node [0,3,7] is "037.glb", not "0/3/7.glb" (see
+        // to_filename in tiletopia-core lod.rs:44, mesh_tiler.rs:286, tile.rs:137,
+        // and the matching tiles_dir.join in their writers). If a tiler ever
+        // emits nested child URIs this needs {*path}, and the matching arm in
+        // auth::is_public_read has to widen with it.
         .route("/api/v1/assets/{id}/tiles/{path}", get(get_tile))
         .route("/api/v1/assets/{id}/thumbnail", get(get_thumbnail))
         .route(

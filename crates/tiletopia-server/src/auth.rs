@@ -92,11 +92,13 @@ pub fn is_public_read(method: &Method, path: &str) -> bool {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
     match segments.as_slice() {
-        // 3D Tiles: the tileset and the tile payloads it references. get_tile
-        // takes a single trailing segment today, but a tileset may reference
-        // nested child URIs, so the tail stays open under this one prefix.
+        // 3D Tiles: the tileset and the tile payloads it references. Exactly one
+        // trailing segment, matching the route: the tilers encode octree depth
+        // into the filename ("037.glb"), never into directories, so a nested tile
+        // path is not something this server can serve. See the note on the route
+        // in lib.rs before widening either side.
         ["api", "v1", "assets", _, "tileset.json"] => true,
-        ["api", "v1", "assets", _, "tiles", rest @ ..] => !rest.is_empty(),
+        ["api", "v1", "assets", _, "tiles", _] => true,
 
         // quantized-mesh terrain: layer.json, the {z}/{x}/{y} tiles it
         // advertises, and the terrain-rgb variant. Matching "terrain" as a whole
@@ -232,9 +234,10 @@ mod tests {
             &Method::GET,
             "/api/v1/assets/abc/tileset.json"
         ));
+        // one segment, because the tilers flatten octree depth into the filename
         assert!(is_public_read(
             &Method::GET,
-            "/api/v1/assets/abc/tiles/0/0/0.b3dm"
+            "/api/v1/assets/abc/tiles/037.glb"
         ));
         assert!(is_public_read(&Method::GET, "/v1/assets"));
         assert!(is_public_read(&Method::GET, "/v1/assets/1/endpoint"));
@@ -286,10 +289,11 @@ mod tests {
     #[test]
     fn every_public_route_still_classifies_public() {
         for path in [
-            // lib.rs:234-235
+            // lib.rs:234-243
             "/api/v1/assets/8d1f/tileset.json",
+            "/api/v1/assets/8d1f/tiles/root.glb",
+            "/api/v1/assets/8d1f/tiles/037.glb",
             "/api/v1/assets/8d1f/tiles/0.b3dm",
-            "/api/v1/assets/8d1f/tiles/0/0/0.b3dm",
             // terrain_api.rs:55-56, terrain_rgb.rs:29
             "/api/v1/terrain/layer.json",
             "/api/v1/terrain/12/2200/1400",
@@ -328,6 +332,11 @@ mod tests {
             "/api/v1/admin/stats/tileset.json",
             "/api/v1/portal/items/tileset.json",
             "/api/v1/catalog/tileset.json",
+            // nested tile paths: the route captures one segment and the tilers
+            // never emit these, so the matcher agrees with the router instead of
+            // exempting a shape that can only 404
+            "/api/v1/assets/8d1f/tiles/0/0/0.b3dm",
+            "/api/v1/assets/8d1f/tiles/a/b",
             // near-misses on the anchored prefixes
             "/api/v1/assets",
             "/api/v1/assets/8d1f",
