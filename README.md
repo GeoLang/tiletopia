@@ -64,7 +64,7 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Photogrammetry (SfM)** — feature detection, matching, triangulation from photos
 - **Global DEM terrain** — SRTM/Copernicus/ASTER with TMS tiling and bilinear sampling
 - **Edge deployment** — cross-compile for ARM/embedded with offline bundles
-- **Martin integration** — PMTiles and PostGIS vector tile sources via `martin-tile-utils`, MBTiles metadata parsing
+- **Martin integration** — PMTiles and PostGIS vector tile sources via `martin-tile-utils`, MBTiles metadata parsing (`--features martin`)
 
 ### Storage
 - **Local filesystem** — zero-config default
@@ -88,7 +88,7 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **BIM Clash Detection** — hard/soft clashes, design deviation from point cloud reality capture
 - **RBAC + OIDC** — role-based access control with OpenID Connect SSO
 - **Audit Logging** — immutable event trail with query/export for compliance
-- **Raft Consensus Clustering** — high-availability multi-node deployment
+- **Leader Election** — single-process election with Raft-style terms (multi-node HA is not implemented)
 - **Priority Queue + SLA** — tenant-tiered job scheduling with deadline guarantees
 - **Webhook Delivery** — event-driven integrations with HMAC-signed payloads
 - **White-Label Branding** — custom logos, colors, domains per organization
@@ -99,7 +99,7 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Custom Dashboards** — drag-and-drop widget layouts for KPIs and monitoring
 - **Narrated Presentations (Stories)** — guided slide-based tours with camera animations
 - **AR/VR Foveated Rendering** — eye-tracked LOD for XR headsets (Quest/Vision Pro/HoloLens)
-- **Cinematic Flythrough** — keyframed camera paths with easing for presentations
+- **Cinematic Flythrough** — keyframed camera paths with easing, H.264 MP4/WebM export via `--features video`
 - **Automated Site Reports** — scheduled HTML/PDF report generation from templates
 - **API Key Management** — create/revoke keys, per-key rate limiting, usage tracking
 - **Usage Metering & Billing** — track API calls, storage, compute per tenant (free/pro/enterprise tiers)
@@ -132,8 +132,8 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 
 ### Geospatial Services
 - **Photogrammetry (SfM/MVS)** — Structure from Motion + Multi-View Stereo pipeline with quality presets
-- **Point Cloud Classification** — ASPRS-standard classes (ground/vegetation/building/water), ensemble decision tree classifier with height/density/planarity features, optional PyTorch PointNet sidecar for ML inference (`--features ml`)
-- **AI Agent (GeoLang)** — natural language control of the 3D viewer via LLM-powered agent. Chat with the agent to fly to locations, classify point clouds, overlay GeoJSON layers, run spatial analysis, and generate reports — no GIS expertise required. Powered by [Letta](https://github.com/letta-ai/letta) with 20+ chainable geospatial tools.
+- **Point Cloud Classification** — ASPRS-standard classes (ground/vegetation/building/water), ensemble decision tree classifier with height/density/planarity features, optional in-process ONNX inference (`--features onnx`, ort 2.0) or an external ML service (`--features ml`)
+- **AI Agent (GeoLang)** — natural language control of the 3D viewer via LLM-powered agent. Chat with the agent to fly to locations, classify point clouds, overlay GeoJSON layers, run spatial analysis, and generate reports — no GIS expertise required. Backed by the [sibyl](https://github.com/GeoLang/sibyl) agent loop and 36 geospatial tools.
 - **Real-Time Collaboration** — multi-user sessions with 3D cursors, viewports, annotations, and replies
 - **Asset Versioning** — full version history, diffs, change regions between versions
 - **BIM 4D Scheduling** — construction timeline, phases, Gantt keyframes, progress tracking
@@ -167,7 +167,7 @@ GeoLang includes an LLM-powered geospatial agent that lets users control the 3D 
 - **"Load the building survey tileset"** — adds a 3D Tiles dataset to the scene
 - **"Compare elevation profiles between two sites"** — runs terrain analysis and displays results
 
-The agent uses [Letta](https://github.com/letta-ai/letta) (persistent-memory LLM framework) with 20+ geospatial tools including geocoding, isochrones, clustering, Voronoi, terrain profiles, environmental risk assessment, and routing.
+The agent loop is [sibyl](https://github.com/GeoLang/sibyl), a Rust service that calls an OpenAI-compatible LLM endpoint and keeps sessions and history in sqlite. Tool calls are dispatched over HTTP to the GeoLang service, which runs its 36 geospatial tools in-process: geocoding, isochrones, clustering, Voronoi, terrain profiles, environmental risk assessment, routing, and more. There is no cross-session memory, each session starts clean.
 
 ### Viewer Commands
 
@@ -187,10 +187,20 @@ The agent can programmatically control the CesiumJS/deck.gl/MapLibre viewer:
 
 ### Setup
 
-1. Start the Letta server: `docker-compose up -d` (in the GeoLang directory)
-2. Start the GeoLang API: `uvicorn src.api.server:app --port 8100`
-3. Start GeoLang: `tiletopia serve --port 3000`
-4. The chat panel appears on the left side of the viewer
+The agent runs as part of the platform stack, brought up from the viewtopia repo:
+
+```bash
+cd ../viewtopia
+scripts/platform-up.sh
+# equivalently: docker compose --env-file .env.platform -f docker-compose.platform.yml up -d
+```
+
+That starts sibyl, the GeoLang API, tiletopia, and the ViewTopia viewer, which talks
+AG-UI to `POST /chat/agui` on the GeoLang API.
+
+The dashboard in `gui/` still posts to the older `/agent/chat/stream` endpoint, which
+the GeoLang API no longer serves, so its chat panel needs porting to AG-UI before it
+works again. Everything else in the dashboard runs against `tiletopia serve`.
 
 ---
 
@@ -411,20 +421,18 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 cargo test
 ```
 
-535 tests (510 Rust + 25 GUI) covering:
-- Core: AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, GPU compute, diff detection, plugins (21)
-- Core: spatial queries (radius/kNN/bbox/polygon clip/volume), AI point cloud classification, change detection & time slider, implicit tiling (3D Tiles Next), colorization from imagery, glTF structural metadata (35)
-- Core: 3D measurement (distance/area/volume/cut-fill/slope/bearing), anomaly detection (deformation/encroachment/deviation/outlier), predictive analytics (linear regression/exponential smoothing/trend/seasonal), BIM clash detection (hard/soft/design deviation) (22)
-- Store: local filesystem CRUD, path traversal (6)
-- Server: health, assets, tilesets, security, annotations, temporal versioning, multi-tenancy, offline export (13)
-- Server: federated mesh networking, CRDT collaborative editing, scripting/rules engine, CI/CD pipeline validation (19)
-- Server: RBAC with OIDC, audit logging, Raft consensus clustering, priority queue with SLA, webhook delivery, white-label branding, geospatial marketplace, data residency geofencing, retention lifecycle/GDPR, field-level encryption, custom dashboards, narrated presentations (Stories), AR/VR foveated rendering, cinematic flythrough, automated site reports (75)
-- Server: API keys, metering, webhooks, workspaces, export, scheduler, plugins, mobile (22)
-- Server: photogrammetry, classification, collaboration, versioning, BIM 4D, geocoding, STAC, indoor, COG, routing, map tiles (47)
-- Server: isochrone, geoprocessing, feature service, elevation, map matching, static map, flight planning, scan registration, issue tracking, terrain analysis, geostatistics, multispectral (51)
-- Ingest: LAS/LAZ, GeoTIFF, BIM/IFC readers, photogrammetry (SfM) (13)
-- Terrain: quantized mesh generation, global DEM terrain (12)
-- Worker: background job processing (5)
+649 tests (624 Rust + 25 GUI) on default features, counted per crate:
+- Core (111): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
+- Server (396): health, assets, tilesets, auth and roles, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine, RBAC/OIDC, audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing, retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles)
+- Ingest (72): LAS/LAZ, GeoTIFF, BIM/IFC readers, CRS detection, photogrammetry (SfM)
+- Terrain (28): quantized mesh generation, global DEM terrain
+- Store (12): local filesystem CRUD, path traversal
+- Worker (5): background job processing
+
+GUI: `cd gui && pnpm run test:all` (10 vitest unit tests + 15 Playwright e2e).
+
+Feature-gated tests (`gpu`, `onnx`, `video`, `ml`, `martin`, `wasm-plugins`, cloud
+stores) are not in the 624 and need their feature enabled to run.
 
 ---
 
