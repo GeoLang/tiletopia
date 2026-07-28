@@ -221,9 +221,8 @@ pub fn encode_frames_to_video(
             .collect();
 
         // video_rs::Frame is its re-exported ndarray Array3<u8>
-        let frame =
-            video_rs::Frame::from_shape_vec((height as usize, width as usize, 3), rgb_data)
-                .map_err(|e| format!("Frame shape error: {e}"))?;
+        let frame = video_rs::Frame::from_shape_vec((height as usize, width as usize, 3), rgb_data)
+            .map_err(|e| format!("Frame shape error: {e}"))?;
 
         encoder
             .encode(&frame, position)
