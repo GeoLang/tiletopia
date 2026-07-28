@@ -51,7 +51,6 @@ printpdf = { workspace = true }
 casbin = { workspace = true }
 las = { workspace = true, features = ["laz"] }
 zip = { version = "8", default-features = false }
-openraft = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 video-rs = { workspace = true, optional = true }
 martin-core = { workspace = true, optional = true }
@@ -61,7 +60,6 @@ object_store = { workspace = true, optional = true }
 
 [features]
 default = []
-raft = ["openraft"]
 wasm-plugins = ["wasmtime"]
 video = ["video-rs"]
 martin = ["martin-core", "martin-tile-utils", "tilejson", "object_store"]

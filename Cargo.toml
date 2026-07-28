@@ -114,7 +114,6 @@ printpdf = "0.8"
 casbin = "2"
 
 # Raft consensus (cluster feature)
-openraft = { version = "0.9", features = ["serde"] }
 
 # WASM plugin runtime (wasm-plugins feature)
 wasmtime = "30"
