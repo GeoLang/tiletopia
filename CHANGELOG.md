@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-01
+
+### Security
+- Annotation writes (`POST`/`DELETE /api/v1/assets/{id}/annotations`) now need the
+  editor or admin role plus ownership of the target asset, the same gate as asset
+  delete and retile. Creating one records the author's JWT `sub` as `created_by`.
+- Annotation delete is scoped to the asset in the path, so owning one asset is no
+  longer a way to delete an annotation on another. Unknown pairs return 404.
+- Plugin registry mutations (install, uninstall, config, enable, disable) now need
+  the admin role. A plugin runs server-wide, so the editor tier is not enough.
+- `GET /api/v1/assets` now requires a token and lists only assets the caller owns,
+  plus legacy ownerless rows. Admins still see everything. Tile data stays
+  anonymous, this hides other tenants' asset metadata.
+- Role checks read the JWT `role` claim through `UserRole::from_claim`, which
+  rejects anything that is not exactly `admin`, `editor` or `viewer`. An unknown
+  role now lands in no tier instead of being compared as a raw string.
+
+### Removed
+- The `rbac` module (casbin enforcer, `RbacStore`, OIDC claim validation). It was
+  never called from a route and modelled per-asset grants and orgs that do not
+  exist. The live authz primitives are the JWT role tiers and per-asset
+  ownership. `/api/v1/demo/rbac` keeps serving its canned sample data.
+
 ## [0.3.0] - 2026-05-08
 
 ### Added

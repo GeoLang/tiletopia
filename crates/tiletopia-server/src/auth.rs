@@ -17,7 +17,31 @@ pub const MIN_SECRET_LEN: usize = 32;
 pub struct Claims {
     pub sub: String,
     pub exp: usize,
+    /// Role name: `admin`, `editor` or `viewer`. Read it through
+    /// [`Claims::parsed_role`], never by comparing the string, so an unknown
+    /// role is refused instead of landing in a tier.
     pub role: String,
+}
+
+impl Claims {
+    /// Parsed role, or `None` when the token carries a role we don't know.
+    pub fn parsed_role(&self) -> Option<crate::users::UserRole> {
+        crate::users::UserRole::from_claim(&self.role)
+    }
+
+    /// Edit tier: editor or admin.
+    pub fn can_write(&self) -> bool {
+        use crate::users::UserRole;
+        matches!(
+            self.parsed_role(),
+            Some(UserRole::Admin) | Some(UserRole::Editor)
+        )
+    }
+
+    /// Admin tier.
+    pub fn can_admin(&self) -> bool {
+        self.parsed_role() == Some(crate::users::UserRole::Admin)
+    }
 }
 
 /// Whether auth was explicitly turned off with `TILETOPIA_AUTH_DISABLED=true`.

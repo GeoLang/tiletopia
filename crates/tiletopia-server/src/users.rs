@@ -54,6 +54,25 @@ impl std::str::FromStr for UserRole {
     }
 }
 
+impl UserRole {
+    /// Role out of a JWT `role` claim, or `None` when the token carries a role
+    /// we don't know. Unknown strings are rejected rather than defaulted, so a
+    /// typo or a role minted by another service can never fall through to a
+    /// tier. Matches ptolemy's `Role::parse`.
+    ///
+    /// Exact match on purpose: [`FromStr`](std::str::FromStr) above is the
+    /// lenient path for human input (the CLI's set-role), a claim is machine
+    /// written and always the lowercase serde name.
+    pub fn from_claim(s: &str) -> Option<UserRole> {
+        match s {
+            "admin" => Some(UserRole::Admin),
+            "editor" => Some(UserRole::Editor),
+            "viewer" => Some(UserRole::Viewer),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Organization {
     pub id: Uuid,
@@ -211,7 +230,7 @@ pub fn claims_from_token(token: &str) -> Result<Claims, StatusCode> {
 /// Middleware that requires the user to have Admin role.
 pub async fn require_admin(request: Request, next: Next) -> Result<Response, StatusCode> {
     let claims = extract_claims(&request)?;
-    if claims.role != "admin" {
+    if !claims.can_admin() {
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(next.run(request).await)
@@ -221,7 +240,7 @@ pub async fn require_admin(request: Request, next: Next) -> Result<Response, Sta
 /// claims check as `require_admin`, widened to the Edit permission tier.
 pub async fn require_editor(request: Request, next: Next) -> Result<Response, StatusCode> {
     let claims = extract_claims(&request)?;
-    if claims.role != "editor" && claims.role != "admin" {
+    if !claims.can_write() {
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(next.run(request).await)
@@ -413,5 +432,24 @@ mod tests {
         assert_eq!("EDITOR".parse::<UserRole>().unwrap(), UserRole::Editor);
         assert_eq!("viewer".parse::<UserRole>().unwrap(), UserRole::Viewer);
         assert!("root".parse::<UserRole>().is_err());
+    }
+
+    #[test]
+    fn role_from_claim_is_exact() {
+        assert_eq!(UserRole::from_claim("admin"), Some(UserRole::Admin));
+        assert_eq!(UserRole::from_claim("editor"), Some(UserRole::Editor));
+        assert_eq!(UserRole::from_claim("viewer"), Some(UserRole::Viewer));
+        // anything else is not a tier, including near misses on a real one
+        for role in [
+            "",
+            "root",
+            "superuser",
+            "Admin",
+            "ADMIN",
+            " admin",
+            "admin ",
+        ] {
+            assert_eq!(UserRole::from_claim(role), None, "{role}");
+        }
     }
 }

@@ -86,7 +86,7 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Anomaly Detection** — deformation monitoring, encroachment alerts, construction deviation, statistical outlier removal
 - **Predictive Analytics** — linear regression, exponential smoothing, trend analysis, seasonal decomposition
 - **BIM Clash Detection** — hard/soft clashes, design deviation from point cloud reality capture
-- **RBAC + OIDC** — role-based access control with OpenID Connect SSO
+- **Role-based access control** — admin/editor/viewer tiers from the JWT `role` claim plus per-asset ownership, enforced on every write route (no OIDC/SAML federation)
 - **Audit Logging** — immutable event trail with query/export for compliance
 - **Leader Election** — single-process election with Raft-style terms (multi-node HA is not implemented)
 - **Priority Queue + SLA** — tenant-tiered job scheduling with deadline guarantees
@@ -327,6 +327,23 @@ Tile data reads are anonymous: `tileset.json`, `tiles/{path}` and the
 `/api/v1/terrain/` quantized-mesh routes. Everything else needs
 `Authorization: Bearer <jwt>`, and writes need the editor or admin role.
 
+The `role` claim must be exactly `admin`, `editor` or `viewer`. Any other value
+is refused rather than treated as a default, so a token from a service with its
+own role names gets no tier here.
+
+On top of the role tier:
+
+| Route | Rule |
+|---|---|
+| `DELETE /api/v1/assets/{id}`, `POST /api/v1/assets/{id}/tile` | editor + owner of the asset, or admin |
+| `POST`/`DELETE /api/v1/assets/{id}/annotations` | editor + owner of the asset, or admin. Deletes are scoped to the asset in the path |
+| `GET /api/v1/assets` | token required; lists your own assets plus ownerless legacy rows, admins see all |
+| `POST`/`PUT`/`DELETE /api/v1/plugins/registry/...` | admin, because a plugin runs server-wide |
+
+Assets created before ownership existed have no owner and stay writable by any
+editor. Hiding an asset from the list does not hide its tiles: tile URLs are
+public by design.
+
 The realtime websocket needs any valid JWT. Browsers cannot set the
 Authorization header on a websocket handshake, so the token is offered as a
 subprotocol instead:
@@ -421,9 +438,9 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 cargo test
 ```
 
-649 tests (624 Rust + 25 GUI) on default features, counted per crate:
-- Core (111): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
-- Server (396): health, assets, tilesets, auth and roles, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine, RBAC/OIDC, audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing, retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles)
+663 tests (638 Rust + 25 GUI) on default features, counted per crate:
+- Core (112): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
+- Server (409): health, assets, tilesets, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine, audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing, retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles)
 - Ingest (72): LAS/LAZ, GeoTIFF, BIM/IFC readers, CRS detection, photogrammetry (SfM)
 - Terrain (28): quantized mesh generation, global DEM terrain
 - Store (12): local filesystem CRUD, path traversal

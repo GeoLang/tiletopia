@@ -57,7 +57,6 @@ pub mod plugins;
 pub mod portal;
 pub mod premium_routes;
 pub mod priority_queue;
-pub mod rbac;
 pub mod realtime;
 pub mod reports;
 pub mod retention;
@@ -156,7 +155,21 @@ pub struct Asset {
 pub fn may_modify_asset(claims: &auth::Claims, owner_id: Option<&str>) -> bool {
     match owner_id {
         None => true,
-        Some(owner) => claims.role == "admin" || owner == claims.sub,
+        Some(owner) => claims.can_admin() || owner == claims.sub,
+    }
+}
+
+/// Whether these claims may see this asset in a listing. Admins see every
+/// asset, everyone else sees their own plus the legacy ownerless rows.
+///
+/// Same owner rule as [`may_modify_asset`] today, kept separate because the two
+/// decisions are free to diverge: this one has no Edit-tier gate in front of it.
+/// It hides other tenants' asset metadata, not their tiles, which are public by
+/// design (see [`auth::is_public_read`]).
+pub fn may_view_asset(claims: &auth::Claims, owner_id: Option<&str>) -> bool {
+    match owner_id {
+        None => true,
+        Some(owner) => claims.can_admin() || owner == claims.sub,
     }
 }
 
@@ -221,6 +234,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .layer(middleware::from_fn(users::require_editor));
 
+    // Annotations are asset content, so writing one is an asset mutation: same
+    // Edit tier as the writes above, plus the owner-or-admin check the handlers
+    // do. Listing them stays on the main router, readable with any valid token.
+    let annotation_write_routes = Router::new()
+        .route(
+            "/api/v1/assets/{id}/annotations",
+            axum::routing::post(create_annotation),
+        )
+        .route(
+            "/api/v1/assets/{id}/annotations/{annotation_id}",
+            axum::routing::delete(delete_annotation),
+        )
+        .layer(middleware::from_fn(users::require_editor));
+
     // Realtime collaboration websocket. Any valid JWT may join a room; the gate
     // is a layer of its own so an anonymous handshake is refused before the
     // upgrade, and so it holds in the no-secret development mode too.
@@ -241,17 +268,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         // auth::is_public_read has to widen with it.
         .route("/api/v1/assets/{id}/tiles/{path}", get(get_tile))
         .route("/api/v1/assets/{id}/thumbnail", get(get_thumbnail))
-        .route(
-            "/api/v1/assets/{id}/annotations",
-            get(list_annotations).post(create_annotation),
-        )
-        .route(
-            "/api/v1/assets/{id}/annotations/{annotation_id}",
-            axum::routing::delete(delete_annotation),
-        )
+        .route("/api/v1/assets/{id}/annotations", get(list_annotations))
         .route("/api/v1/jobs/{id}", get(get_job_status))
         .route("/api/v1/users/me", get(users::get_me).put(users::update_me))
         .merge(asset_write_routes)
+        .merge(annotation_write_routes)
         .merge(realtime_routes)
         .merge(admin_routes)
         .merge(org_routes)
@@ -324,10 +345,14 @@ pub struct AssetQuery {
     pub status: Option<String>,
 }
 
+/// List assets visible to the caller. A token is required even in the
+/// no-secret development mode, because the answer depends on who is asking.
 async fn list_assets(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<AssetQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Vec<Asset>>, StatusCode> {
+    let claims = users::claims_from_headers(&headers)?;
     let has_filter = query.q.is_some()
         || query.tag.is_some()
         || query.asset_type.is_some()
@@ -351,7 +376,11 @@ async fn list_assets(
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
-    Ok(Json(assets))
+    let visible = assets
+        .into_iter()
+        .filter(|a| may_view_asset(&claims, a.owner_id.as_deref()))
+        .collect();
+    Ok(Json(visible))
 }
 
 async fn get_asset(
@@ -505,11 +534,35 @@ async fn list_annotations(
     Ok(Json(annotations))
 }
 
+/// Claims allowed to write annotations on this asset, or the refusal. Behind
+/// `require_editor`, so a valid token is always present and only the per-asset
+/// owner-or-admin rule is left to check.
+async fn annotation_writer(
+    state: &AppState,
+    asset_id: Uuid,
+    headers: &axum::http::HeaderMap,
+) -> Result<auth::Claims, StatusCode> {
+    let asset = state
+        .db
+        .get_asset(asset_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let claims = users::claims_from_headers(headers)?;
+    if !may_modify_asset(&claims, asset.owner_id.as_deref()) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(claims)
+}
+
 async fn create_annotation(
     State(state): State<Arc<AppState>>,
     Path(asset_id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<CreateAnnotation>,
 ) -> Result<(StatusCode, Json<db::AnnotationRecord>), StatusCode> {
+    let author = annotation_writer(&state, asset_id, &headers).await?.sub;
+
     let ann = db::AnnotationRecord {
         id: body
             .id
@@ -521,7 +574,7 @@ async fn create_annotation(
         latitude: body.latitude,
         height: body.height,
         created_at: chrono::Utc::now(),
-        created_by: None,
+        created_by: Some(author),
     };
     state
         .db
@@ -533,13 +586,21 @@ async fn create_annotation(
 
 async fn delete_annotation(
     State(state): State<Arc<AppState>>,
-    Path((_asset_id, annotation_id)): Path<(Uuid, Uuid)>,
+    Path((asset_id, annotation_id)): Path<(Uuid, Uuid)>,
+    headers: axum::http::HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
-    state
+    annotation_writer(&state, asset_id, &headers).await?;
+
+    // scoped to the asset in the path, so owning one asset is not a way to
+    // delete an annotation that hangs off someone else's
+    let deleted = state
         .db
-        .delete_annotation(annotation_id)
+        .delete_annotation(asset_id, annotation_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if deleted == 0 {
+        return Err(StatusCode::NOT_FOUND);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

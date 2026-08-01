@@ -110,9 +110,6 @@ cron = "0.15"
 # PDF generation (reports)
 printpdf = "0.8"
 
-# RBAC policy engine
-casbin = "2"
-
 # Raft consensus (cluster feature)
 
 # WASM plugin runtime (wasm-plugins feature)

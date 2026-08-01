@@ -86,17 +86,11 @@ mod tests {
 
     #[tokio::test]
     async fn list_assets_empty() {
-        let app = router(test_state().await);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/assets")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        let state = test_state().await;
+        let (token, _uid) = signup(&state, "list-empty@example.com").await;
+        let (status, assets) = list_assets(&state, Some(&token), "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(assets.is_empty());
     }
 
     #[tokio::test]
@@ -1605,5 +1599,592 @@ mod tests {
                 "unexpected {status}"
             );
         }
+    }
+
+    // -- asset list visibility --
+
+    async fn list_assets(
+        state: &Arc<AppState>,
+        token: Option<&str>,
+        query: &str,
+    ) -> (StatusCode, Vec<serde_json::Value>) {
+        let mut req = Request::builder().uri(format!("/api/v1/assets{query}"));
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        let resp = router(Arc::clone(state))
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v = serde_json::from_slice(&bytes).unwrap_or_default();
+        (status, v)
+    }
+
+    fn asset_ids(assets: &[serde_json::Value]) -> Vec<String> {
+        let mut ids: Vec<String> = assets
+            .iter()
+            .map(|a| a["id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    #[tokio::test]
+    async fn asset_list_requires_a_token() {
+        let state = test_state().await;
+        let (status, _) = list_assets(&state, None, "").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // and on the search path too, which is a different branch of the handler
+        let (status, _) = list_assets(&state, None, "?q=t").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn asset_list_shows_only_your_own_and_legacy_rows() {
+        use tiletopia_server::{Asset, AssetStatus, AssetType};
+        let state = test_state().await;
+        let a_token = bootstrap_editor(&state, "list-a@example.com").await;
+        let b_token = bootstrap_editor(&state, "list-b@example.com").await;
+        let admin_token = bootstrap_admin(&state, "list-admin@example.com").await;
+
+        let (_s, a_asset) = upload_glb(&state, Some(&a_token)).await;
+        let (_s, b_asset) = upload_glb(&state, Some(&b_token)).await;
+        let a_id = a_asset["id"].as_str().unwrap().to_string();
+        let b_id = b_asset["id"].as_str().unwrap().to_string();
+
+        // a row from before owner_id existed stays visible to everyone
+        let legacy = Asset {
+            id: uuid::Uuid::new_v4(),
+            name: "legacy.glb".into(),
+            asset_type: AssetType::Model,
+            status: AssetStatus::Ready,
+            created_at: chrono::Utc::now(),
+            tile_count: 0,
+            size_bytes: 0,
+            description: String::new(),
+            tags: vec![],
+            owner_id: None,
+        };
+        state.db.create_asset(&legacy).await.unwrap();
+        let legacy_id = legacy.id.to_string();
+
+        let (status, seen) = list_assets(&state, Some(&a_token), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let mut expected = vec![a_id.clone(), legacy_id.clone()];
+        expected.sort();
+        assert_eq!(asset_ids(&seen), expected, "A must not see B's asset");
+
+        let (_s, seen) = list_assets(&state, Some(&b_token), "").await;
+        let mut expected = vec![b_id.clone(), legacy_id.clone()];
+        expected.sort();
+        assert_eq!(asset_ids(&seen), expected);
+
+        // an admin sees every asset
+        let (_s, seen) = list_assets(&state, Some(&admin_token), "").await;
+        let mut all = vec![a_id.clone(), b_id.clone(), legacy_id];
+        all.sort();
+        assert_eq!(asset_ids(&seen), all);
+    }
+
+    #[tokio::test]
+    async fn asset_search_is_filtered_by_owner_too() {
+        let state = test_state().await;
+        let a_token = bootstrap_editor(&state, "search-a@example.com").await;
+        let b_token = bootstrap_editor(&state, "search-b@example.com").await;
+
+        let (_s, a_asset) = upload_glb(&state, Some(&a_token)).await;
+        upload_glb(&state, Some(&b_token)).await;
+
+        // both assets are named t.glb, so an unfiltered search would return both
+        let (status, seen) = list_assets(&state, Some(&a_token), "?q=t.glb").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(asset_ids(&seen), vec![a_asset["id"].as_str().unwrap()]);
+    }
+
+    // -- annotation write authz --
+
+    fn asset_uuid(asset: &serde_json::Value) -> uuid::Uuid {
+        uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap()
+    }
+
+    async fn post_annotation(
+        state: &Arc<AppState>,
+        asset_id: &str,
+        token: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/assets/{asset_id}/annotations"))
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        let body = serde_json::json!({
+            "text": "a note",
+            "longitude": 7.42,
+            "latitude": 43.73,
+        });
+        let resp = router(Arc::clone(state))
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, v)
+    }
+
+    async fn delete_annotation(
+        state: &Arc<AppState>,
+        asset_id: &str,
+        annotation_id: &str,
+        token: Option<&str>,
+    ) -> StatusCode {
+        asset_write(
+            state,
+            "DELETE",
+            &format!("/api/v1/assets/{asset_id}/annotations/{annotation_id}"),
+            token,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn annotation_create_is_editor_and_owner_only() {
+        let state = test_state().await;
+        let (owner_token, owner_id) =
+            bootstrap_editor_with_id(&state, "ann-owner@example.com").await;
+        let (_s, asset) = upload_glb(&state, Some(&owner_token)).await;
+        let asset_id = asset["id"].as_str().unwrap();
+
+        assert_eq!(
+            post_annotation(&state, asset_id, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let (viewer_token, _) = signup(&state, "ann-viewer@example.com").await;
+        assert_eq!(
+            post_annotation(&state, asset_id, Some(&viewer_token))
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // the Edit tier is not enough on someone else's asset
+        let other_token = bootstrap_editor(&state, "ann-other@example.com").await;
+        assert_eq!(
+            post_annotation(&state, asset_id, Some(&other_token))
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+
+        assert!(
+            state
+                .db
+                .list_annotations(asset_uuid(&asset))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // the owner can, and the note is attributed to them
+        let (status, created) = post_annotation(&state, asset_id, Some(&owner_token)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["created_by"], owner_id);
+
+        // and so can an admin
+        let admin_token = bootstrap_admin(&state, "ann-admin@example.com").await;
+        assert_eq!(
+            post_annotation(&state, asset_id, Some(&admin_token))
+                .await
+                .0,
+            StatusCode::CREATED
+        );
+
+        assert_eq!(
+            state
+                .db
+                .list_annotations(asset_uuid(&asset))
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn annotation_create_on_a_missing_asset_is_not_found() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "ann-missing@example.com").await;
+        let (status, _) = post_annotation(
+            &state,
+            "00000000-0000-0000-0000-000000000000",
+            Some(&editor_token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn annotation_delete_is_editor_and_owner_only() {
+        let state = test_state().await;
+        let owner_token = bootstrap_editor(&state, "anndel-owner@example.com").await;
+        let (_s, asset) = upload_glb(&state, Some(&owner_token)).await;
+        let asset_id = asset["id"].as_str().unwrap();
+
+        let (_s, created) = post_annotation(&state, asset_id, Some(&owner_token)).await;
+        let ann_id = created["id"].as_str().unwrap();
+
+        assert_eq!(
+            delete_annotation(&state, asset_id, ann_id, None).await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let (viewer_token, _) = signup(&state, "anndel-viewer@example.com").await;
+        assert_eq!(
+            delete_annotation(&state, asset_id, ann_id, Some(&viewer_token)).await,
+            StatusCode::FORBIDDEN
+        );
+
+        let other_token = bootstrap_editor(&state, "anndel-other@example.com").await;
+        assert_eq!(
+            delete_annotation(&state, asset_id, ann_id, Some(&other_token)).await,
+            StatusCode::FORBIDDEN
+        );
+
+        // the rejected deletes left it alone
+        assert_eq!(
+            state
+                .db
+                .list_annotations(asset_uuid(&asset))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        assert_eq!(
+            delete_annotation(&state, asset_id, ann_id, Some(&owner_token)).await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(
+            state
+                .db
+                .list_annotations(asset_uuid(&asset))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Owning one asset must not be a way to delete an annotation hanging off
+    /// another one: the delete is scoped to the asset in the path.
+    #[tokio::test]
+    async fn annotation_delete_is_scoped_to_its_asset() {
+        let state = test_state().await;
+        let victim_token = bootstrap_editor(&state, "annscope-victim@example.com").await;
+        let attacker_token = bootstrap_editor(&state, "annscope-attacker@example.com").await;
+
+        let (_s, victim_asset) = upload_glb(&state, Some(&victim_token)).await;
+        let victim_id = victim_asset["id"].as_str().unwrap();
+        let (_s, note) = post_annotation(&state, victim_id, Some(&victim_token)).await;
+        let note_id = note["id"].as_str().unwrap();
+
+        let (_s, attacker_asset) = upload_glb(&state, Some(&attacker_token)).await;
+        let attacker_id = attacker_asset["id"].as_str().unwrap();
+
+        // authorized against their own asset, aiming at someone else's annotation
+        assert_eq!(
+            delete_annotation(&state, attacker_id, note_id, Some(&attacker_token)).await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            state
+                .db
+                .list_annotations(asset_uuid(&victim_asset))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn annotation_list_stays_readable_with_any_token() {
+        let state = test_state().await;
+        let owner_token = bootstrap_editor(&state, "annlist-owner@example.com").await;
+        let (_s, asset) = upload_glb(&state, Some(&owner_token)).await;
+        let asset_id = asset["id"].as_str().unwrap();
+        post_annotation(&state, asset_id, Some(&owner_token)).await;
+
+        let (viewer_token, _) = signup(&state, "annlist-viewer@example.com").await;
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/assets/{asset_id}/annotations"))
+                    .header("authorization", format!("Bearer {viewer_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v.len(), 1);
+    }
+
+    // -- plugin registry authz --
+
+    fn plugin_body(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "manifest": {
+                "id": id,
+                "name": "Test Plugin",
+                "version": "1.0.0",
+                "description": "a test plugin",
+                "author": "tests",
+                "license": "AGPL-3.0-or-later",
+                "entry_point": "main.wasm",
+                "capabilities": ["transform"],
+                "config_schema": null,
+            },
+            "config": {},
+        })
+    }
+
+    async fn plugin_request(
+        state: &Arc<AppState>,
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> StatusCode {
+        let mut req = Request::builder().method(method).uri(uri);
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        let body = match body {
+            Some(v) => {
+                req = req.header("content-type", "application/json");
+                Body::from(v.to_string())
+            }
+            None => Body::empty(),
+        };
+        router(Arc::clone(state))
+            .oneshot(req.body(body).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn plugin_install_is_admin_only() {
+        let state = test_state().await;
+        let uri = "/api/v1/plugins/registry";
+
+        assert_eq!(
+            plugin_request(&state, "POST", uri, None, Some(plugin_body("p1"))).await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let (viewer_token, _) = signup(&state, "plug-viewer@example.com").await;
+        assert_eq!(
+            plugin_request(
+                &state,
+                "POST",
+                uri,
+                Some(&viewer_token),
+                Some(plugin_body("p1"))
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+
+        // a plugin runs for the whole server, so the Edit tier is not enough
+        let editor_token = bootstrap_editor(&state, "plug-editor@example.com").await;
+        assert_eq!(
+            plugin_request(
+                &state,
+                "POST",
+                uri,
+                Some(&editor_token),
+                Some(plugin_body("p1"))
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(state.db.list_plugins().await.unwrap().is_empty());
+
+        let admin_token = bootstrap_admin(&state, "plug-admin@example.com").await;
+        assert_eq!(
+            plugin_request(
+                &state,
+                "POST",
+                uri,
+                Some(&admin_token),
+                Some(plugin_body("p1"))
+            )
+            .await,
+            StatusCode::CREATED
+        );
+        assert_eq!(state.db.list_plugins().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn plugin_mutations_are_admin_only() {
+        let state = test_state().await;
+        let admin_token = bootstrap_admin(&state, "plugmut-admin@example.com").await;
+        let editor_token = bootstrap_editor(&state, "plugmut-editor@example.com").await;
+        assert_eq!(
+            plugin_request(
+                &state,
+                "POST",
+                "/api/v1/plugins/registry",
+                Some(&admin_token),
+                Some(plugin_body("p2"))
+            )
+            .await,
+            StatusCode::CREATED
+        );
+
+        let config = serde_json::json!({ "config": { "k": "v" } });
+        let mutations: [(&str, &str, Option<serde_json::Value>); 4] = [
+            (
+                "PUT",
+                "/api/v1/plugins/registry/p2/config",
+                Some(config.clone()),
+            ),
+            ("POST", "/api/v1/plugins/registry/p2/disable", None),
+            ("POST", "/api/v1/plugins/registry/p2/enable", None),
+            ("DELETE", "/api/v1/plugins/registry/p2", None),
+        ];
+
+        for (method, uri, body) in &mutations {
+            assert_eq!(
+                plugin_request(&state, method, uri, None, body.clone()).await,
+                StatusCode::UNAUTHORIZED,
+                "anonymous {method} {uri}"
+            );
+            assert_eq!(
+                plugin_request(&state, method, uri, Some(&editor_token), body.clone()).await,
+                StatusCode::FORBIDDEN,
+                "editor {method} {uri}"
+            );
+        }
+        // nothing an editor tried went through
+        let plugins = state.db.list_plugins().await.unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert!(plugins[0].enabled);
+        assert_eq!(plugins[0].config, serde_json::json!({}));
+
+        for (method, uri, body) in &mutations {
+            let status =
+                plugin_request(&state, method, uri, Some(&admin_token), body.clone()).await;
+            assert!(status.is_success(), "admin {method} {uri} got {status}");
+        }
+        assert!(state.db.list_plugins().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn plugin_reads_stay_open_to_any_token() {
+        let state = test_state().await;
+        let admin_token = bootstrap_admin(&state, "plugread-admin@example.com").await;
+        plugin_request(
+            &state,
+            "POST",
+            "/api/v1/plugins/registry",
+            Some(&admin_token),
+            Some(plugin_body("p3")),
+        )
+        .await;
+
+        let (viewer_token, _) = signup(&state, "plugread-viewer@example.com").await;
+        assert_eq!(
+            plugin_request(
+                &state,
+                "GET",
+                "/api/v1/plugins/registry",
+                Some(&viewer_token),
+                None
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            plugin_request(
+                &state,
+                "GET",
+                "/api/v1/plugins/registry/p3",
+                Some(&viewer_token),
+                None
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
+    // -- role parsing --
+
+    /// A token carrying a role we don't know must land in no tier at all. This
+    /// is the decision every route gate reads, so a forged or foreign role
+    /// cannot fall through to editor or admin.
+    #[test]
+    fn unknown_role_in_a_token_grants_nothing() {
+        use tiletopia_server::auth::Claims;
+        let with_role = |role: &str| Claims {
+            sub: "user-a".into(),
+            exp: 0,
+            role: role.into(),
+        };
+
+        for role in [
+            "",
+            "root",
+            "superuser",
+            "owner",
+            "Admin",
+            "ADMIN",
+            "admin ",
+            " admin",
+            "admin,viewer",
+        ] {
+            let claims = with_role(role);
+            assert!(!claims.can_admin(), "can_admin on '{role}'");
+            assert!(!claims.can_write(), "can_write on '{role}'");
+            assert!(claims.parsed_role().is_none(), "parsed_role on '{role}'");
+        }
+
+        assert!(with_role("admin").can_admin());
+        assert!(with_role("admin").can_write());
+        assert!(!with_role("editor").can_admin());
+        assert!(with_role("editor").can_write());
+        assert!(!with_role("viewer").can_write());
+    }
+
+    /// An unknown role is not an admin, so it cannot reach another user's asset
+    /// through the ownership rule either.
+    #[test]
+    fn unknown_role_is_not_an_owner_override() {
+        use tiletopia_server::{auth::Claims, may_modify_asset, may_view_asset};
+        let claims = Claims {
+            sub: "user-a".into(),
+            exp: 0,
+            role: "superuser".into(),
+        };
+        assert!(!may_modify_asset(&claims, Some("user-b")));
+        assert!(!may_view_asset(&claims, Some("user-b")));
+        // its own assets stay its own: that is identity, not role
+        assert!(may_modify_asset(&claims, Some("user-a")));
+        assert!(may_view_asset(&claims, Some("user-a")));
     }
 }

@@ -729,12 +729,20 @@ impl Database {
         Ok(rows.iter().map(row_to_annotation).collect())
     }
 
-    pub async fn delete_annotation(&self, annotation_id: Uuid) -> Result<(), sqlx::Error> {
-        sqlx::query("DELETE FROM annotations WHERE id = ?")
+    /// Delete an annotation belonging to `asset_id`. Returns how many rows went,
+    /// so a caller that authorized against one asset cannot delete an annotation
+    /// hanging off another. Zero means no such annotation on that asset.
+    pub async fn delete_annotation(
+        &self,
+        asset_id: Uuid,
+        annotation_id: Uuid,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM annotations WHERE id = ? AND asset_id = ?")
             .bind(annotation_id.to_string())
+            .bind(asset_id.to_string())
             .execute(&self.pool)
             .await?;
-        Ok(())
+        Ok(result.rows_affected())
     }
 
     // -- Story CRUD --

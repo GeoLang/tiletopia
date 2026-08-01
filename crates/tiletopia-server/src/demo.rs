@@ -9,13 +9,11 @@ use std::sync::Arc;
 
 use crate::AppState;
 use crate::audit::{AuditAction, AuditLog, AuditQuery};
-use crate::rbac::RbacStore;
 use crate::stories::{CameraPosition, Slide, Story, StorySettings, StoryStore, TransitionType};
 
 /// Demo state held alongside AppState.
 pub struct DemoState {
     pub audit_log: AuditLog,
-    pub rbac_store: RbacStore,
     pub story_store: StoryStore,
 }
 
@@ -29,13 +27,7 @@ impl DemoState {
     /// Create and seed demo state with sample data.
     pub fn new() -> Self {
         let audit_log = AuditLog::new(1000);
-        let mut rbac_store = RbacStore::new();
         let mut story_store = StoryStore::new();
-
-        // Seed RBAC users with roles
-        rbac_store.assign_role("admin@company.com", "admin");
-        rbac_store.assign_role("sarah@company.com", "editor");
-        rbac_store.assign_role("client@external.io", "viewer");
 
         // Seed audit entries
         audit_log.log_action(
@@ -186,7 +178,6 @@ impl DemoState {
 
         Self {
             audit_log,
-            rbac_store,
             story_store,
         }
     }
@@ -584,8 +575,9 @@ struct UserInfo {
     role: String,
 }
 
-async fn rbac_handler(State(state): State<Arc<AppState>>) -> Json<RbacInfo> {
-    let _ = &state.demo.rbac_store;
+// canned sample data for the GUI's admin panel, not the server's own authz.
+// the real role gates are users::require_admin / require_editor.
+async fn rbac_handler() -> Json<RbacInfo> {
     Json(RbacInfo {
         users: vec![
             UserInfo {

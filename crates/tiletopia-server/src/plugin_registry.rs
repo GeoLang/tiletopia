@@ -6,6 +6,7 @@ use axum::{
     Router,
     extract::{Path, State},
     http::StatusCode,
+    middleware,
     response::Json,
     routing::get,
 };
@@ -69,14 +70,16 @@ pub struct UpdatePluginConfigRequest {
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
 pub fn plugin_registry_routes() -> Router<Arc<AppState>> {
-    Router::new()
+    // installing a plugin adds code and config that runs for the whole server,
+    // so every mutation here is Admin. Reads need a token like any other route.
+    let write_routes = Router::new()
         .route(
             "/api/v1/plugins/registry",
-            get(list_plugins).post(install_plugin),
+            axum::routing::post(install_plugin),
         )
         .route(
             "/api/v1/plugins/registry/{id}",
-            get(get_plugin).delete(uninstall_plugin),
+            axum::routing::delete(uninstall_plugin),
         )
         .route(
             "/api/v1/plugins/registry/{id}/config",
@@ -90,6 +93,12 @@ pub fn plugin_registry_routes() -> Router<Arc<AppState>> {
             "/api/v1/plugins/registry/{id}/disable",
             axum::routing::post(disable_plugin),
         )
+        .layer(middleware::from_fn(crate::users::require_admin));
+
+    Router::new()
+        .route("/api/v1/plugins/registry", get(list_plugins))
+        .route("/api/v1/plugins/registry/{id}", get(get_plugin))
+        .merge(write_routes)
 }
 
 async fn list_plugins(

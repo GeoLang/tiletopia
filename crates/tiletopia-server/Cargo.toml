@@ -48,7 +48,6 @@ gltf = { workspace = true }
 petgraph = { workspace = true }
 cron = { workspace = true }
 printpdf = { workspace = true }
-casbin = { workspace = true }
 las = { workspace = true, features = ["laz"] }
 zip = { version = "8", default-features = false }
 wasmtime = { workspace = true, optional = true }
