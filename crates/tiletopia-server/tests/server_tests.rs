@@ -2187,4 +2187,184 @@ mod tests {
         assert!(may_modify_asset(&claims, Some("user-a")));
         assert!(may_view_asset(&claims, Some("user-a")));
     }
+
+    // -- persistence and the job worker --
+
+    const PLY_FIXTURE: &str = "\
+ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\n\
+property float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\n\
+end_header\n0.0 0.0 0.0 255 0 0\n1.0 0.0 0.0 0 255 0\n0.0 1.0 0.0 0 0 255\n\
+1.0 1.0 1.0 255 255 255\n";
+
+    /// Rows written through one `Database` are still there after the handle is
+    /// dropped and the same file is reopened, which is the whole point of
+    /// keeping assets and jobs in SQLite rather than in process memory.
+    #[tokio::test]
+    async fn assets_and_jobs_persist_across_reopen() {
+        use tiletopia_server::db::{Database, JobRecord, JobStatus};
+        use tiletopia_server::{Asset, AssetStatus, AssetType};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_url = format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("tiletopia.db").display()
+        );
+
+        let asset = Asset {
+            id: uuid::Uuid::new_v4(),
+            name: "survey.ply".into(),
+            asset_type: AssetType::PointCloud,
+            status: AssetStatus::Ready,
+            created_at: chrono::Utc::now(),
+            tile_count: 7,
+            size_bytes: 4096,
+            description: "reopen me".into(),
+            tags: vec!["survey".into(), "2026".into()],
+            owner_id: Some("user-a".into()),
+        };
+        let job = JobRecord {
+            id: uuid::Uuid::new_v4(),
+            asset_id: asset.id,
+            status: JobStatus::Done,
+            progress: 1.0,
+            input_path: "/data/survey.ply".into(),
+            output_format: "3dtiles".into(),
+            created_at: chrono::Utc::now(),
+            started_at: Some(chrono::Utc::now()),
+            completed_at: Some(chrono::Utc::now()),
+            error: None,
+            points_processed: 42,
+            tiles_written: 7,
+        };
+
+        {
+            let db = Database::new(&db_url).await.unwrap();
+            db.migrate().await.unwrap();
+            db.create_asset(&asset).await.unwrap();
+            db.create_job(&job).await.unwrap();
+            db.pool.close().await;
+        }
+
+        // migrate again on reopen, the way a restarted server does
+        let db = Database::new(&db_url).await.unwrap();
+        db.migrate().await.unwrap();
+
+        let stored = db
+            .get_asset(asset.id)
+            .await
+            .unwrap()
+            .expect("asset lost on reopen");
+        assert_eq!(stored.name, asset.name);
+        assert_eq!(stored.asset_type, AssetType::PointCloud);
+        assert!(matches!(stored.status, AssetStatus::Ready));
+        assert_eq!(stored.tile_count, 7);
+        assert_eq!(stored.size_bytes, 4096);
+        assert_eq!(stored.description, "reopen me");
+        assert_eq!(stored.tags, vec!["survey".to_string(), "2026".to_string()]);
+        assert_eq!(stored.owner_id.as_deref(), Some("user-a"));
+
+        let stored_job = db
+            .get_job(job.id)
+            .await
+            .unwrap()
+            .expect("job lost on reopen");
+        assert_eq!(stored_job.asset_id, asset.id);
+        assert_eq!(stored_job.status, JobStatus::Done);
+        assert!((stored_job.progress - 1.0).abs() < 1e-9);
+        assert_eq!(stored_job.input_path, "/data/survey.ply");
+        assert_eq!(stored_job.points_processed, 42);
+        assert_eq!(stored_job.tiles_written, 7);
+        assert!(stored_job.started_at.is_some());
+        assert!(stored_job.completed_at.is_some());
+
+        assert_eq!(db.list_assets().await.unwrap().len(), 1);
+        assert_eq!(db.list_jobs_for_asset(asset.id).await.unwrap().len(), 1);
+    }
+
+    /// Submitting returns immediately with a queued job, the background worker
+    /// picks it up and drives it to done. `started_at` is the durable witness of
+    /// the running transition: tiling four points takes milliseconds, so polling
+    /// for `status == Running` would race the worker.
+    #[tokio::test]
+    async fn job_lifecycle_queued_to_running_to_done() {
+        use tiletopia_server::db::JobStatus;
+        use tiletopia_server::{Asset, AssetStatus, AssetType};
+
+        let state = test_state().await;
+
+        let id = uuid::Uuid::new_v4();
+        let input_dir = state.data_dir.join(id.to_string()).join("input");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        let input_path = input_dir.join("cloud.ply");
+        std::fs::write(&input_path, PLY_FIXTURE).unwrap();
+
+        let asset = Asset {
+            id,
+            name: "cloud.ply".into(),
+            asset_type: AssetType::PointCloud,
+            status: AssetStatus::Uploading,
+            created_at: chrono::Utc::now(),
+            tile_count: 0,
+            size_bytes: PLY_FIXTURE.len() as u64,
+            description: String::new(),
+            tags: vec![],
+            owner_id: Some("user-a".into()),
+        };
+        state.db.create_asset(&asset).await.unwrap();
+
+        let job = state
+            .job_queue
+            .submit(id, input_path.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        assert_eq!(job.status, JobStatus::Queued);
+
+        // queued state is in the database before any worker exists, so a client
+        // can poll it straight after submit
+        let queued = state.db.get_job(job.id).await.unwrap().unwrap();
+        assert_eq!(queued.status, JobStatus::Queued);
+        assert!(queued.progress.abs() < 1e-9);
+        assert!(queued.started_at.is_none());
+        assert_eq!(
+            state.db.next_queued_job().await.unwrap().unwrap().id,
+            job.id
+        );
+
+        let worker = Arc::clone(&state.job_queue).start().await;
+
+        let mut settled = None;
+        for _ in 0..200 {
+            let current = state.db.get_job(job.id).await.unwrap().unwrap();
+            if matches!(current.status, JobStatus::Done | JobStatus::Failed) {
+                settled = Some(current);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        worker.abort();
+
+        let settled = settled.expect("job never left the queue");
+        assert_eq!(
+            settled.status,
+            JobStatus::Done,
+            "error: {:?}",
+            settled.error
+        );
+        assert!((settled.progress - 1.0).abs() < 1e-9);
+        assert!(
+            settled.started_at.is_some(),
+            "running transition not stored"
+        );
+        assert!(settled.completed_at.is_some());
+        assert!(settled.tiles_written > 0);
+        assert!(settled.error.is_none());
+
+        // the worker owns the asset status too
+        let tiled = state.db.get_asset(id).await.unwrap().unwrap();
+        assert!(matches!(tiled.status, AssetStatus::Ready));
+        assert_eq!(tiled.tile_count, settled.tiles_written);
+
+        // and no queued work is left behind
+        assert!(state.db.next_queued_job().await.unwrap().is_none());
+    }
 }

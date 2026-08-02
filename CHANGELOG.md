@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-02
+
+### Added
+- Tests covering asset and job persistence across a database reopen, and the job
+  lifecycle from queued through the background worker to done.
+
+### Changed
+- `deny.toml` allows `0BSD`, needed by varint-rs 2.2.1.
+- Roadmap phases 1.3 and 1.4 now describe the shipped SQLite store and job
+  worker, and list what is still open on each.
+
 ## [Unreleased] - 2026-08-01
 
 ### Security
