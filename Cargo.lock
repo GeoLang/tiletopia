@@ -3516,7 +3516,7 @@ dependencies = [
 [[package]]
 name = "geoplumb"
 version = "0.1.0"
-source = "git+https://github.com/GeoLang/geoplumb.git?branch=master#04944813c04fbdf85e4f38e32d41d3f64f8c5368"
+source = "git+https://github.com/GeoLang/geoplumb.git?branch=master#478783f191198475d60e323b5ea59f8d01f6dea3"
 dependencies = [
  "futures",
  "nubis-core 0.1.0 (git+https://github.com/GeoLang/nubis.git?branch=master)",
@@ -4333,7 +4333,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "system-configuration 0.7.0",
  "tokio",
  "tower-service",
@@ -7107,7 +7107,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls 0.23.40",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -7144,7 +7144,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -9190,7 +9190,7 @@ dependencies = [
 [[package]]
 name = "terrano-core"
 version = "0.1.0"
-source = "git+https://github.com/GeoLang/terrano.git?branch=master#8e1506d2a132c4471e879bcfe3076e7e36c86547"
+source = "git+https://github.com/GeoLang/terrano.git?branch=master#7a967ea3f638b656371e2391838032c40e4e1b2f"
 dependencies = [
  "flate2",
  "thiserror 2.0.18",

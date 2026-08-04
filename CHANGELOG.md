@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - 2026-08-04
 
 ### Added
+- `ndvi` joins the analysis tile ops: sentinel-2 L2A red and nir read over
+  STAC as one two-band raster (geoplumb's multi-asset source), reduced per
+  pixel to a median of the last month's items, band math `(nir - red) /
+  (nir + red - 2000)` in digital numbers (the baseline 04.00 offset cancels
+  in the numerator only), reprojected to web mercator and painted over a
+  brown-tan-green diverging ramp. Requires `TILETOPIA_ANALYSIS_DEM_BBOX`:
+  there is no synthetic vegetation, unset answers 500 naming the variable.
+  The trailing window anchors at engine build, like every source read.
 - `GET /api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` serves hillshade and slope
   tiles rendered on demand by the geoplumb pull engine, over the same elevation
   store and with the same colors as `POST /api/v1/analysis/terrain`. Hillshade

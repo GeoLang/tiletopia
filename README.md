@@ -262,6 +262,12 @@ of items. A malformed bbox refuses startup, and a search that fails answers
 500 rather than serving synthetic terrain under a layer that is meant to be
 real.
 
+The `ndvi` op reads sentinel-2 L2A red and nir over the same STAC API, reduced
+per pixel to a median of the last month's items so clouds fall out of the
+stack. It has no synthetic fallback: without the bbox variable, ndvi tiles
+answer 500. The trailing window anchors when the op's engine is first used and
+holds until restart.
+
 ### Use with CesiumJS
 
 ```javascript
@@ -337,7 +343,7 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `GET` | `/api/v1/scan-registration/demo` | ICP scan alignment |
 | `GET` | `/api/v1/issues` | List location-pinned issues |
 | `GET` | `/api/v1/terrain-analysis/operations` | Terrain analysis ops |
-| `GET` | `/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` | Hillshade or slope tiles, rendered on demand |
+| `GET` | `/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` | Hillshade, slope or ndvi tiles, rendered on demand |
 | `GET` | `/api/v1/geostatistics/methods` | List interpolation methods |
 | `GET` | `/api/v1/multispectral/indices` | Spectral indices (NDVI, etc.) |
 | `GET` | `/metrics` | Prometheus metrics |

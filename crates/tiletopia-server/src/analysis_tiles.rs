@@ -1,6 +1,6 @@
-//! On-demand terrain-analysis XYZ tiles over the geoplumb pull engine.
+//! On-demand analysis XYZ tiles over the geoplumb pull engine.
 //!
-//! `GET /api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` renders the same ops the
+//! `GET /api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` renders the terrain ops the
 //! one-shot `POST /api/v1/analysis/terrain` serves, but tile by tile: a graph of
 //! DEM source -> reproject to web mercator -> op, pulled per tile by the engine,
 //! which caches chunks and coalesces concurrent pulls of the same chunk.
@@ -9,8 +9,13 @@
 //! serves and the deterministic synthetic field fills in elsewhere, the same
 //! honesty story the one-shot endpoints have. Set `TILETOPIA_ANALYSIS_DEM_BBOX`
 //! and the engines read Copernicus GLO-30 COGs over STAC instead, streaming the
-//! window each tile needs. Colors come from the one-shot renderer either way, so
-//! the panel preview and the live layer agree.
+//! window each tile needs. Colors for those ops come from the one-shot renderer,
+//! so the panel preview and the live layer agree.
+//!
+//! The `ndvi` op has no one-shot or synthetic counterpart: it reads sentinel-2
+//! red and nir over STAC (band math on a median composite of the last month),
+//! so it serves only when the bbox variable is set, and fails loud otherwise
+//! rather than inventing vegetation.
 //!
 //! Known limit: an engine reads the source as it stood when the engine was
 //! built, on the first request for that op. A DEM loaded afterwards is not
@@ -32,7 +37,7 @@ use geoplumb::caps::{
 };
 use geoplumb::chunk::{Chunk, RasterChunk};
 use geoplumb::element::{Source, Transform};
-use geoplumb::elements::{Hillshade, Reproject, Slope, StacSearch, StacSrc};
+use geoplumb::elements::{BandMath, Composite, Hillshade, Reproject, Slope, StacSearch, StacSrc};
 use geoplumb::tile::{XyzTile, render_tile};
 use geoplumb::window::{GridSpec, WindowReq};
 use geoplumb::{Engine, Graph, NodeId};
@@ -78,6 +83,19 @@ const DEFAULT_STAC_API: &str = "https://earth-search.aws.element84.com/v1";
 const STAC_COLLECTION: &str = "cop-dem-glo-30";
 const STAC_ASSET: &str = "data";
 
+/// Sentinel-2 L2A surface reflectance, one COG per band.
+const S2_COLLECTION: &str = "sentinel-2-l2a";
+const S2_ASSETS: [&str; 2] = ["red", "nir"];
+
+/// How far behind now the ndvi composite reaches. Sentinel-2 revisits every
+/// five days, so a month holds enough items for the median to shed clouds.
+const NDVI_WINDOW_DAYS: i64 = 30;
+
+/// NDVI in digital numbers. Reflectance is (dn - 1000) / 10000 since
+/// processing baseline 04.00 (every item the trailing window can see), so
+/// the offset cancels in the numerator but not the denominator.
+const NDVI_EXPR: &str = "(b1 - b0) / (b1 + b0 - 2000)";
+
 /// Renders allowed in flight, one core each. A cold tile is a few hundred
 /// milliseconds of CPU and the route is anonymous, so without a cap one caller
 /// pins every core.
@@ -99,6 +117,7 @@ pub fn analysis_tile_routes() -> Router<Arc<AppState>> {
 enum Op {
     Hillshade,
     Slope,
+    Ndvi,
 }
 
 impl Op {
@@ -106,6 +125,7 @@ impl Op {
         match s {
             "hillshade" => Some(Op::Hillshade),
             "slope" => Some(Op::Slope),
+            "ndvi" => Some(Op::Ndvi),
             _ => None,
         }
     }
@@ -149,7 +169,7 @@ impl EngineKey {
                 azimuth: deci(azimuth).rem_euclid(AZIMUTH_STEPS),
                 altitude: deci(altitude.clamp(0.0, 90.0)),
             },
-            Op::Slope => EngineKey {
+            Op::Slope | Op::Ndvi => EngineKey {
                 op,
                 azimuth: 0,
                 altitude: 0,
@@ -182,8 +202,21 @@ impl StacConfig {
     /// searches lazily per pulled window in cached two-degree blocks, so tiles
     /// past the bbox resolve too. A tile needing more than 32 cold block
     /// searches fails, which rules out roughly zoom 5 and below.
-    fn search(&self) -> StacSearch {
+    fn dem_search(&self) -> StacSearch {
         StacSearch::new(&self.api, STAC_COLLECTION, STAC_ASSET, self.bbox)
+    }
+
+    /// Sentinel-2 red and nir over the same anchor bbox, every item of the
+    /// last month reduced to a per-pixel median, so clouds and swath edges
+    /// fall out of the stack. The window anchors on `now` at engine build
+    /// and holds until the server restarts, like everything a source reads.
+    fn ndvi_search(&self, now: chrono::DateTime<chrono::Utc>) -> StacSearch {
+        let start = now - chrono::Duration::days(NDVI_WINDOW_DAYS);
+        let mut search = StacSearch::new(&self.api, S2_COLLECTION, S2_ASSETS[0], self.bbox);
+        search.assets = S2_ASSETS.iter().map(|a| a.to_string()).collect();
+        search.datetime = Some(format!("{}/..", start.format("%Y-%m-%dT%H:%M:%SZ")));
+        search.composite = Composite::Median;
+        search
     }
 }
 
@@ -337,11 +370,12 @@ fn find(
         .map(|(_, engine, node)| (Arc::clone(engine), *node))
 }
 
-/// DEM source, then the reprojection, then the op: the terrain kernels read
-/// their cell size off the raster they are handed, so they have to run on the
-/// metric grid rather than on degrees. A web mercator metre is stretched by
-/// 1/cos(latitude), so a slope tile reads shallower than the one-shot endpoint,
-/// which samples in ground metres.
+/// Terrain ops run source -> reprojection -> op: the kernels read their cell
+/// size off the raster they are handed, so they have to run on the metric grid
+/// rather than on degrees. A web mercator metre is stretched by 1/cos(latitude),
+/// so a slope tile reads shallower than the one-shot endpoint, which samples in
+/// ground metres. NDVI is per pixel and indifferent to the grid, so it computes
+/// before the reprojection, on one band instead of two.
 fn build_engine(
     key: EngineKey,
     source: &SourceConfig,
@@ -349,24 +383,39 @@ fn build_engine(
 ) -> geoplumb::Result<(Arc<Engine>, NodeId)> {
     // opening a STAC source searches the api, which is why this whole function
     // runs on a blocking thread
-    let elevation: Box<dyn Source> = match source {
-        SourceConfig::Synthetic => Box::new(DemSource::new(store)),
-        SourceConfig::Stac(cfg) => Box::new(StacSrc::open(&cfg.search())?),
-        SourceConfig::Misconfigured(detail) => {
-            return Err(geoplumb::Error::Source(detail.clone()));
+    if let SourceConfig::Misconfigured(detail) = source {
+        return Err(geoplumb::Error::Source(detail.clone()));
+    }
+    let mut graph = Graph::new();
+    let out = match key.op {
+        Op::Ndvi => {
+            let SourceConfig::Stac(cfg) = source else {
+                return Err(geoplumb::Error::Source(format!(
+                    "ndvi tiles read sentinel-2 over stac, set {BBOX_VAR}"
+                )));
+            };
+            let src = StacSrc::open(&cfg.ndvi_search(chrono::Utc::now()))?;
+            let s2 = graph.add_source(Box::new(src));
+            let ndvi = graph.add_transform(s2, Box::new(BandMath::new(NDVI_EXPR)?));
+            graph.add_transform(ndvi, Box::new(Reproject::new(Crs::WEB_MERCATOR)))
+        }
+        Op::Hillshade | Op::Slope => {
+            let elevation: Box<dyn Source> = match source {
+                SourceConfig::Stac(cfg) => Box::new(StacSrc::open(&cfg.dem_search())?),
+                _ => Box::new(DemSource::new(store)),
+            };
+            let dem = graph.add_source(elevation);
+            let merc = graph.add_transform(dem, Box::new(Reproject::new(Crs::WEB_MERCATOR)));
+            let element: Box<dyn Transform> = match key.op {
+                Op::Hillshade => Box::new(Hillshade::new(
+                    key.azimuth as f64 / 10.0,
+                    key.altitude as f64 / 10.0,
+                )),
+                _ => Box::new(Slope),
+            };
+            graph.add_transform(merc, element)
         }
     };
-    let mut graph = Graph::new();
-    let dem = graph.add_source(elevation);
-    let merc = graph.add_transform(dem, Box::new(Reproject::new(Crs::WEB_MERCATOR)));
-    let element: Box<dyn Transform> = match key.op {
-        Op::Hillshade => Box::new(Hillshade::new(
-            key.azimuth as f64 / 10.0,
-            key.altitude as f64 / 10.0,
-        )),
-        Op::Slope => Box::new(Slope),
-    };
-    let out = graph.add_transform(merc, element);
     Ok((Arc::new(Engine::new(graph, CHUNK_BUDGET_BYTES)?), out))
 }
 
@@ -418,15 +467,33 @@ async fn analysis_tile(
     Ok(([(header::CONTENT_TYPE, "image/png")], png).into_response())
 }
 
-/// Paint the op band with the one-shot endpoint's own renderer, so a tile and
-/// the panel's bbox preview of the same terrain look the same.
+/// Paint the op band. The terrain ops use the one-shot endpoint's own
+/// renderer, so a tile and the panel's bbox preview of the same terrain look
+/// the same. NDVI has no one-shot counterpart, its ramp is defined here.
 fn tile_png(chunk: &RasterChunk, op: Op) -> Option<Vec<u8>> {
     let band = chunk.bands.band(0)?;
     let color = match op {
         Op::Hillshade => analysis::hillshade_color,
         Op::Slope => analysis::slope_color,
+        Op::Ndvi => ndvi_color,
     };
     Some(analysis::raster_png(band, color))
+}
+
+/// NDVI over the usual diverging ramp: -1 reads as bare brown, zero as tan,
+/// +1 as deep green. Nodata never reaches this, `raster_png` clears it.
+fn ndvi_color(v: f64) -> [u8; 4] {
+    let v = v.clamp(-1.0, 1.0);
+    let (from, to, t) = if v < 0.0 {
+        ([0.42, 0.30, 0.21], [0.84, 0.79, 0.69], v + 1.0)
+    } else {
+        ([0.84, 0.79, 0.69], [0.0, 0.35, 0.09], v)
+    };
+    let [r, g, b] = [0, 1, 2].map(|i| {
+        let c: f64 = from[i] + (to[i] - from[i]) * t;
+        (c * 255.0).round() as u8
+    });
+    [r, g, b, 255]
 }
 
 /// geoplumb source over the elevation store: every pixel is an
@@ -624,10 +691,71 @@ mod tests {
         };
         assert_eq!(cfg.bbox, [7.0, 46.3, 8.0, 46.9]);
         assert_eq!(cfg.api, DEFAULT_STAC_API);
-        let search = cfg.search();
+        let search = cfg.dem_search();
         assert_eq!(search.collection, STAC_COLLECTION);
-        assert_eq!(search.asset, STAC_ASSET);
+        assert_eq!(search.assets, vec![STAC_ASSET.to_string()]);
         assert_eq!(search.bbox, [7.0, 46.3, 8.0, 46.9]);
+    }
+
+    /// The ndvi graph reads red and nir cogs as one two-band raster reduced
+    /// to a trailing median, so the composite sheds clouds at the source.
+    #[test]
+    fn the_ndvi_search_names_both_bands_and_a_trailing_median() {
+        let Ok(SourceConfig::Stac(cfg)) = source_config(Some("7,46,8,47"), None) else {
+            panic!("expected a stac source");
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-04T12:30:00Z")
+            .unwrap()
+            .to_utc();
+        let search = cfg.ndvi_search(now);
+        assert_eq!(search.collection, S2_COLLECTION);
+        assert_eq!(search.assets, vec!["red".to_string(), "nir".to_string()]);
+        assert_eq!(search.datetime.as_deref(), Some("2026-07-05T12:30:00Z/.."));
+        assert_eq!(search.composite, Composite::Median);
+        assert_eq!(search.bbox, [7.0, 46.0, 8.0, 47.0]);
+    }
+
+    /// No synthetic vegetation: without the bbox variable an ndvi engine
+    /// refuses to build, naming the variable, instead of serving something.
+    #[test]
+    fn ndvi_without_a_bbox_fails_naming_the_variable() {
+        let key = EngineKey::new(Op::Ndvi, &TileParams::default()).expect("key");
+        let built = build_engine(key, &SourceConfig::Synthetic, Arc::new(DemStore::new()));
+        let Err(err) = built else {
+            panic!("ndvi cannot build on the synthetic source");
+        };
+        assert!(err.to_string().contains(BBOX_VAR), "{err}");
+    }
+
+    /// The angles are sun parameters, meaningless to ndvi: they neither key
+    /// separate engines nor excuse a malformed request.
+    #[test]
+    fn ndvi_ignores_the_angles_but_still_rejects_malformed_ones() {
+        let key = |azimuth| {
+            EngineKey::new(
+                Op::Ndvi,
+                &TileParams {
+                    azimuth: Some(azimuth),
+                    altitude: None,
+                },
+            )
+        };
+        assert_eq!(key(315.0), key(45.0));
+        assert_eq!(key(f64::NAN), None);
+    }
+
+    /// The ramp's fixed points: brown at bare, tan at zero, green at dense.
+    #[test]
+    fn ndvi_colors_diverge_around_zero() {
+        let [r, g, b, a] = ndvi_color(-1.0);
+        assert!(r > g && g > b && a == 255, "bare ground is brown");
+        let [r, g, b, _] = ndvi_color(1.0);
+        assert!(g > r && g > b, "dense vegetation is green");
+        let mid = ndvi_color(0.0);
+        assert_eq!(mid, [214, 201, 176, 255], "zero is tan");
+        // past the domain clamps rather than wrapping
+        assert_eq!(ndvi_color(-2.0), ndvi_color(-1.0));
+        assert_eq!(ndvi_color(2.0), ndvi_color(1.0));
     }
 
     #[test]
