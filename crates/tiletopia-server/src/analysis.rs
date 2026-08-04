@@ -383,12 +383,14 @@ fn range(r: &Raster) -> (f64, f64) {
     if mn > mx { (0.0, 1.0) } else { (mn, mx) }
 }
 
-fn raster_png<C: Fn(f64) -> [u8; 4]>(r: &Raster, color: C) -> Vec<u8> {
+/// Paint a raster band. Nodata is transparent, and so is NaN: a raster that
+/// carries NaN nodata (the analysis tiles do) reads as no data either way.
+pub(crate) fn raster_png<C: Fn(f64) -> [u8; 4]>(r: &Raster, color: C) -> Vec<u8> {
     let mut img = RgbaImage::new(r.width() as u32, r.height() as u32);
     for row in 0..r.height() {
         for col in 0..r.width() {
             let v = r.get(row, col).unwrap();
-            let px = if r.is_nodata(v) {
+            let px = if r.is_nodata(v) || !v.is_finite() {
                 [0, 0, 0, 0]
             } else {
                 color(v)
@@ -402,20 +404,24 @@ fn raster_png<C: Fn(f64) -> [u8; 4]>(r: &Raster, color: C) -> Vec<u8> {
     buf.into_inner()
 }
 
+/// Hillshade illumination, 0..255, as opaque grey.
+pub(crate) fn hillshade_color(v: f64) -> [u8; 4] {
+    let g = v.clamp(0.0, 255.0) as u8;
+    [g, g, g, 255]
+}
+
+/// Slope degrees over the ramp, 0..60.
+pub(crate) fn slope_color(v: f64) -> [u8; 4] {
+    let [r, g, b] = ramp((v / 60.0).clamp(0.0, 1.0));
+    [r, g, b, 255]
+}
+
 fn hillshade_png(dem: &Raster, azimuth: f64, altitude: f64) -> Vec<u8> {
-    let hs = hillshade(dem, azimuth, altitude);
-    raster_png(&hs, |v| {
-        let g = v.clamp(0.0, 255.0) as u8;
-        [g, g, g, 255]
-    })
+    raster_png(&hillshade(dem, azimuth, altitude), hillshade_color)
 }
 
 fn slope_png(dem: &Raster) -> Vec<u8> {
-    let sl = slope(dem);
-    raster_png(&sl, |v| {
-        let [r, g, b] = ramp((v / 60.0).clamp(0.0, 1.0)); // 0..60 degrees
-        [r, g, b, 255]
-    })
+    raster_png(&slope(dem), slope_color)
 }
 
 fn aspect_png(dem: &Raster) -> Vec<u8> {

@@ -64,7 +64,8 @@ mod tests {
             map_tile_engine: tiletopia_server::map_tiles::MapTileEngine::new(),
             feature_service_engine: tiletopia_server::feature_service::FeatureServiceEngine::new(),
             issue_tracker: tiletopia_server::issue_tracking::IssueTracker::new(),
-            elevation_store: tiletopia_server::elevation::DemStore::new(),
+            elevation_store: Arc::new(tiletopia_server::elevation::DemStore::new()),
+            analysis_engines: tiletopia_server::analysis_tiles::AnalysisEngines::new(),
             entity_link_store: tiletopia_server::entity_linking::EntityLinkStore::new(),
         })
     }
@@ -575,6 +576,97 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(ct.unwrap(), "image/png");
         image::load_from_memory(&bytes).expect("valid png");
+    }
+
+    // -- analysis xyz tiles --
+
+    /// A tile over the shared state, so repeat calls hit the same engine.
+    async fn get_tile_bytes(state: &Arc<AppState>, uri: &str) -> (StatusCode, Vec<u8>) {
+        let resp = router(Arc::clone(state))
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        (status, bytes)
+    }
+
+    fn distinct_pixels(img: &image::DynamicImage) -> usize {
+        let mut seen: Vec<[u8; 4]> = img.to_rgba8().pixels().map(|p| p.0).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        seen.len()
+    }
+
+    #[tokio::test]
+    async fn analysis_xyz_hillshade_tile_is_a_256_png() {
+        let state = test_state().await;
+        let (status, bytes) =
+            get_tile_bytes(&state, "/api/v1/analysis/xyz/hillshade/12/2132/1493.png").await;
+        assert_eq!(status, StatusCode::OK);
+        let img = image::load_from_memory(&bytes).expect("valid png");
+        assert_eq!((img.width(), img.height()), (256, 256));
+        // a flat tile would mean the pull never reached the terrain
+        assert!(distinct_pixels(&img) > 8);
+    }
+
+    #[tokio::test]
+    async fn analysis_xyz_slope_tile_renders() {
+        let state = test_state().await;
+        let (status, bytes) =
+            get_tile_bytes(&state, "/api/v1/analysis/xyz/slope/12/2132/1493.png").await;
+        assert_eq!(status, StatusCode::OK);
+        let img = image::load_from_memory(&bytes).expect("valid png");
+        assert_eq!(img.width(), 256);
+        assert!(distinct_pixels(&img) > 8);
+    }
+
+    /// The second call comes off the engine's chunk cache, so it has to render
+    /// the same tile, not merely another valid one.
+    #[tokio::test]
+    async fn analysis_xyz_repeat_tile_is_identical() {
+        let state = test_state().await;
+        let uri = "/api/v1/analysis/xyz/hillshade/12/2132/1493.png";
+        let (first_status, first) = get_tile_bytes(&state, uri).await;
+        let (second_status, second) = get_tile_bytes(&state, uri).await;
+        assert_eq!(first_status, StatusCode::OK);
+        assert_eq!(second_status, StatusCode::OK);
+        assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn analysis_xyz_azimuth_changes_the_tile() {
+        let state = test_state().await;
+        let (_, east) = get_tile_bytes(
+            &state,
+            "/api/v1/analysis/xyz/hillshade/12/2132/1493.png?azimuth=90",
+        )
+        .await;
+        let (_, west) = get_tile_bytes(
+            &state,
+            "/api/v1/analysis/xyz/hillshade/12/2132/1493.png?azimuth=270",
+        )
+        .await;
+        assert!(!east.is_empty());
+        assert_ne!(east, west);
+    }
+
+    #[tokio::test]
+    async fn analysis_xyz_unknown_op_is_rejected() {
+        let state = test_state().await;
+        let (status, _) =
+            get_tile_bytes(&state, "/api/v1/analysis/xyz/viewshed/12/2132/1493.png").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn analysis_xyz_out_of_range_tile_is_not_found() {
+        let state = test_state().await;
+        let (status, _) = get_tile_bytes(&state, "/api/v1/analysis/xyz/slope/2/9/1.png").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     // -- role management --

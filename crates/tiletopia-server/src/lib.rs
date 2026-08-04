@@ -5,6 +5,7 @@
 
 pub mod admin;
 pub mod analysis;
+pub mod analysis_tiles;
 pub mod annotations;
 pub mod api_keys;
 pub mod arvr;
@@ -123,7 +124,9 @@ pub struct AppState {
     pub map_tile_engine: map_tiles::MapTileEngine,
     pub feature_service_engine: feature_service::FeatureServiceEngine,
     pub issue_tracker: issue_tracking::IssueTracker,
-    pub elevation_store: elevation::DemStore,
+    /// Shared, so the analysis tile engines can sample it from their own graph.
+    pub elevation_store: Arc<elevation::DemStore>,
+    pub analysis_engines: analysis_tiles::AnalysisEngines,
     pub entity_link_store: entity_linking::EntityLinkStore,
 }
 
@@ -314,6 +317,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::issue_tracking_routes())
         .merge(premium_routes::terrain_analysis_routes())
         .merge(analysis::analysis_routes())
+        .merge(analysis_tiles::analysis_tile_routes())
         .merge(premium_routes::geostatistics_routes())
         .merge(premium_routes::multispectral_routes())
         .merge(premium_routes::osm_buildings_routes())

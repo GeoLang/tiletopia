@@ -17,6 +17,8 @@ itinera-match = { workspace = true }
 geokode-core = { workspace = true }
 nubis-core = { workspace = true }
 terrano-core = { workspace = true }
+geoplumb = { workspace = true }
+futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

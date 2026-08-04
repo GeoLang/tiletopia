@@ -130,7 +130,8 @@ itinera-graph = { git = "https://github.com/GeoLang/itinera.git" }
 itinera-match = { git = "https://github.com/GeoLang/itinera.git" }
 geokode-core = { git = "https://github.com/GeoLang/geokode.git", tag = "v0.1.0" }
 nubis-core = { git = "https://github.com/GeoLang/nubis.git", tag = "v0.1.0" }
-terrano-core = { git = "https://github.com/GeoLang/terrano.git", tag = "v0.1.0" }
+terrano-core = { git = "https://github.com/GeoLang/terrano.git", branch = "master" }
+geoplumb = { git = "https://github.com/GeoLang/geoplumb.git", branch = "master" }
 
 [patch.crates-io]
 draco-rs = { path = "patches/draco-rs" }

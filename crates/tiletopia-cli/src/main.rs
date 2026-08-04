@@ -204,7 +204,8 @@ async fn main() -> anyhow::Result<()> {
                 feature_service_engine:
                     tiletopia_server::feature_service::FeatureServiceEngine::new(),
                 issue_tracker: tiletopia_server::issue_tracking::IssueTracker::new(),
-                elevation_store: tiletopia_server::elevation::DemStore::new(),
+                elevation_store: std::sync::Arc::new(tiletopia_server::elevation::DemStore::new()),
+                analysis_engines: tiletopia_server::analysis_tiles::AnalysisEngines::new(),
                 entity_link_store: tiletopia_server::entity_linking::EntityLinkStore::new(),
             });
 

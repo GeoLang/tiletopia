@@ -102,6 +102,17 @@ impl DemStore {
         self.grids.push(grid);
     }
 
+    /// The best-resolution grid loaded, whatever it covers. Callers that need a
+    /// grid to anchor a pixel ladder on use this; point lookups go through
+    /// [`DemStore::find_grid`], which also checks coverage.
+    pub fn finest_grid(&self) -> Option<&DemGrid> {
+        self.grids.iter().min_by(|a, b| {
+            let res_a = a.cell_size_x * a.cell_size_y;
+            let res_b = b.cell_size_x * b.cell_size_y;
+            res_a.partial_cmp(&res_b).unwrap()
+        })
+    }
+
     /// Find the grid containing this point, preferring the best (smallest cell) resolution.
     fn find_grid(&self, lat: f64, lon: f64) -> Option<&DemGrid> {
         self.grids
