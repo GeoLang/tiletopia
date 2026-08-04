@@ -266,7 +266,10 @@ The `ndvi` op reads sentinel-2 L2A red and nir over the same STAC API, reduced
 per pixel to a median of the last month's items so clouds fall out of the
 stack. It has no synthetic fallback: without the bbox variable, ndvi tiles
 answer 500. The trailing window anchors when the op's engine is first used and
-holds until restart.
+holds until restart. A cold tile reads every item behind the median, a few
+dozen COGs over sequential range requests, which takes minutes today: only a
+tile already in the chunk cache comes back instantly. Treat the layer as batch
+until geoplumb reads composite items in parallel.
 
 ### Use with CesiumJS
 
