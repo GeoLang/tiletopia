@@ -3516,7 +3516,7 @@ dependencies = [
 [[package]]
 name = "geoplumb"
 version = "0.1.0"
-source = "git+https://github.com/GeoLang/geoplumb.git?branch=master#478783f191198475d60e323b5ea59f8d01f6dea3"
+source = "git+https://github.com/GeoLang/geoplumb.git?branch=master#ab6bc330eaaee9281c6361746a7e829b3434d508"
 dependencies = [
  "futures",
  "nubis-core 0.1.0 (git+https://github.com/GeoLang/nubis.git?branch=master)",
@@ -4333,7 +4333,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "system-configuration 0.7.0",
  "tokio",
  "tower-service",
@@ -7107,7 +7107,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls 0.23.40",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -7144,7 +7144,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.59.0",
 ]
