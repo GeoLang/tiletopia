@@ -150,6 +150,8 @@ async fn main() -> anyhow::Result<()> {
             // checked before anything else: serving with no JWT secret would
             // leave every endpoint open, so refuse to start instead
             tiletopia_server::auth::startup_check().map_err(anyhow::Error::msg)?;
+            // a bbox typo would otherwise only show up as failing analysis tiles
+            tiletopia_server::analysis_tiles::startup_check().map_err(anyhow::Error::msg)?;
 
             std::fs::create_dir_all(&data_dir)?;
 

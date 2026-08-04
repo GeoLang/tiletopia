@@ -5,12 +5,14 @@
 //! DEM source -> reproject to web mercator -> op, pulled per tile by the engine,
 //! which caches chunks and coalesces concurrent pulls of the same chunk.
 //!
-//! Elevation comes from `elevation::get_elevation`, so a loaded DEM serves and
-//! the deterministic synthetic field fills in elsewhere, the same honesty story
-//! the one-shot endpoints have. Colors come from the one-shot renderer, so the
-//! panel preview and the live layer agree.
+//! Elevation comes from `elevation::get_elevation` by default, so a loaded DEM
+//! serves and the deterministic synthetic field fills in elsewhere, the same
+//! honesty story the one-shot endpoints have. Set `TILETOPIA_ANALYSIS_DEM_BBOX`
+//! and the engines read Copernicus GLO-30 COGs over STAC instead, streaming the
+//! window each tile needs. Colors come from the one-shot renderer either way, so
+//! the panel preview and the live layer agree.
 //!
-//! Known limit: an engine samples the DEM store as it stood when the engine was
+//! Known limit: an engine reads the source as it stood when the engine was
 //! built, on the first request for that op. A DEM loaded afterwards is not
 //! picked up until the server restarts.
 
@@ -30,7 +32,7 @@ use geoplumb::caps::{
 };
 use geoplumb::chunk::{Chunk, RasterChunk};
 use geoplumb::element::{Source, Transform};
-use geoplumb::elements::{Hillshade, Reproject, Slope};
+use geoplumb::elements::{Hillshade, Reproject, Slope, StacSearch, StacSrc};
 use geoplumb::tile::{XyzTile, render_tile};
 use geoplumb::window::{GridSpec, WindowReq};
 use geoplumb::{Engine, Graph, NodeId};
@@ -61,6 +63,20 @@ const SYNTHETIC_RESOLUTION_DEG: f64 = 1e-4;
 
 /// Angles are keyed in tenths of a degree, so a turn is this many steps.
 const AZIMUTH_STEPS: i64 = 3600;
+
+/// Search bbox, `west,south,east,north` in degrees. Setting it puts the engines
+/// on real elevation, unset leaves them on the DEM store and its synthetic
+/// fallback.
+pub const BBOX_VAR: &str = "TILETOPIA_ANALYSIS_DEM_BBOX";
+
+/// STAC API root, for pointing the search at a mirror of the default.
+pub const STAC_API_VAR: &str = "TILETOPIA_ANALYSIS_STAC_API";
+
+const DEFAULT_STAC_API: &str = "https://earth-search.aws.element84.com/v1";
+
+/// Copernicus GLO-30, global 30 m elevation, one COG per degree square.
+const STAC_COLLECTION: &str = "cop-dem-glo-30";
+const STAC_ASSET: &str = "data";
 
 /// Renders allowed in flight, one core each. A cold tile is a few hundred
 /// milliseconds of CPU and the route is anonymous, so without a cap one caller
@@ -95,7 +111,7 @@ impl Op {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct TileParams {
     azimuth: Option<f64>,
     altitude: Option<f64>,
@@ -142,11 +158,101 @@ impl EngineKey {
     }
 }
 
+/// Where the analysis engines read elevation.
+#[derive(Debug, Clone, PartialEq)]
+enum SourceConfig {
+    /// The elevation store, synthetic where no loaded grid covers the window.
+    Synthetic,
+    /// Copernicus GLO-30 over STAC, searched once per engine build.
+    Stac(StacConfig),
+    /// The environment names a source that cannot be honoured. Tiles fail with
+    /// this instead of quietly serving synthetic terrain under a real-data
+    /// layer, and [`startup_check`] reports it before the server serves at all.
+    Misconfigured(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct StacConfig {
+    api: String,
+    bbox: [f64; 4],
+}
+
+impl StacConfig {
+    /// geoplumb searches once when the source opens and keeps the first page,
+    /// 100 items. A GLO-30 item is a one-degree square, so a bbox past about
+    /// 10 by 10 degrees drops items and the tiles over them come back empty:
+    /// configure the area actually being served, not a continent.
+    fn search(&self) -> StacSearch {
+        StacSearch::new(&self.api, STAC_COLLECTION, STAC_ASSET, self.bbox)
+    }
+}
+
+/// Refuse to serve on an analysis DEM configuration that cannot be honoured,
+/// the way the auth secret is checked: a typo in the bbox would otherwise only
+/// show up as 500s on the tile route.
+pub fn startup_check() -> Result<(), String> {
+    source_from_env().map(|_| ())
+}
+
+fn source_from_env() -> Result<SourceConfig, String> {
+    source_config(
+        std::env::var(BBOX_VAR).ok().as_deref(),
+        std::env::var(STAC_API_VAR).ok().as_deref(),
+    )
+}
+
+/// The [`startup_check`] rule over its two inputs, so it is testable without
+/// touching process-global environment variables. No bbox means no STAC source,
+/// which is what keeps the default build and its tests off the network.
+fn source_config(bbox: Option<&str>, api: Option<&str>) -> Result<SourceConfig, String> {
+    let Some(raw) = bbox.map(str::trim).filter(|b| !b.is_empty()) else {
+        return Ok(SourceConfig::Synthetic);
+    };
+    let api = api
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .unwrap_or(DEFAULT_STAC_API);
+    Ok(SourceConfig::Stac(StacConfig {
+        api: api.to_string(),
+        bbox: parse_bbox(raw)?,
+    }))
+}
+
+fn parse_bbox(raw: &str) -> Result<[f64; 4], String> {
+    let bad =
+        |detail: String| format!("{BBOX_VAR} {detail}, expected west,south,east,north in degrees");
+    let parts: Vec<&str> = raw.split(',').collect();
+    if parts.len() != 4 {
+        return Err(bad(format!("has {} values", parts.len())));
+    }
+    let mut bbox = [0.0; 4];
+    for (slot, part) in bbox.iter_mut().zip(&parts) {
+        *slot = part
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| bad(format!("has {part:?} where a number belongs")))?;
+    }
+    let [west, south, east, north] = bbox;
+    if !(-180.0..=180.0).contains(&west) || !(-180.0..=180.0).contains(&east) {
+        return Err(bad("has a longitude outside -180..180".into()));
+    }
+    if !(-90.0..=90.0).contains(&south) || !(-90.0..=90.0).contains(&north) {
+        return Err(bad("has a latitude outside -90..90".into()));
+    }
+    if west >= east || south >= north {
+        return Err(bad("covers no ground".into()));
+    }
+    Ok(bbox)
+}
+
 /// Engines built on demand, one per op and parameter set. Building one solves
 /// the graph, and it then holds the chunk cache that makes the next tile cheap,
 /// so engines are kept and shared rather than rebuilt per request.
 pub struct AnalysisEngines {
     built: Mutex<Vec<(EngineKey, Arc<Engine>, NodeId)>>,
+    source: SourceConfig,
     render_slots: Semaphore,
     render_wait: Duration,
 }
@@ -168,6 +274,7 @@ impl AnalysisEngines {
     pub fn with_render_limits(slots: usize, wait: Duration) -> Self {
         AnalysisEngines {
             built: Mutex::new(Vec::new()),
+            source: source_from_env().unwrap_or_else(SourceConfig::Misconfigured),
             render_slots: Semaphore::new(slots),
             render_wait: wait,
         }
@@ -199,10 +306,11 @@ impl AnalysisEngines {
             return Ok(hit);
         }
         // off the lock and off the async worker: solving the graph builds two
-        // projections, and holding the map across it would serialize every tile
-        // request behind one build
+        // projections and a STAC source searches the api, and holding the map
+        // across it would serialize every tile request behind one build
         let store = Arc::clone(store);
-        let (engine, node) = tokio::task::spawn_blocking(move || build_engine(key, store))
+        let source = self.source.clone();
+        let (engine, node) = tokio::task::spawn_blocking(move || build_engine(key, &source, store))
             .await
             .expect("engine build task panicked")?;
 
@@ -234,9 +342,22 @@ fn find(
 /// metric grid rather than on degrees. A web mercator metre is stretched by
 /// 1/cos(latitude), so a slope tile reads shallower than the one-shot endpoint,
 /// which samples in ground metres.
-fn build_engine(key: EngineKey, store: Arc<DemStore>) -> geoplumb::Result<(Arc<Engine>, NodeId)> {
+fn build_engine(
+    key: EngineKey,
+    source: &SourceConfig,
+    store: Arc<DemStore>,
+) -> geoplumb::Result<(Arc<Engine>, NodeId)> {
+    // opening a STAC source searches the api, which is why this whole function
+    // runs on a blocking thread
+    let elevation: Box<dyn Source> = match source {
+        SourceConfig::Synthetic => Box::new(DemSource::new(store)),
+        SourceConfig::Stac(cfg) => Box::new(StacSrc::open(&cfg.search())?),
+        SourceConfig::Misconfigured(detail) => {
+            return Err(geoplumb::Error::Source(detail.clone()));
+        }
+    };
     let mut graph = Graph::new();
-    let dem = graph.add_source(Box::new(DemSource::new(store)));
+    let dem = graph.add_source(elevation);
     let merc = graph.add_transform(dem, Box::new(Reproject::new(Crs::WEB_MERCATOR)));
     let element: Box<dyn Transform> = match key.op {
         Op::Hillshade => Box::new(Hillshade::new(
@@ -481,6 +602,85 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// Unset means the synthetic source, which is what keeps every other test
+    /// in this repo off the network.
+    #[test]
+    fn no_bbox_leaves_the_engines_synthetic() {
+        assert_eq!(source_config(None, None), Ok(SourceConfig::Synthetic));
+        assert_eq!(source_config(Some("  "), None), Ok(SourceConfig::Synthetic));
+        // an api on its own configures nothing: the bbox is the switch
+        assert_eq!(
+            source_config(None, Some("https://example.test/v1")),
+            Ok(SourceConfig::Synthetic)
+        );
+    }
+
+    #[test]
+    fn a_bbox_selects_the_stac_source() {
+        let Ok(SourceConfig::Stac(cfg)) = source_config(Some("7.0, 46.3, 8.0,46.9"), None) else {
+            panic!("expected a stac source");
+        };
+        assert_eq!(cfg.bbox, [7.0, 46.3, 8.0, 46.9]);
+        assert_eq!(cfg.api, DEFAULT_STAC_API);
+        let search = cfg.search();
+        assert_eq!(search.collection, STAC_COLLECTION);
+        assert_eq!(search.asset, STAC_ASSET);
+        assert_eq!(search.bbox, [7.0, 46.3, 8.0, 46.9]);
+    }
+
+    #[test]
+    fn the_api_url_is_overridable() {
+        let Ok(SourceConfig::Stac(cfg)) =
+            source_config(Some("7,46,8,47"), Some("https://stac.example.test/v1"))
+        else {
+            panic!("expected a stac source");
+        };
+        assert_eq!(cfg.api, "https://stac.example.test/v1");
+    }
+
+    /// A malformed bbox is refused rather than rounded into something servable:
+    /// the whole point of the variable is that the layer is real data.
+    #[test]
+    fn a_malformed_bbox_is_an_error() {
+        for raw in [
+            "7,46,8",
+            "7,46,8,47,48",
+            "7,46,eight,47",
+            "7,46,,47",
+            "7,46,nan,47",
+            "7,46,inf,47",
+            // reversed or empty
+            "8,46,7,47",
+            "7,47,8,46",
+            "7,46,7,47",
+            // off the globe
+            "-181,46,8,47",
+            "7,-91,8,47",
+        ] {
+            let err = source_config(Some(raw), None).unwrap_err();
+            assert!(err.starts_with(BBOX_VAR), "{raw}: {err}");
+        }
+    }
+
+    /// The engines hold the failure so a tile answers 5xx, rather than falling
+    /// back to synthetic terrain under a layer the operator asked to be real.
+    #[test]
+    fn a_broken_config_is_carried_not_swallowed() {
+        let engines = AnalysisEngines::with_render_limits(1, RENDER_WAIT);
+        let broken = SourceConfig::Misconfigured("bad bbox".into());
+        let built = build_engine(
+            EngineKey::new(Op::Slope, &TileParams::default()).expect("key"),
+            &broken,
+            Arc::new(DemStore::new()),
+        );
+        let Err(err) = built else {
+            panic!("a misconfigured source cannot build an engine");
+        };
+        assert!(err.to_string().contains("bad bbox"));
+        // the default environment is unset, so the served engines stay synthetic
+        assert_eq!(engines.source, SourceConfig::Synthetic);
     }
 
     #[tokio::test]

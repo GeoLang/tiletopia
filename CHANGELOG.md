@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The analysis tile routes are anonymous reads, like the 3D Tiles and terrain
   tiles: a map library cannot send an Authorization header. The rest of
   `/api/v1/analysis/` stays gated.
+- `TILETOPIA_ANALYSIS_DEM_BBOX` (`west,south,east,north` in degrees) puts the
+  analysis tiles on Copernicus GLO-30 COGs streamed over STAC instead of the DEM
+  store, with `TILETOPIA_ANALYSIS_STAC_API` overriding the Earth Search default.
+  Unset, nothing reaches the network. A malformed bbox refuses startup, and a
+  failed search answers 500 rather than falling back to synthetic terrain.
 
 ### Changed
 - `terrano-core` now tracks master rather than the v0.1.0 tag, so tiletopia and

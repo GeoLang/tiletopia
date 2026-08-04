@@ -244,6 +244,22 @@ tiletopia tile --input scan.las --output ./tileset --max-error 1.0
 tiletopia serve --data-dir ./data --port 3000
 ```
 
+Analysis tiles (`/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png`) render from the
+loaded DEM store and a synthetic field by default. Two variables put them on
+real elevation instead:
+
+- `TILETOPIA_ANALYSIS_DEM_BBOX` — `west,south,east,north` in degrees. Setting it
+  switches the analysis tiles to Copernicus GLO-30 COGs, streamed over STAC as
+  each tile needs them. Unset means the DEM store, and nothing on the network.
+- `TILETOPIA_ANALYSIS_STAC_API` — STAC API root, defaults to
+  `https://earth-search.aws.element84.com/v1`.
+
+The search runs once per engine and keeps the first page of 100 items. A GLO-30
+item is a one-degree square, so keep the bbox to about 10 by 10 degrees or
+less: past that, items are dropped and tiles over them come back empty. A
+malformed bbox refuses startup, and a search that fails answers 500 rather than
+serving synthetic terrain under a layer that is meant to be real.
+
 ### Use with CesiumJS
 
 ```javascript
@@ -441,9 +457,9 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 cargo test
 ```
 
-681 tests (656 Rust + 25 GUI) on default features, counted per crate:
+686 tests (661 Rust + 25 GUI) on default features, counted per crate:
 - Core (111): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
-- Server (428): health, assets, tilesets, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine, audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing, retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
+- Server (433): health, assets, tilesets, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine, audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing, retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
 - Ingest (72): LAS/LAZ, GeoTIFF, BIM/IFC readers, CRS detection, photogrammetry (SfM)
 - Terrain (28): quantized mesh generation, global DEM terrain
 - Store (12): local filesystem CRUD, path traversal
@@ -452,7 +468,7 @@ cargo test
 GUI: `cd gui && pnpm run test:all` (10 vitest unit tests + 15 Playwright e2e).
 
 Feature-gated tests (`gpu`, `onnx`, `video`, `ml`, `martin`, `wasm-plugins`, cloud
-stores) are not in the 656 and need their feature enabled to run.
+stores) are not in the 661 and need their feature enabled to run.
 
 ---
 
