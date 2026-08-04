@@ -14,7 +14,7 @@
 //! built, on the first request for that op. A DEM loaded afterwards is not
 //! picked up until the server restarts.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use axum::{
     Router,
@@ -35,6 +35,7 @@ use geoplumb::window::{GridSpec, WindowReq};
 use geoplumb::{Engine, Graph, NodeId};
 use serde::Deserialize;
 use terrano_core::{BandedRaster, Raster};
+use tokio::sync::{Semaphore, SemaphorePermit, TryAcquireError};
 
 use crate::AppState;
 use crate::analysis;
@@ -55,6 +56,16 @@ const MAX_ENGINES: usize = 8;
 /// ladder depends on it: the synthetic field is continuous and samples at any
 /// resolution.
 const SYNTHETIC_RESOLUTION_DEG: f64 = 1e-4;
+
+/// Angles are keyed in tenths of a degree, so a turn is this many steps.
+const AZIMUTH_STEPS: i64 = 3600;
+
+/// Renders allowed in flight, one core each. A cold tile is a few hundred
+/// milliseconds of CPU and the route is anonymous, so without a cap one caller
+/// pins every core. Over the cap a request is refused, not queued.
+fn default_render_slots() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get())
+}
 
 pub fn analysis_tile_routes() -> Router<Arc<AppState>> {
     Router::new().route("/api/v1/analysis/xyz/{op}/{z}/{x}/{y}", get(analysis_tile))
@@ -92,30 +103,49 @@ struct EngineKey {
 }
 
 impl EngineKey {
-    fn new(op: Op, params: &TileParams) -> EngineKey {
+    /// `None` when an angle is not finite, which the handler answers with 400.
+    /// Finite angles are folded into the domain the kernel actually has, a turn
+    /// of azimuth and a quarter of altitude, before they are keyed: the engine
+    /// map is a cache an anonymous caller would otherwise flush by walking the
+    /// number line, and 375 degrees is the same sun as 15.
+    fn new(op: Op, params: &TileParams) -> Option<EngineKey> {
+        let angle = |v: Option<f64>, default: f64| match v {
+            Some(v) if !v.is_finite() => None,
+            Some(v) => Some(v),
+            None => Some(default),
+        };
         let deci = |v: f64| (v * 10.0).round() as i64;
-        match op {
-            // same defaults as the one-shot terrain endpoint
+        // same defaults as the one-shot terrain endpoint
+        let azimuth = angle(params.azimuth, 315.0)?;
+        let altitude = angle(params.altitude, 45.0)?;
+        Some(match op {
             Op::Hillshade => EngineKey {
                 op,
-                azimuth: deci(params.azimuth.unwrap_or(315.0)),
-                altitude: deci(params.altitude.unwrap_or(45.0)),
+                // after rounding, so a hair under a full turn folds onto zero
+                azimuth: deci(azimuth).rem_euclid(AZIMUTH_STEPS),
+                altitude: deci(altitude.clamp(0.0, 90.0)),
             },
             Op::Slope => EngineKey {
                 op,
                 azimuth: 0,
                 altitude: 0,
             },
-        }
+        })
     }
 }
 
 /// Engines built on demand, one per op and parameter set. Building one solves
 /// the graph, and it then holds the chunk cache that makes the next tile cheap,
 /// so engines are kept and shared rather than rebuilt per request.
-#[derive(Default)]
 pub struct AnalysisEngines {
     built: Mutex<Vec<(EngineKey, Arc<Engine>, NodeId)>>,
+    render_slots: Semaphore,
+}
+
+impl Default for AnalysisEngines {
+    fn default() -> Self {
+        AnalysisEngines::with_render_slots(default_render_slots())
+    }
 }
 
 impl AnalysisEngines {
@@ -123,22 +153,65 @@ impl AnalysisEngines {
         AnalysisEngines::default()
     }
 
-    fn get_or_build(
+    /// Same, with the render cap set explicitly. Zero permits refuses every
+    /// render, which is how a test reaches the saturated path.
+    pub fn with_render_slots(slots: usize) -> Self {
+        AnalysisEngines {
+            built: Mutex::new(Vec::new()),
+            render_slots: Semaphore::new(slots),
+        }
+    }
+
+    /// A render slot, `Err` when every one is busy. The permit is held for the
+    /// pull, so the count is the number of tiles being computed at once.
+    fn try_render_slot(&self) -> Result<SemaphorePermit<'_>, TryAcquireError> {
+        self.render_slots.try_acquire()
+    }
+
+    /// A poisoned map is still a usable cache: the entries are `Arc`s a panicked
+    /// builder never got to touch, and refusing them would take the route down
+    /// until restart.
+    fn lock(&self) -> MutexGuard<'_, Vec<(EngineKey, Arc<Engine>, NodeId)>> {
+        self.built.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    async fn get_or_build(
         &self,
         key: EngineKey,
         store: &Arc<DemStore>,
     ) -> geoplumb::Result<(Arc<Engine>, NodeId)> {
-        let mut built = self.built.lock().expect("engine map lock");
-        if let Some((_, engine, node)) = built.iter().find(|(k, _, _)| *k == key) {
-            return Ok((Arc::clone(engine), *node));
+        if let Some(hit) = find(&self.lock(), key) {
+            return Ok(hit);
         }
-        let (engine, node) = build_engine(key, Arc::clone(store))?;
+        // off the lock and off the async worker: solving the graph builds two
+        // projections, and holding the map across it would serialize every tile
+        // request behind one build
+        let store = Arc::clone(store);
+        let (engine, node) = tokio::task::spawn_blocking(move || build_engine(key, store))
+            .await
+            .expect("engine build task panicked")?;
+
+        let mut built = self.lock();
+        // another request may have built this key while this one was solving
+        if let Some(hit) = find(&built, key) {
+            return Ok(hit);
+        }
         if built.len() >= MAX_ENGINES {
             built.remove(0);
         }
         built.push((key, Arc::clone(&engine), node));
         Ok((engine, node))
     }
+}
+
+fn find(
+    built: &[(EngineKey, Arc<Engine>, NodeId)],
+    key: EngineKey,
+) -> Option<(Arc<Engine>, NodeId)> {
+    built
+        .iter()
+        .find(|(k, _, _)| *k == key)
+        .map(|(_, engine, node)| (Arc::clone(engine), *node))
 }
 
 /// DEM source, then the reprojection, then the op: the terrain kernels read
@@ -167,6 +240,7 @@ async fn analysis_tile(
     Query(params): Query<TileParams>,
 ) -> Result<Response, StatusCode> {
     let op = Op::parse(&op).ok_or(StatusCode::BAD_REQUEST)?;
+    let key = EngineKey::new(op, &params).ok_or(StatusCode::BAD_REQUEST)?;
     let y: u32 = y
         .trim_end_matches(".png")
         .parse()
@@ -179,9 +253,20 @@ async fn analysis_tile(
         return Err(StatusCode::NOT_FOUND);
     }
 
+    // everything above is free, so the cap goes here: it is the render this
+    // route hands an anonymous caller, not the request, that has to be bounded
+    let Ok(_slot) = state.analysis_engines.try_render_slot() else {
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "1")],
+        )
+            .into_response());
+    };
+
     let (engine, node) = state
         .analysis_engines
-        .get_or_build(EngineKey::new(op, &params), &state.elevation_store)
+        .get_or_build(key, &state.elevation_store)
+        .await
         .map_err(|e| {
             tracing::warn!("analysis tile engine build failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -333,19 +418,62 @@ mod tests {
         assert!(band.data().iter().all(|v| v.is_finite()));
     }
 
+    fn hillshade_key(azimuth: f64, altitude: f64) -> Option<EngineKey> {
+        EngineKey::new(
+            Op::Hillshade,
+            &TileParams {
+                azimuth: Some(azimuth),
+                altitude: Some(altitude),
+            },
+        )
+    }
+
     #[test]
     fn hillshade_params_key_separate_engines() {
-        let key = |azimuth| {
-            EngineKey::new(
-                Op::Hillshade,
-                &TileParams {
-                    azimuth: Some(azimuth),
-                    altitude: None,
-                },
-            )
-        };
+        let key = |azimuth| hillshade_key(azimuth, 45.0);
         assert_ne!(key(315.0), key(45.0));
         // jitter below a tenth of a degree lands on the same engine
         assert_eq!(key(315.0), key(315.001));
+    }
+
+    /// The engine map is a cache, so a caller must not be able to mint a fresh
+    /// entry out of an angle that names sun the map already holds.
+    #[test]
+    fn angles_fold_into_the_domain_before_keying() {
+        assert_eq!(hillshade_key(375.0, 45.0), hillshade_key(15.0, 45.0));
+        assert_eq!(hillshade_key(-45.0, 45.0), hillshade_key(315.0, 45.0));
+        assert_eq!(hillshade_key(360.0, 45.0), hillshade_key(0.0, 45.0));
+        assert_eq!(hillshade_key(1e12, 45.0), hillshade_key(1e12 % 360.0, 45.0));
+        // the sun cannot go under the horizon or past the zenith
+        assert_eq!(hillshade_key(315.0, 200.0), hillshade_key(315.0, 90.0));
+        assert_eq!(hillshade_key(315.0, -5.0), hillshade_key(315.0, 0.0));
+    }
+
+    #[test]
+    fn non_finite_angles_have_no_key() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(hillshade_key(bad, 45.0), None, "azimuth {bad}");
+            assert_eq!(hillshade_key(315.0, bad), None, "altitude {bad}");
+        }
+        // slope ignores the angles, but a malformed request is still malformed
+        assert_eq!(
+            EngineKey::new(
+                Op::Slope,
+                &TileParams {
+                    azimuth: Some(f64::NAN),
+                    altitude: None,
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn render_slots_run_out() {
+        let engines = AnalysisEngines::with_render_slots(1);
+        let slot = engines.try_render_slot().expect("first slot");
+        assert!(engines.try_render_slot().is_err());
+        drop(slot);
+        assert!(engines.try_render_slot().is_ok());
     }
 }

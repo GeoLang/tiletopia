@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   geoplumb share one copy of it.
 - `AppState::elevation_store` is an `Arc`, shared with the tile engines.
 
+### Security
+- Analysis tile renders are capped at one per core, and a request over the cap
+  is answered `503` with `Retry-After` rather than queued. A cold tile is a few
+  hundred milliseconds of CPU and the route is anonymous, so uncapped it let one
+  caller pin every core.
+- `azimuth` and `altitude` are folded into a turn and a quarter turn before they
+  key an engine, and a non-finite angle is a `400`. The engine map is a cache of
+  eight, so unfolded angles let a caller evict every entry and force a fresh
+  graph solve per request.
+
 ## [Unreleased] - 2026-08-02
 
 ### Added

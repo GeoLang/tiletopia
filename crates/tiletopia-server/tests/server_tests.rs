@@ -7,6 +7,12 @@ mod tests {
     use tower::ServiceExt;
 
     async fn test_state() -> Arc<AppState> {
+        state_with_engines(tiletopia_server::analysis_tiles::AnalysisEngines::new()).await
+    }
+
+    async fn state_with_engines(
+        analysis_engines: tiletopia_server::analysis_tiles::AnalysisEngines,
+    ) -> Arc<AppState> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -65,7 +71,7 @@ mod tests {
             feature_service_engine: tiletopia_server::feature_service::FeatureServiceEngine::new(),
             issue_tracker: tiletopia_server::issue_tracking::IssueTracker::new(),
             elevation_store: Arc::new(tiletopia_server::elevation::DemStore::new()),
-            analysis_engines: tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+            analysis_engines,
             entity_link_store: tiletopia_server::entity_linking::EntityLinkStore::new(),
         })
     }
@@ -667,6 +673,61 @@ mod tests {
         let state = test_state().await;
         let (status, _) = get_tile_bytes(&state, "/api/v1/analysis/xyz/slope/2/9/1.png").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// A turn of azimuth is the same sun, so the second call has to come off the
+    /// first one's engine rather than build a second one.
+    #[tokio::test]
+    async fn analysis_xyz_wrapped_azimuth_is_the_same_tile() {
+        let state = test_state().await;
+        let (plain_status, plain) = get_tile_bytes(
+            &state,
+            "/api/v1/analysis/xyz/hillshade/12/2132/1493.png?azimuth=15",
+        )
+        .await;
+        let (wrapped_status, wrapped) = get_tile_bytes(
+            &state,
+            "/api/v1/analysis/xyz/hillshade/12/2132/1493.png?azimuth=375",
+        )
+        .await;
+        assert_eq!(plain_status, StatusCode::OK);
+        assert_eq!(wrapped_status, StatusCode::OK);
+        assert_eq!(plain, wrapped);
+    }
+
+    #[tokio::test]
+    async fn analysis_xyz_non_finite_params_are_rejected() {
+        let state = test_state().await;
+        for uri in [
+            "/api/v1/analysis/xyz/hillshade/12/2132/1493.png?azimuth=nan",
+            "/api/v1/analysis/xyz/hillshade/12/2132/1493.png?azimuth=inf",
+            "/api/v1/analysis/xyz/hillshade/12/2132/1493.png?altitude=-inf",
+            "/api/v1/analysis/xyz/slope/12/2132/1493.png?azimuth=NaN",
+        ] {
+            let (status, _) = get_tile_bytes(&state, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    /// With every render slot taken the route sheds load instead of queueing,
+    /// which is what keeps an anonymous caller from pinning every core.
+    #[tokio::test]
+    async fn analysis_xyz_refuses_a_tile_when_renders_are_saturated() {
+        let state = state_with_engines(
+            tiletopia_server::analysis_tiles::AnalysisEngines::with_render_slots(0),
+        )
+        .await;
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/analysis/xyz/hillshade/12/2132/1493.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.headers().get("retry-after").unwrap(), "1");
     }
 
     // -- role management --
