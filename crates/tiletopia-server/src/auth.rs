@@ -130,6 +130,12 @@ pub fn is_public_read(method: &Method, path: &str) -> bool {
         // gated, rather than the trailing slash this used to lean on.
         ["api", "v1", "terrain", rest @ ..] => !rest.is_empty(),
 
+        // On-demand terrain-analysis tiles. A map library fetches these with no
+        // Authorization header like any other tile layer. The op, z, x and y
+        // segments are all matched, so the POST compute routes under
+        // /api/v1/analysis/ stay gated.
+        ["api", "v1", "analysis", "xyz", _, _, _, _] => true,
+
         // Vector tile source metadata. Public only because the old substring
         // reached it, so it is listed to keep this change from moving any route.
         // /api/v1/tiles/cache/stats is deliberately absent: it is operational
@@ -295,6 +301,13 @@ mod tests {
             "/api/v1/terrain-analysis/operations"
         ));
         assert!(!is_public_read(&Method::GET, "/api/v1/elevation/point"));
+        // the analysis compute routes, next to the public analysis tiles
+        assert!(!is_public_read(&Method::GET, "/api/v1/analysis/terrain"));
+        assert!(!is_public_read(&Method::GET, "/api/v1/analysis/xyz"));
+        assert!(!is_public_read(
+            &Method::GET,
+            "/api/v1/analysis/xyz/hillshade/12/2132"
+        ));
         assert!(!is_public_read(&Method::GET, "/api/v1/portal/items"));
         // the realtime websocket needs a token like any other non-tile route
         assert!(!is_public_read(&Method::GET, "/api/v1/realtime/room-1"));
@@ -322,6 +335,9 @@ mod tests {
             "/api/v1/terrain/layer.json",
             "/api/v1/terrain/12/2200/1400",
             "/api/v1/terrain/rgb/12/2200/1400",
+            // analysis_tiles::analysis_tile_routes
+            "/api/v1/analysis/xyz/hillshade/12/2132/1493.png",
+            "/api/v1/analysis/xyz/slope/12/2132/1493.png",
             // premium_routes.rs:487-491
             "/api/v1/tiles/sources",
             "/api/v1/tiles/styles",
@@ -397,6 +413,7 @@ mod tests {
             "/api/v1/assets/8d1f/tiles/0.b3dm",
             "/api/v1/assets/8d1f/tileset.json",
             "/api/v1/terrain/12/2200/1400",
+            "/api/v1/analysis/xyz/hillshade/12/2132/1493.png",
             "/api/v1/tiles/sources",
             "/v1/assets/42",
         ] {

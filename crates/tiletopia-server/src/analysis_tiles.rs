@@ -143,7 +143,9 @@ impl AnalysisEngines {
 
 /// DEM source, then the reprojection, then the op: the terrain kernels read
 /// their cell size off the raster they are handed, so they have to run on the
-/// metric grid rather than on degrees.
+/// metric grid rather than on degrees. A web mercator metre is stretched by
+/// 1/cos(latitude), so a slope tile reads shallower than the one-shot endpoint,
+/// which samples in ground metres.
 fn build_engine(key: EngineKey, store: Arc<DemStore>) -> geoplumb::Result<(Arc<Engine>, NodeId)> {
     let mut graph = Graph::new();
     let dem = graph.add_source(Box::new(DemSource::new(store)));

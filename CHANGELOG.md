@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-04
+
+### Added
+- `GET /api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` serves hillshade and slope
+  tiles rendered on demand by the geoplumb pull engine, over the same elevation
+  store and with the same colors as `POST /api/v1/analysis/terrain`. Hillshade
+  takes `azimuth` and `altitude` query parameters, defaulting to 315 and 45.
+  Engines are built on first use and cached per op and parameter set, so a DEM
+  loaded after that is not picked up until restart.
+- The analysis tile routes are anonymous reads, like the 3D Tiles and terrain
+  tiles: a map library cannot send an Authorization header. The rest of
+  `/api/v1/analysis/` stays gated.
+
+### Changed
+- `terrano-core` now tracks master rather than the v0.1.0 tag, so tiletopia and
+  geoplumb share one copy of it.
+- `AppState::elevation_store` is an `Arc`, shared with the tile engines.
+
 ## [Unreleased] - 2026-08-02
 
 ### Added
