@@ -15,6 +15,7 @@
 //! picked up until the server restarts.
 
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use axum::{
     Router,
@@ -35,7 +36,8 @@ use geoplumb::window::{GridSpec, WindowReq};
 use geoplumb::{Engine, Graph, NodeId};
 use serde::Deserialize;
 use terrano_core::{BandedRaster, Raster};
-use tokio::sync::{Semaphore, SemaphorePermit, TryAcquireError};
+use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::time::timeout;
 
 use crate::AppState;
 use crate::analysis;
@@ -62,10 +64,16 @@ const AZIMUTH_STEPS: i64 = 3600;
 
 /// Renders allowed in flight, one core each. A cold tile is a few hundred
 /// milliseconds of CPU and the route is anonymous, so without a cap one caller
-/// pins every core. Over the cap a request is refused, not queued.
+/// pins every core.
 fn default_render_slots() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get())
 }
+
+/// How long a request waits for a slot before it is refused. A viewer opening a
+/// screen of tiles queues briefly rather than losing tiles, since a map library
+/// does not retry a 503, while a flood still sheds at the rate the slots allow.
+/// Waiters cannot pile up past the connections held open across this wait.
+const RENDER_WAIT: Duration = Duration::from_secs(2);
 
 pub fn analysis_tile_routes() -> Router<Arc<AppState>> {
     Router::new().route("/api/v1/analysis/xyz/{op}/{z}/{x}/{y}", get(analysis_tile))
@@ -140,11 +148,12 @@ impl EngineKey {
 pub struct AnalysisEngines {
     built: Mutex<Vec<(EngineKey, Arc<Engine>, NodeId)>>,
     render_slots: Semaphore,
+    render_wait: Duration,
 }
 
 impl Default for AnalysisEngines {
     fn default() -> Self {
-        AnalysisEngines::with_render_slots(default_render_slots())
+        AnalysisEngines::with_render_limits(default_render_slots(), RENDER_WAIT)
     }
 }
 
@@ -153,19 +162,25 @@ impl AnalysisEngines {
         AnalysisEngines::default()
     }
 
-    /// Same, with the render cap set explicitly. Zero permits refuses every
-    /// render, which is how a test reaches the saturated path.
-    pub fn with_render_slots(slots: usize) -> Self {
+    /// Same, with the cap and the wait set explicitly. Zero slots never frees
+    /// one, which is how a test reaches the saturated path without waiting out
+    /// the real horizon.
+    pub fn with_render_limits(slots: usize, wait: Duration) -> Self {
         AnalysisEngines {
             built: Mutex::new(Vec::new()),
             render_slots: Semaphore::new(slots),
+            render_wait: wait,
         }
     }
 
-    /// A render slot, `Err` when every one is busy. The permit is held for the
-    /// pull, so the count is the number of tiles being computed at once.
-    fn try_render_slot(&self) -> Result<SemaphorePermit<'_>, TryAcquireError> {
-        self.render_slots.try_acquire()
+    /// A render slot, waiting up to the horizon for one to free, `None` when it
+    /// does not. The permit is held for the pull, so the slot count is the
+    /// number of tiles being computed at once.
+    async fn render_slot(&self) -> Option<SemaphorePermit<'_>> {
+        timeout(self.render_wait, self.render_slots.acquire())
+            .await
+            .ok()?
+            .ok()
     }
 
     /// A poisoned map is still a usable cache: the entries are `Arc`s a panicked
@@ -255,7 +270,7 @@ async fn analysis_tile(
 
     // everything above is free, so the cap goes here: it is the render this
     // route hands an anonymous caller, not the request, that has to be bounded
-    let Ok(_slot) = state.analysis_engines.try_render_slot() else {
+    let Some(_slot) = state.analysis_engines.render_slot().await else {
         return Ok((
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "1")],
@@ -468,12 +483,27 @@ mod tests {
         );
     }
 
-    #[test]
-    fn render_slots_run_out() {
-        let engines = AnalysisEngines::with_render_slots(1);
-        let slot = engines.try_render_slot().expect("first slot");
-        assert!(engines.try_render_slot().is_err());
+    #[tokio::test]
+    async fn a_render_gives_up_when_no_slot_frees() {
+        let engines = AnalysisEngines::with_render_limits(1, Duration::from_millis(50));
+        let slot = engines.render_slot().await.expect("first slot");
+        assert!(engines.render_slot().await.is_none());
         drop(slot);
-        assert!(engines.try_render_slot().is_ok());
+        assert!(engines.render_slot().await.is_some());
+    }
+
+    /// The point of waiting at all: a viewer's second tile takes the slot the
+    /// first one hands back instead of being refused while it is still busy.
+    #[tokio::test]
+    async fn a_render_takes_the_slot_a_finished_one_frees() {
+        let engines = AnalysisEngines::with_render_limits(1, Duration::from_secs(2));
+        let held = engines.render_slot().await.expect("first slot");
+        let render = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drop(held);
+        };
+        let waiter = async { engines.render_slot().await.is_some() };
+        let (_, took) = tokio::join!(render, waiter);
+        assert!(took);
     }
 }

@@ -24,10 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `AppState::elevation_store` is an `Arc`, shared with the tile engines.
 
 ### Security
-- Analysis tile renders are capped at one per core, and a request over the cap
-  is answered `503` with `Retry-After` rather than queued. A cold tile is a few
-  hundred milliseconds of CPU and the route is anonymous, so uncapped it let one
-  caller pin every core.
+- Analysis tile renders are capped at one per core. A request over the cap waits
+  up to two seconds for a slot, then is answered `503` with `Retry-After`, so a
+  viewer opening a screen of tiles queues rather than losing the ones past the
+  cap. A cold tile is a few hundred milliseconds of CPU and the route is
+  anonymous, so uncapped it let one caller pin every core.
 - `azimuth` and `altitude` are folded into a turn and a quarter turn before they
   key an engine, and a non-finite angle is a `400`. The engine map is a cache of
   eight, so unfolded angles let a caller evict every entry and force a fresh

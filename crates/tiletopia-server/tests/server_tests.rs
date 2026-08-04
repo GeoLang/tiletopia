@@ -709,14 +709,17 @@ mod tests {
         }
     }
 
-    /// With every render slot taken the route sheds load instead of queueing,
-    /// which is what keeps an anonymous caller from pinning every core.
+    /// A tile waits for a render slot, and is refused once the wait runs out.
+    /// Shedding past that is what keeps an anonymous caller from pinning every
+    /// core. The wait is short here, the served one is two seconds.
     #[tokio::test]
-    async fn analysis_xyz_refuses_a_tile_when_renders_are_saturated() {
+    async fn analysis_xyz_refuses_a_tile_when_renders_stay_saturated() {
+        let wait = std::time::Duration::from_millis(100);
         let state = state_with_engines(
-            tiletopia_server::analysis_tiles::AnalysisEngines::with_render_slots(0),
+            tiletopia_server::analysis_tiles::AnalysisEngines::with_render_limits(0, wait),
         )
         .await;
+        let started = std::time::Instant::now();
         let resp = router(Arc::clone(&state))
             .oneshot(
                 Request::builder()
@@ -728,6 +731,8 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(resp.headers().get("retry-after").unwrap(), "1");
+        // it queued for the slot rather than refusing on the spot
+        assert!(started.elapsed() >= wait);
     }
 
     // -- role management --
