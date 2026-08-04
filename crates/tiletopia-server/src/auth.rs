@@ -308,6 +308,11 @@ mod tests {
             &Method::GET,
             "/api/v1/analysis/xyz/hillshade/12/2132"
         ));
+        // an export is one request costing millions of pixels, never anonymous
+        assert!(!is_public_read(
+            &Method::GET,
+            "/api/v1/analysis/export/hillshade"
+        ));
         assert!(!is_public_read(&Method::GET, "/api/v1/portal/items"));
         // the realtime websocket needs a token like any other non-tile route
         assert!(!is_public_read(&Method::GET, "/api/v1/realtime/room-1"));

@@ -709,6 +709,95 @@ mod tests {
         }
     }
 
+    // -- analysis export --
+
+    /// The export of the same terrain the tile tests render, verified by
+    /// reading the bytes back as a COG: web mercator, whole-pixel dims
+    /// anchored north-west, real values everywhere on the synthetic source.
+    #[tokio::test]
+    async fn analysis_export_answers_a_web_mercator_cog() {
+        let state = test_state().await;
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/analysis/export/hillshade?bbox=7,45,7.02,45.01&resolution=200")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("image/tiff")
+        );
+        assert_eq!(
+            resp.headers()
+                .get("content-disposition")
+                .and_then(|v| v.to_str().ok()),
+            Some("attachment; filename=\"hillshade.tif\"")
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+
+        let mut reader = terrano_core::CogReader::open(&bytes[..]).expect("valid cog");
+        assert_eq!(reader.meta().epsg, 3857);
+        assert_eq!(reader.meta().pixel_width, 200.0);
+        assert_eq!(reader.meta().pixel_height, 200.0);
+        // 0.02 x 0.01 degrees at 45N is 2226 x 1574 mercator meters, so 200
+        // m/px snaps up to 12 x 8 whole pixels
+        let level0 = &reader.levels()[0];
+        assert_eq!((level0.width, level0.height), (12, 8));
+        assert_eq!(level0.samples, 1);
+        let banded = reader.read_window_bands(0, 0, 0, 12, 8).expect("window");
+        let band = banded.band(0).expect("one band");
+        assert!(band.data().iter().all(|v| v.is_finite()));
+        // a flat export would mean the pull never reached the terrain
+        let (min, max) = band
+            .data()
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(*v), hi.max(*v))
+            });
+        assert!(max > min);
+    }
+
+    #[tokio::test]
+    async fn analysis_export_refuses_bad_requests() {
+        let state = test_state().await;
+        for (uri, needle) in [
+            (
+                "/api/v1/analysis/export/hillshade?bbox=-180,-85,180,85&resolution=1",
+                "export cap",
+            ),
+            (
+                "/api/v1/analysis/export/hillshade?bbox=8,46,7,47&resolution=100",
+                "bbox",
+            ),
+            (
+                "/api/v1/analysis/export/hillshade?bbox=7,45,8,46&resolution=0",
+                "resolution",
+            ),
+            (
+                "/api/v1/analysis/export/hillshade?bbox=7,45,8,46&resolution=100&azimuth=nan",
+                "finite",
+            ),
+            (
+                "/api/v1/analysis/export/contour?bbox=7,45,8,46&resolution=100",
+                "unknown op",
+            ),
+        ] {
+            let (status, bytes) = get_tile_bytes(&state, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            let body = String::from_utf8_lossy(&bytes);
+            assert!(body.contains(needle), "{uri}: {body}");
+        }
+    }
+
     /// A tile waits for a render slot, and is refused once the wait runs out.
     /// Shedding past that is what keeps an anonymous caller from pinning every
     /// core. The wait is short here, the served one is two seconds.

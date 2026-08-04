@@ -66,6 +66,7 @@ video = ["video-rs"]
 martin = ["martin-core", "martin-tile-utils", "tilejson", "object_store"]
 
 [dev-dependencies]
+terrano-core = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.29"
 futures = { workspace = true }

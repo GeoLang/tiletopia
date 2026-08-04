@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - 2026-08-04
 
 ### Added
+- `GET /api/v1/analysis/export/{op}?bbox=west,south,east,north&resolution=<m/px>`
+  renders one analysis raster over a whole bbox and answers a deflate web
+  mercator COG (512 px tiles, overviews down to one tile) as an attachment.
+  The grid anchors on the bbox's north-west corner and snaps outward to whole
+  pixels, latitudes clamp to the mercator domain, and an export is capped at
+  4096x4096 pixels (400 past it). Auth-gated, unlike the tile route, and it
+  takes the same render slot: one export is one render.
 - `ndvi` joins the analysis tile ops: sentinel-2 L2A red and nir read over
   STAC as one two-band raster (geoplumb's multi-asset source), reduced per
   pixel to a median of the last month's items, band math `(nir - red) /

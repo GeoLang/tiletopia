@@ -17,10 +17,16 @@
 //! so it serves only when the bbox variable is set, and fails loud otherwise
 //! rather than inventing vegetation.
 //!
+//! `GET /api/v1/analysis/export/{op}?bbox=west,south,east,north&resolution=<m/px>`
+//! pulls the same engines once over a whole bbox and answers a deflate web
+//! mercator COG. Unlike the tile route it is auth-gated: one request can cost
+//! millions of pixels, so it is not part of the anonymous read surface.
+//!
 //! Known limit: an engine reads the source as it stood when the engine was
 //! built, on the first request for that op. A DEM loaded afterwards is not
 //! picked up until the server restarts.
 
+use std::io::Cursor;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -38,11 +44,12 @@ use geoplumb::caps::{
 use geoplumb::chunk::{Chunk, RasterChunk};
 use geoplumb::element::{Source, Transform};
 use geoplumb::elements::{BandMath, Composite, Hillshade, Reproject, Slope, StacSearch, StacSrc};
+use geoplumb::resample::resample_to_grid;
 use geoplumb::tile::{XyzTile, render_tile};
-use geoplumb::window::{GridSpec, WindowReq};
+use geoplumb::window::{Bbox, GridSpec, WindowReq};
 use geoplumb::{Engine, Graph, NodeId};
 use serde::Deserialize;
-use terrano_core::{BandedRaster, Raster};
+use terrano_core::{BandedRaster, CogParams, Raster, write_cog_bands};
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::time::timeout;
 
@@ -110,7 +117,9 @@ fn default_render_slots() -> usize {
 const RENDER_WAIT: Duration = Duration::from_secs(2);
 
 pub fn analysis_tile_routes() -> Router<Arc<AppState>> {
-    Router::new().route("/api/v1/analysis/xyz/{op}/{z}/{x}/{y}", get(analysis_tile))
+    Router::new()
+        .route("/api/v1/analysis/xyz/{op}/{z}/{x}/{y}", get(analysis_tile))
+        .route("/api/v1/analysis/export/{op}", get(analysis_export))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +136,14 @@ impl Op {
             "slope" => Some(Op::Slope),
             "ndvi" => Some(Op::Ndvi),
             _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Op::Hillshade => "hillshade",
+            Op::Slope => "slope",
+            Op::Ndvi => "ndvi",
         }
     }
 }
@@ -247,13 +264,13 @@ fn source_config(bbox: Option<&str>, api: Option<&str>) -> Result<SourceConfig, 
         .unwrap_or(DEFAULT_STAC_API);
     Ok(SourceConfig::Stac(StacConfig {
         api: api.to_string(),
-        bbox: parse_bbox(raw)?,
+        bbox: parse_bbox(raw, BBOX_VAR)?,
     }))
 }
 
-fn parse_bbox(raw: &str) -> Result<[f64; 4], String> {
+fn parse_bbox(raw: &str, label: &str) -> Result<[f64; 4], String> {
     let bad =
-        |detail: String| format!("{BBOX_VAR} {detail}, expected west,south,east,north in degrees");
+        |detail: String| format!("{label} {detail}, expected west,south,east,north in degrees");
     let parts: Vec<&str> = raw.split(',').collect();
     if parts.len() != 4 {
         return Err(bad(format!("has {} values", parts.len())));
@@ -465,6 +482,192 @@ async fn analysis_tile(
 
     let png = tile_png(&chunk, op).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(([(header::CONTENT_TYPE, "image/png")], png).into_response())
+}
+
+/// Web mercator's latitude edge: the projection sends the poles to infinity,
+/// so an export bbox is clamped to the square domain first.
+const MERCATOR_MAX_LAT: f64 = 85.05112878;
+
+const WEB_MERCATOR_EXTENT: f64 = 20037508.342789244;
+
+/// Pixels one export may cover. 4096 squared f64 pixels is 128 MiB per band in
+/// flight, roughly what one authenticated request may pin.
+const EXPORT_MAX_PIXELS: f64 = 4096.0 * 4096.0;
+
+fn mercator_x(lon: f64) -> f64 {
+    lon / 180.0 * WEB_MERCATOR_EXTENT
+}
+
+fn mercator_y(lat: f64) -> f64 {
+    lat.to_radians().tan().asinh() / std::f64::consts::PI * WEB_MERCATOR_EXTENT
+}
+
+/// The export raster's mercator frame: anchored on the bbox's north-west
+/// corner, extent rounded up to whole pixels, so the snap can only grow the
+/// window east and south rather than shave the requested edges.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ExportGrid {
+    west: f64,
+    north: f64,
+    cols: usize,
+    rows: usize,
+}
+
+impl ExportGrid {
+    fn bbox(&self, resolution: f64) -> Bbox {
+        Bbox::new(
+            self.west,
+            self.north - self.rows as f64 * resolution,
+            self.west + self.cols as f64 * resolution,
+            self.north,
+        )
+    }
+}
+
+fn export_grid(bbox: [f64; 4], resolution: f64) -> Result<ExportGrid, String> {
+    if !(resolution.is_finite() && resolution > 0.0) {
+        return Err("resolution must be a positive number of meters per pixel".into());
+    }
+    let [west, south, east, north] = bbox;
+    let south = south.clamp(-MERCATOR_MAX_LAT, MERCATOR_MAX_LAT);
+    let north = north.clamp(-MERCATOR_MAX_LAT, MERCATOR_MAX_LAT);
+    if south >= north {
+        return Err(format!(
+            "bbox covers no ground inside web mercator's {MERCATOR_MAX_LAT} degree latitude domain"
+        ));
+    }
+    let (west, north) = (mercator_x(west), mercator_y(north));
+    let cols = ((mercator_x(east) - west) / resolution).ceil().max(1.0);
+    let rows = ((north - mercator_y(south)) / resolution).ceil().max(1.0);
+    // compared as floats so an absurd resolution fails here instead of
+    // overflowing the casts below
+    if cols * rows > EXPORT_MAX_PIXELS {
+        return Err(format!(
+            "{cols} x {rows} pixels at {resolution} m/px is past the {} pixel export cap, coarsen the resolution or shrink the bbox",
+            EXPORT_MAX_PIXELS as u64
+        ));
+    }
+    Ok(ExportGrid {
+        west,
+        north,
+        cols: cols as usize,
+        rows: rows as usize,
+    })
+}
+
+/// Overviews down to roughly one 512 px tile, capped where deeper levels stop
+/// buying a viewer anything.
+fn overview_levels(cols: usize, rows: usize) -> u32 {
+    let max_side = cols.max(rows) as f64;
+    (max_side / 512.0).log2().ceil().clamp(0.0, 5.0) as u32
+}
+
+#[derive(Deserialize)]
+struct ExportParams {
+    bbox: String,
+    resolution: f64,
+    azimuth: Option<f64>,
+    altitude: Option<f64>,
+}
+
+fn bad_request(reason: String) -> Response {
+    (StatusCode::BAD_REQUEST, reason).into_response()
+}
+
+async fn analysis_export(
+    State(state): State<Arc<AppState>>,
+    Path(op): Path<String>,
+    Query(params): Query<ExportParams>,
+) -> Result<Response, Response> {
+    let op = Op::parse(&op).ok_or_else(|| {
+        bad_request(format!(
+            "unknown op {op:?}, expected hillshade, slope or ndvi"
+        ))
+    })?;
+    let angles = TileParams {
+        azimuth: params.azimuth,
+        altitude: params.altitude,
+    };
+    let key = EngineKey::new(op, &angles)
+        .ok_or_else(|| bad_request("azimuth and altitude must be finite".into()))?;
+    let bbox = parse_bbox(&params.bbox, "bbox").map_err(bad_request)?;
+    let grid = export_grid(bbox, params.resolution).map_err(bad_request)?;
+
+    // the same slot the tile route takes: an export is one render, just bigger
+    let Some(_slot) = state.analysis_engines.render_slot().await else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "1")],
+        )
+            .into_response());
+    };
+
+    let (engine, node) = state
+        .analysis_engines
+        .get_or_build(key, &state.elevation_store)
+        .await
+        .map_err(|e| {
+            tracing::warn!("analysis export engine build failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+    let bbox_m = grid.bbox(params.resolution);
+    let pulled = engine
+        .pull(
+            node,
+            WindowReq {
+                bbox: bbox_m,
+                resolution: params.resolution,
+            },
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!("analysis export pull failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+    // resampling onto the exact grid and deflating the tiles are cpu work,
+    // off the async worker like the engine build
+    let resolution = params.resolution;
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let exact = resample_to_grid(
+            pulled.raster().map_err(|e| e.to_string())?,
+            &bbox_m,
+            grid.cols,
+            grid.rows,
+        );
+        let cog = CogParams {
+            tile_width: 512,
+            tile_height: 512,
+            overview_levels: overview_levels(grid.cols, grid.rows),
+            epsg: 3857,
+            origin_x: grid.west,
+            origin_y: grid.north,
+            pixel_width: resolution,
+            pixel_height: resolution,
+            deflate: true,
+        };
+        let mut out = Cursor::new(Vec::new());
+        write_cog_bands(&exact.bands, &cog, &mut out).map_err(|e| e.to_string())?;
+        Ok(out.into_inner())
+    })
+    .await
+    .expect("export encode task panicked")
+    .map_err(|e| {
+        tracing::warn!("analysis export encode failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    })?;
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/tiff".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}.tif\"", op.name()),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 /// Paint the op band. The terrain ops use the one-shot endpoint's own
@@ -809,6 +1012,62 @@ mod tests {
         assert!(err.to_string().contains("bad bbox"));
         // the default environment is unset, so the served engines stay synthetic
         assert_eq!(engines.source, SourceConfig::Synthetic);
+    }
+
+    #[test]
+    fn export_grid_snaps_outward_anchored_north_west() {
+        let grid = export_grid([7.0, 45.0, 7.02, 45.01], 200.0).unwrap();
+        assert_eq!(grid.west, mercator_x(7.0));
+        assert_eq!(grid.north, mercator_y(45.01));
+        assert_eq!((grid.cols, grid.rows), (12, 8));
+        let bbox = grid.bbox(200.0);
+        // the snap grows the window east and south, never past the anchor
+        assert_eq!(bbox.min_x, grid.west);
+        assert_eq!(bbox.max_y, grid.north);
+        assert!(bbox.max_x >= mercator_x(7.02));
+        assert!(bbox.min_y <= mercator_y(45.0));
+        assert!(bbox.max_x - mercator_x(7.02) < 200.0);
+        assert!(mercator_y(45.0) - bbox.min_y < 200.0);
+    }
+
+    #[test]
+    fn export_grid_clamps_polar_latitudes() {
+        // a bbox reaching the pole clamps to the mercator edge instead of
+        // projecting to infinity
+        let grid = export_grid([0.0, 84.0, 1.0, 90.0], 1000.0).unwrap();
+        assert!(grid.north.is_finite());
+        // the clamp latitude is rounded a hair north of the exact edge, so
+        // the projected value may overshoot the extent by well under a meter
+        assert!(grid.north <= WEB_MERCATOR_EXTENT + 1e-2);
+        // entirely past the edge there is nothing left to render
+        let err = export_grid([0.0, 86.0, 1.0, 90.0], 1000.0).unwrap_err();
+        assert!(err.contains("covers no ground"), "{err}");
+    }
+
+    #[test]
+    fn export_grid_caps_pixels() {
+        let err = export_grid([-180.0, -85.0, 180.0, 85.0], 1.0).unwrap_err();
+        assert!(err.contains("export cap"), "{err}");
+        // an absurd resolution fails the cap instead of overflowing the dims
+        let err = export_grid([7.0, 45.0, 8.0, 46.0], 1e-300).unwrap_err();
+        assert!(err.contains("export cap"), "{err}");
+    }
+
+    #[test]
+    fn export_grid_rejects_a_bad_resolution() {
+        for bad in [0.0, -5.0, f64::NAN, f64::INFINITY] {
+            let err = export_grid([7.0, 45.0, 8.0, 46.0], bad).unwrap_err();
+            assert!(err.contains("resolution"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn overview_levels_step_down_to_one_tile() {
+        assert_eq!(overview_levels(1, 1), 0);
+        assert_eq!(overview_levels(512, 512), 0);
+        assert_eq!(overview_levels(513, 100), 1);
+        assert_eq!(overview_levels(4096, 4096), 3);
+        assert_eq!(overview_levels(usize::MAX, 1), 5);
     }
 
     #[tokio::test]
