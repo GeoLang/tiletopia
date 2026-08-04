@@ -254,11 +254,13 @@ real elevation instead:
 - `TILETOPIA_ANALYSIS_STAC_API` — STAC API root, defaults to
   `https://earth-search.aws.element84.com/v1`.
 
-The search runs once per engine and keeps the first page of 100 items. A GLO-30
-item is a one-degree square, so keep the bbox to about 10 by 10 degrees or
-less: past that, items are dropped and tiles over them come back empty. A
-malformed bbox refuses startup, and a search that fails answers 500 rather than
-serving synthetic terrain under a layer that is meant to be real.
+The bbox only anchors the raster grid on its most recent item: tiles anywhere
+resolve through lazy per-window STAC searches, cached in two-degree blocks for
+the engine's lifetime. A tile needing more than 32 cold block searches fails,
+so below about zoom 6 the layer answers 500 rather than mosaicking thousands
+of items. A malformed bbox refuses startup, and a search that fails answers
+500 rather than serving synthetic terrain under a layer that is meant to be
+real.
 
 ### Use with CesiumJS
 

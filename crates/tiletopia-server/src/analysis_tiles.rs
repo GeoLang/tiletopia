@@ -64,9 +64,9 @@ const SYNTHETIC_RESOLUTION_DEG: f64 = 1e-4;
 /// Angles are keyed in tenths of a degree, so a turn is this many steps.
 const AZIMUTH_STEPS: i64 = 3600;
 
-/// Search bbox, `west,south,east,north` in degrees. Setting it puts the engines
+/// Anchor bbox, `west,south,east,north` in degrees. Setting it puts the engines
 /// on real elevation, unset leaves them on the DEM store and its synthetic
-/// fallback.
+/// fallback. Coverage is not bound to it: tiles past it search lazily.
 pub const BBOX_VAR: &str = "TILETOPIA_ANALYSIS_DEM_BBOX";
 
 /// STAC API root, for pointing the search at a mirror of the default.
@@ -163,7 +163,7 @@ impl EngineKey {
 enum SourceConfig {
     /// The elevation store, synthetic where no loaded grid covers the window.
     Synthetic,
-    /// Copernicus GLO-30 over STAC, searched once per engine build.
+    /// Copernicus GLO-30 over STAC, searched lazily per pulled window.
     Stac(StacConfig),
     /// The environment names a source that cannot be honoured. Tiles fail with
     /// this instead of quietly serving synthetic terrain under a real-data
@@ -178,10 +178,10 @@ struct StacConfig {
 }
 
 impl StacConfig {
-    /// geoplumb searches once when the source opens and keeps the first page,
-    /// 100 items. A GLO-30 item is a one-degree square, so a bbox past about
-    /// 10 by 10 degrees drops items and the tiles over them come back empty:
-    /// configure the area actually being served, not a continent.
+    /// geoplumb anchors the grid on the bbox's most recent item at open, then
+    /// searches lazily per pulled window in cached two-degree blocks, so tiles
+    /// past the bbox resolve too. A tile needing more than 32 cold block
+    /// searches fails, which rules out roughly zoom 5 and below.
     fn search(&self) -> StacSearch {
         StacSearch::new(&self.api, STAC_COLLECTION, STAC_ASSET, self.bbox)
     }
