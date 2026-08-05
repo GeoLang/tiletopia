@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-05
+
+### Fixed
+- A terrain tile whose SRTM download fails is answered `503` naming the tile
+  instead of `200` with a zero-elevation mesh, which read as terrain that was
+  enabled and perfectly flat. Skadi covers the whole globe, so an unreachable
+  tile is upstream trouble, never missing data; tiles served from local DEM,
+  and tiles too wide to fetch at all, are unchanged. `TILETOPIA_SRTM_BASE_URL`
+  points the fetch somewhere else, which is how the refusal is tested.
+
 ## [Unreleased] - 2026-08-04
 
 ### Added

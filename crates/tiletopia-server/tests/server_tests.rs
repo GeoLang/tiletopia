@@ -47,6 +47,7 @@ mod tests {
             db,
             store,
             data_dir: dir,
+            srtm_base_url: tiletopia_terrain::dem_cache::DEFAULT_SRTM_BASE_URL.to_string(),
             job_queue,
             realtime: tiletopia_server::realtime::RealtimeState::new(),
             demo: tiletopia_server::demo::DemoState::new(),
@@ -199,9 +200,31 @@ mod tests {
         }
     }
 
+    /// Write a flat local DEM under every one-degree cell these bounds touch,
+    /// so a terrain request over them never reaches for SRTM.
+    fn seed_local_dem(data_dir: &std::path::Path, bounds: [f64; 4]) {
+        let dem_dir = data_dir.join("dem");
+        std::fs::create_dir_all(&dem_dir).unwrap();
+        let elevations: Vec<u8> = (0..16u32 * 16)
+            .flat_map(|i| (i as f32).to_le_bytes())
+            .collect();
+        for (lat, lon) in tiletopia_terrain::global_dem::required_dem_tiles(bounds) {
+            std::fs::write(dem_dir.join(format!("{lat}_{lon}.bin")), &elevations).unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn terrain_rgb_tile_anonymous_ok() {
         let state = test_state().await;
+        seed_local_dem(
+            &state.data_dir,
+            tiletopia_terrain::mercator::MercatorTileCoord {
+                zoom: 9,
+                x: 266,
+                y: 186,
+            }
+            .bounds(),
+        );
 
         let resp = router(Arc::clone(&state))
             .oneshot(
@@ -243,26 +266,21 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn terrain_tile_anonymous_ok() {
-        use tiletopia_terrain::global_dem::{TerrainTileCoord, required_dem_tiles};
-
-        let state = test_state().await;
-
-        // seed a local DEM so the handler never reaches for SRTM over the network
-        let coord = TerrainTileCoord {
+    /// The tile every terrain test renders, narrow enough that a missing local
+    /// DEM sends the handler to SRTM.
+    const TERRAIN_TILE: tiletopia_terrain::global_dem::TerrainTileCoord =
+        tiletopia_terrain::global_dem::TerrainTileCoord {
             zoom: 12,
             x: 2200,
             y: 1400,
         };
-        let dem_dir = state.data_dir.join("dem");
-        std::fs::create_dir_all(&dem_dir).unwrap();
-        let elevations: Vec<u8> = (0..16u32 * 16)
-            .flat_map(|i| (i as f32).to_le_bytes())
-            .collect();
-        for (lat, lon) in required_dem_tiles(coord.bounds()) {
-            std::fs::write(dem_dir.join(format!("{lat}_{lon}.bin")), &elevations).unwrap();
-        }
+
+    #[tokio::test]
+    async fn terrain_tile_anonymous_ok() {
+        let state = test_state().await;
+
+        // seed a local DEM so the handler never reaches for SRTM over the network
+        seed_local_dem(&state.data_dir, TERRAIN_TILE.bounds());
 
         let resp = router(Arc::clone(&state))
             .oneshot(
@@ -284,6 +302,43 @@ mod tests {
             .await
             .unwrap();
         assert!(bytes.len() > 88, "quantized mesh header plus vertex data");
+    }
+
+    #[tokio::test]
+    async fn terrain_tile_refuses_when_srtm_fetch_fails() {
+        // no local DEM here, so the handler goes upstream, and upstream is broken
+        let mut state = test_state().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let failing =
+                axum::Router::new().fallback(|| async { StatusCode::INTERNAL_SERVER_ERROR });
+            axum::serve(listener, failing).await.unwrap();
+        });
+        Arc::get_mut(&mut state).unwrap().srtm_base_url = format!("http://{addr}");
+
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/terrain/12/2200/1400")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // a flat 200 here is the bug: terrain looks enabled and perfectly level
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let bounds = TERRAIN_TILE.bounds();
+        let (lat, lon) = tiletopia_terrain::dem_cache::required_srtm_tiles(
+            bounds[0], bounds[1], bounds[2], bounds[3],
+        )[0];
+        let name = tiletopia_terrain::dem_cache::srtm_tile_name(lat, lon);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains(&name), "{body} should name the failed tile");
     }
 
     // signs up a user and returns (bearer_token, user_id).

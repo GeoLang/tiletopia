@@ -7,7 +7,7 @@ use axum::{
     Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::get,
 };
 use serde::Serialize;
@@ -99,13 +99,16 @@ fn full_availability(max_zoom: u32) -> Vec<Vec<AvailableRange>> {
 ///
 /// If local DEM data is available, generates high-quality terrain from it.
 /// Falls back to downloading a bounded set of SRTM tiles via DemCache if no
-/// local data exists. Returns a flat tile as last resort.
+/// local data exists. Areas no DEM covers are flat.
 async fn serve_terrain_tile(
     State(state): State<Arc<AppState>>,
     Path((z, x, y)): Path<(u32, u32, String)>,
-) -> Result<impl IntoResponse, StatusCode> {
-    let coord = parse_tile_coord(z, x, &y).ok_or(StatusCode::BAD_REQUEST)?;
-    let dem_tiles = dem_tiles_for_bounds(&state, coord.bounds()).await;
+) -> Result<impl IntoResponse, Response> {
+    let coord =
+        parse_tile_coord(z, x, &y).ok_or_else(|| StatusCode::BAD_REQUEST.into_response())?;
+    let dem_tiles = dem_tiles_for_bounds(&state, coord.bounds())
+        .await
+        .map_err(dem_unavailable)?;
 
     // Generate terrain mesh (uses flat elevation if no DEM tiles found)
     let grid_size = match z {
@@ -150,23 +153,41 @@ fn parse_tile_coord(z: u32, x: u32, y: &str) -> Option<TerrainTileCoord> {
 ///
 /// Shared by the quantized-mesh and terrain-RGB endpoints so the fetch bound
 /// and the HGT orientation are decided in one place.
-pub(crate) async fn dem_tiles_for_bounds(state: &AppState, bounds: [f64; 4]) -> Vec<DemTile> {
+///
+/// A tile the fetch reaches for but cannot get is an error, not a gap: skadi
+/// covers the whole globe, ocean and poles included, so an unreachable tile
+/// means upstream trouble rather than no data there. Dropping it would render
+/// as sea level, which looks like terrain that is simply flat.
+pub(crate) async fn dem_tiles_for_bounds(
+    state: &AppState,
+    bounds: [f64; 4],
+) -> Result<Vec<DemTile>, String> {
     let mut dem_tiles = load_dem_tiles_for_bounds(&state.data_dir, bounds);
     if !dem_tiles.is_empty() {
-        return dem_tiles;
+        return Ok(dem_tiles);
     }
 
-    let cache = tiletopia_terrain::dem_cache::DemCache::new(state.data_dir.join("dem_cache"));
+    let cache = tiletopia_terrain::dem_cache::DemCache::new(
+        state.data_dir.join("dem_cache"),
+        state.srtm_base_url.clone(),
+    );
     for (lat, lon) in srtm_tiles_to_fetch(bounds) {
-        match cache.get_srtm_tile(lat, lon).await {
-            Ok(hgt_path) => match dem_tile_from_hgt(&hgt_path, lat, lon) {
-                Ok(tile) => dem_tiles.push(tile),
-                Err(e) => tracing::warn!("SRTM tile {} unusable: {e}", hgt_path.display()),
-            },
-            Err(e) => tracing::debug!("SRTM tile download failed for ({lat},{lon}): {e}"),
-        }
+        let name = tiletopia_terrain::dem_cache::srtm_tile_name(lat, lon);
+        let hgt_path = cache
+            .get_srtm_tile(lat, lon)
+            .await
+            .map_err(|e| format!("SRTM tile {name} could not be fetched: {e}"))?;
+        let tile = dem_tile_from_hgt(&hgt_path, lat, lon)
+            .map_err(|e| format!("SRTM tile {name} is unusable: {e}"))?;
+        dem_tiles.push(tile);
     }
-    dem_tiles
+    Ok(dem_tiles)
+}
+
+/// Refuse a terrain tile whose DEM could not be read.
+pub(crate) fn dem_unavailable(reason: String) -> Response {
+    tracing::warn!("terrain tile refused: {reason}");
+    (StatusCode::SERVICE_UNAVAILABLE, reason).into_response()
 }
 
 /// Read a cached HGT file into a DEM tile.

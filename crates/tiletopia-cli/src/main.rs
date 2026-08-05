@@ -180,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
                 db,
                 store,
                 data_dir,
+                srtm_base_url: tiletopia_terrain::dem_cache::srtm_base_url_from_env(),
                 job_queue,
                 realtime: tiletopia_server::realtime::RealtimeState::new(),
                 demo: tiletopia_server::demo::DemoState::new(),

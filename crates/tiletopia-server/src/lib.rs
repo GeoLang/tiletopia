@@ -101,6 +101,9 @@ pub struct AppState {
     pub db: Arc<db::Database>,
     pub store: Arc<dyn tiletopia_store::TileStore>,
     pub data_dir: std::path::PathBuf,
+    /// Where the terrain routes fetch SRTM tiles from, see
+    /// [`tiletopia_terrain::dem_cache::srtm_base_url_from_env`].
+    pub srtm_base_url: String,
     pub job_queue: Arc<job_queue::JobQueue>,
     pub realtime: realtime::RealtimeState,
     pub demo: demo::DemoState,

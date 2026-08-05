@@ -12,6 +12,8 @@ use thiserror::Error;
 pub enum DemError {
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("upstream error: {0}")]
+    Upstream(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("decompression error: {0}")]
@@ -20,17 +22,27 @@ pub enum DemError {
     Ingest(#[from] tiletopia_ingest::IngestError),
 }
 
+/// Public AWS bucket prefix the SRTM HGT tiles come from.
+pub const DEFAULT_SRTM_BASE_URL: &str = "https://elevation-tiles-prod.s3.amazonaws.com/skadi";
+
+/// SRTM prefix from `TILETOPIA_SRTM_BASE_URL`, else the public bucket.
+pub fn srtm_base_url_from_env() -> String {
+    std::env::var("TILETOPIA_SRTM_BASE_URL").unwrap_or_else(|_| DEFAULT_SRTM_BASE_URL.to_string())
+}
+
 /// Cached SRTM tile downloader.
 pub struct DemCache {
     cache_dir: PathBuf,
     client: reqwest::Client,
+    base_url: String,
 }
 
 impl DemCache {
-    pub fn new(cache_dir: PathBuf) -> Self {
+    pub fn new(cache_dir: PathBuf, base_url: String) -> Self {
         Self {
             cache_dir,
             client: reqwest::Client::new(),
+            base_url: base_url.trim_end_matches('/').to_string(),
         }
     }
 
@@ -50,15 +62,13 @@ impl DemCache {
 
         let ns = if lat >= 0 { "N" } else { "S" };
         let lat_dir = format!("{ns}{:02}", lat.unsigned_abs());
-        let url = format!(
-            "https://elevation-tiles-prod.s3.amazonaws.com/skadi/{lat_dir}/{tile_name}.hgt.gz"
-        );
+        let url = format!("{}/{lat_dir}/{tile_name}.hgt.gz", self.base_url);
 
         tracing::info!("Downloading SRTM tile: {url}");
         let response = self.client.get(&url).send().await?;
         let status = response.status();
         if !status.is_success() {
-            return Err(DemError::Decompress(format!(
+            return Err(DemError::Upstream(format!(
                 "HTTP {status} downloading {url}"
             )));
         }

@@ -9,7 +9,7 @@ use axum::{
     Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::get,
 };
 use std::sync::Arc;
@@ -33,9 +33,11 @@ pub fn terrain_rgb_routes() -> Router<Arc<AppState>> {
 async fn serve_terrain_rgb(
     State(state): State<Arc<AppState>>,
     Path((z, x, y)): Path<(u32, u32, String)>,
-) -> Result<impl IntoResponse, StatusCode> {
-    let coord = parse_rgb_coord(z, x, &y).ok_or(StatusCode::BAD_REQUEST)?;
-    let dem_tiles = crate::terrain_api::dem_tiles_for_bounds(&state, coord.bounds()).await;
+) -> Result<impl IntoResponse, Response> {
+    let coord = parse_rgb_coord(z, x, &y).ok_or_else(|| StatusCode::BAD_REQUEST.into_response())?;
+    let dem_tiles = crate::terrain_api::dem_tiles_for_bounds(&state, coord.bounds())
+        .await
+        .map_err(crate::terrain_api::dem_unavailable)?;
     let png = render_terrain_rgb(&coord, &dem_tiles);
 
     let mut headers = HeaderMap::new();

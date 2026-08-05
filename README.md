@@ -271,6 +271,12 @@ dozen COGs over sequential range requests, which takes minutes today: only a
 tile already in the chunk cache comes back instantly. Treat the layer as batch
 until geoplumb reads composite items in parallel.
 
+The `/api/v1/terrain/` routes read DEM files under `<data-dir>/dem` first and
+fall back to SRTM tiles downloaded from `https://elevation-tiles-prod.s3.amazonaws.com/skadi`,
+which `TILETOPIA_SRTM_BASE_URL` overrides. A download that fails answers 503
+naming the tile, rather than a flat mesh that would read as terrain at sea
+level.
+
 ### Use with CesiumJS
 
 ```javascript
