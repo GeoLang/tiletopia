@@ -2669,4 +2669,217 @@ end_header\n0.0 0.0 0.0 255 0 0\n1.0 0.0 0.0 0 255 0\n0.0 1.0 0.0 0 0 255\n\
         // and no queued work is left behind
         assert!(state.db.next_queued_job().await.unwrap().is_none());
     }
+
+    // -- asset exports --
+
+    const EXPORT_ASSET: &str = "11111111-1111-1111-1111-111111111111";
+
+    fn geojson_export_body() -> serde_json::Value {
+        serde_json::json!({ "asset_id": EXPORT_ASSET, "format": "geojson" })
+    }
+
+    async fn post_export(
+        state: &Arc<AppState>,
+        token: Option<&str>,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/exports")
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        let resp = router(Arc::clone(state))
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// A tokened GET, returning the content-disposition so download tests can
+    /// assert the filename the browser will save under.
+    async fn get_export(
+        state: &Arc<AppState>,
+        uri: &str,
+        token: &str,
+    ) -> (StatusCode, Option<String>, Vec<u8>) {
+        let resp = router(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let disposition = resp
+            .headers()
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        (status, disposition, bytes)
+    }
+
+    /// The whole loop the viewer drives: start a job, poll it to Ready, then
+    /// pull the encoded file back down.
+    #[tokio::test]
+    async fn export_create_poll_and_download() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "export-editor@example.com").await;
+
+        let (status, job) = post_export(&state, Some(&token), geojson_export_body()).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(job["status"], "Queued");
+        assert_eq!(job["format"], "GeoJson");
+        let id = job["id"].as_str().expect("job id").to_string();
+
+        let mut settled = None;
+        for _ in 0..200 {
+            let (status, _, bytes) =
+                get_export(&state, &format!("/api/v1/exports/{id}"), &token).await;
+            assert_eq!(status, StatusCode::OK);
+            let current: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if current["status"] != "Queued" && current["status"] != "Processing" {
+                settled = Some(current);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let settled = settled.expect("export never settled");
+        assert_eq!(settled["status"], "Ready", "job: {settled}");
+        assert_eq!(
+            settled["download_url"],
+            format!("/api/v1/exports/download/{id}")
+        );
+        assert!(settled["file_size_bytes"].as_u64().unwrap() > 0);
+
+        let (status, disposition, bytes) =
+            get_export(&state, &format!("/api/v1/exports/download/{id}"), &token).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            disposition.as_deref(),
+            Some("attachment; filename=\"export.geojson\"")
+        );
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(doc["type"], "FeatureCollection");
+        assert_eq!(doc["metadata"]["asset_id"], EXPORT_ASSET);
+    }
+
+    /// Downloading a job that has not encoded anything yet is a 404, never an
+    /// empty file the caller would mistake for the export.
+    #[tokio::test]
+    async fn export_download_before_ready_is_not_found() {
+        let state = test_state().await;
+        let (token, uid) = bootstrap_editor_with_id(&state, "export-pending@example.com").await;
+
+        let job = state
+            .export_engine
+            .create_export(
+                uuid::Uuid::parse_str(&uid).unwrap(),
+                uuid::Uuid::new_v4(),
+                tiletopia_server::export::ExportFormat::GeoJson,
+                None,
+            )
+            .await;
+
+        let (status, _, _) = get_export(
+            &state,
+            &format!("/api/v1/exports/download/{}", job.id),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // the job itself stays readable while it waits
+        let (status, _, _) =
+            get_export(&state, &format!("/api/v1/exports/{}", job.id), &token).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn export_create_anonymous_rejected() {
+        let state = test_state().await;
+        let (status, _) = post_export(&state, None, geojson_export_body()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn export_create_viewer_forbidden() {
+        let state = test_state().await;
+        let (token, _) = signup(&state, "export-viewer@example.com").await;
+        let (status, _) = post_export(&state, Some(&token), geojson_export_body()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn export_rejects_an_unadvertised_format() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "export-format@example.com").await;
+        let (status, _) = post_export(
+            &state,
+            Some(&token),
+            serde_json::json!({ "asset_id": EXPORT_ASSET, "format": "dwg" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// Another tenant's job id answers 404, so ids leak nothing.
+    #[tokio::test]
+    async fn export_of_another_tenant_is_invisible() {
+        let state = test_state().await;
+        let owner = bootstrap_editor(&state, "export-owner@example.com").await;
+        let other = bootstrap_editor(&state, "export-other@example.com").await;
+
+        let (status, job) = post_export(&state, Some(&owner), geojson_export_body()).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let id = job["id"].as_str().unwrap().to_string();
+
+        let (status, _, _) = get_export(&state, &format!("/api/v1/exports/{id}"), &other).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _, _) =
+            get_export(&state, &format!("/api/v1/exports/download/{id}"), &other).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn export_listing_is_tenant_scoped() {
+        let state = test_state().await;
+        let owner = bootstrap_editor(&state, "list-owner@example.com").await;
+        let other = bootstrap_editor(&state, "list-other@example.com").await;
+
+        let (status, job) = post_export(&state, Some(&owner), geojson_export_body()).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let id = job["id"].as_str().unwrap().to_string();
+
+        let (status, _, body) = get_export(&state, "/api/v1/exports", &owner).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let owner_ids: Vec<&str> = listed["exports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|j| j["id"].as_str().unwrap())
+            .collect();
+        assert!(owner_ids.contains(&id.as_str()));
+
+        let (status, _, body) = get_export(&state, "/api/v1/exports", &other).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(listed["exports"].as_array().unwrap().len(), 0);
+    }
 }

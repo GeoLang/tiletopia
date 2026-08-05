@@ -36,6 +36,84 @@ pub enum ExportFormat {
     Glb,
 }
 
+/// One offered format, keyed by the id clients send.
+pub struct FormatInfo {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub extension: &'static str,
+    pub format: ExportFormat,
+}
+
+/// The formats the API offers. The formats endpoint renders this and the create
+/// endpoint parses ids against it, so the advertised set cannot drift from the
+/// accepted set.
+pub const EXPORT_FORMATS: &[FormatInfo] = &[
+    FormatInfo {
+        id: "3dtiles_zip",
+        name: "3D Tiles (ZIP)",
+        extension: ".zip",
+        format: ExportFormat::Tiles3DZip,
+    },
+    FormatInfo {
+        id: "las",
+        name: "LAS 1.2",
+        extension: ".las",
+        format: ExportFormat::Las,
+    },
+    FormatInfo {
+        id: "laz",
+        name: "LAZ (compressed)",
+        extension: ".laz",
+        format: ExportFormat::Laz,
+    },
+    FormatInfo {
+        id: "terrain_bundle",
+        name: "Terrain Bundle",
+        extension: ".zip",
+        format: ExportFormat::TerrainBundle,
+    },
+    FormatInfo {
+        id: "geojson",
+        name: "GeoJSON",
+        extension: ".geojson",
+        format: ExportFormat::GeoJson,
+    },
+    FormatInfo {
+        id: "png",
+        name: "Rendered Image",
+        extension: ".png",
+        format: ExportFormat::Png,
+    },
+    FormatInfo {
+        id: "citygml",
+        name: "CityGML",
+        extension: ".gml",
+        format: ExportFormat::CityGml,
+    },
+    FormatInfo {
+        id: "obj",
+        name: "OBJ Mesh",
+        extension: ".obj",
+        format: ExportFormat::Obj,
+    },
+    FormatInfo {
+        id: "glb",
+        name: "glTF Binary",
+        extension: ".glb",
+        format: ExportFormat::Glb,
+    },
+];
+
+impl ExportFormat {
+    /// Resolve one of the ids advertised by [`EXPORT_FORMATS`].
+    pub fn from_id(id: &str) -> Option<Self> {
+        EXPORT_FORMATS
+            .iter()
+            .find(|f| f.id == id)
+            .map(|f| f.format.clone())
+    }
+}
+
 /// Export job status.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ExportStatus {
@@ -344,6 +422,16 @@ impl ExportEngine {
             },
         ]
     }
+}
+
+/// Locate the encoded file a finished job wrote. `encode` names it per format,
+/// and the job record does not keep the path, so the output dir is scanned.
+pub fn exported_file(data_dir: &std::path::Path, job_id: Uuid) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(data_dir.join("exports").join(job_id.to_string()))
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.is_file())
 }
 
 /// Locate the original uploaded file for an asset, if present on disk.

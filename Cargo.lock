@@ -9444,6 +9444,7 @@ dependencies = [
  "tiletopia-worker",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "tower",
  "tower-http",
  "tracing",

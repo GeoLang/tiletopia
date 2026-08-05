@@ -4,19 +4,23 @@
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    body::Body,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode, header},
     middleware,
-    routing::get,
+    response::{IntoResponse, Response},
+    routing::{get, post},
 };
 use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{
-    AppState, classification, elevation, feature_service, flight_planning, geocoding,
-    geoprocessing, geostatistics, indoor, isochrone, map_matching, map_tiles, metering, mobile,
-    multispectral, osm_buildings, routing, scan_registration, scheduler, stac, static_map,
-    terrain_analysis,
+    AppState, classification, elevation,
+    export::{EXPORT_FORMATS, ExportFormat, ExportJob, ExportStatus},
+    feature_service, flight_planning, geocoding, geoprocessing, geostatistics, indoor, isochrone,
+    map_matching, map_tiles, metering, mobile, multispectral, osm_buildings, routing,
+    scan_registration, scheduler, stac, static_map, terrain_analysis, users,
 };
 
 /// Routes for API key management.
@@ -151,31 +155,136 @@ async fn list_projects(State(state): State<Arc<AppState>>) -> Json<serde_json::V
 
 /// Routes for export jobs.
 pub fn export_routes() -> Router<Arc<AppState>> {
+    // starting an export is compute against an asset, so it sits in the Edit
+    // tier alongside upload rather than with the reads below
+    let write_routes = Router::new()
+        .route("/api/v1/exports", post(create_export))
+        .layer(middleware::from_fn(users::require_editor));
+
     Router::new()
         .route("/api/v1/exports", get(list_exports))
         .route("/api/v1/exports/formats", get(export_formats))
+        .route("/api/v1/exports/{id}", get(get_export))
+        .route("/api/v1/exports/download/{id}", get(download_export))
+        .merge(write_routes)
 }
 
-async fn list_exports(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let engine = &state.export_engine;
-    let jobs = engine.list_exports(None).await;
-    Json(serde_json::json!({ "exports": jobs }))
+async fn list_exports(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let tenant_id = tenant_from_headers(&headers)?;
+    let jobs = state.export_engine.list_exports(Some(tenant_id)).await;
+    Ok(Json(serde_json::json!({ "exports": jobs })))
 }
 
 async fn export_formats() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "formats": [
-            {"id": "3dtiles_zip", "name": "3D Tiles (ZIP)", "extension": ".zip"},
-            {"id": "las", "name": "LAS 1.2", "extension": ".las"},
-            {"id": "laz", "name": "LAZ (compressed)", "extension": ".laz"},
-            {"id": "terrain_bundle", "name": "Terrain Bundle", "extension": ".zip"},
-            {"id": "geojson", "name": "GeoJSON", "extension": ".geojson"},
-            {"id": "png", "name": "Rendered Image", "extension": ".png"},
-            {"id": "citygml", "name": "CityGML", "extension": ".gml"},
-            {"id": "obj", "name": "OBJ Mesh", "extension": ".obj"},
-            {"id": "glb", "name": "glTF Binary", "extension": ".glb"}
-        ]
-    }))
+    let formats: Vec<serde_json::Value> = EXPORT_FORMATS
+        .iter()
+        .map(|f| serde_json::json!({"id": f.id, "name": f.name, "extension": f.extension}))
+        .collect();
+    Json(serde_json::json!({ "formats": formats }))
+}
+
+/// The caller's own id doubles as their tenant, since the JWT carries no tenant
+/// claim.
+fn tenant_from_headers(headers: &HeaderMap) -> Result<Uuid, StatusCode> {
+    let claims = users::claims_from_headers(headers)?;
+    Uuid::parse_str(&claims.sub).map_err(|_| StatusCode::UNAUTHORIZED)
+}
+
+/// A job the caller owns, or 404 so job ids of other tenants stay invisible.
+async fn owned_job(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    id: Uuid,
+) -> Result<ExportJob, StatusCode> {
+    let tenant_id = tenant_from_headers(headers)?;
+    let job = state
+        .export_engine
+        .get_export(id)
+        .await
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if job.tenant_id != tenant_id {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(job)
+}
+
+#[derive(Deserialize)]
+struct CreateExportRequest {
+    asset_id: Uuid,
+    format: String,
+    #[serde(default)]
+    bounds: Option<[f64; 4]>,
+}
+
+async fn create_export(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<CreateExportRequest>,
+) -> Result<(StatusCode, Json<ExportJob>), StatusCode> {
+    let tenant_id = tenant_from_headers(&headers)?;
+    let format = ExportFormat::from_id(&req.format).ok_or(StatusCode::BAD_REQUEST)?;
+    let job = state
+        .export_engine
+        .create_export(tenant_id, req.asset_id, format, req.bounds)
+        .await;
+
+    // encoding runs off the request so the caller can poll the job it just got
+    let job_id = job.id;
+    let worker_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        if let Err(reason) = worker_state
+            .export_engine
+            .execute_export(job_id, &worker_state.data_dir)
+            .await
+        {
+            tracing::warn!("export {job_id} failed: {reason}");
+        }
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+async fn get_export(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ExportJob>, StatusCode> {
+    Ok(Json(owned_job(&state, &headers, id).await?))
+}
+
+async fn download_export(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Response, StatusCode> {
+    let job = owned_job(&state, &headers, id).await?;
+    if job.status != ExportStatus::Ready {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let path = crate::export::exported_file(&state.data_dir, id).ok_or(StatusCode::NOT_FOUND)?;
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or(StatusCode::NOT_FOUND)?
+        .to_string();
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        Body::from_stream(tokio_util::io::ReaderStream::new(file)),
+    )
+        .into_response())
 }
 
 /// Routes for the scheduler.

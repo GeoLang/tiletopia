@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 2026-08-05
 
+### Added
+- Asset exports are reachable: `POST /api/v1/exports` (editor tier) creates a
+  job for `{asset_id, format, bounds?}` and runs the already-real export
+  engine in the background, `GET /api/v1/exports/{id}` polls it, and
+  `GET /api/v1/exports/download/{id}` streams the finished file with a
+  content-disposition filename (404 until ready). The engine and its
+  encoders existed since July, nothing routed creation, status or download.
+  `EXPORT_FORMATS` is now the single table the formats endpoint renders and
+  the parser accepts, so the advertised and accepted sets cannot drift. The
+  JWT carries no tenant claim, so the caller's user id is the tenant: get,
+  download and the listing are all tenant-scoped (the listing previously
+  returned every tenant's jobs plus the demo jobs).
+
 ### Fixed
 - A terrain tile whose SRTM download fails is answered `503` naming the tile
   instead of `200` with a zero-elevation mesh, which read as terrain that was
