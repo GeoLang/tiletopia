@@ -126,7 +126,7 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 ### Cesium Ion Compatibility
 - **Ion REST API compatibility layer** — drop-in replacement for Cesium Ion REST endpoints
 - **Asset catalog** — searchable/filterable asset catalog with pagination
-- **CRS auto-detection & reprojection** — automatic coordinate reference system detection via proj4rs
+- **CRS auto-detection & reprojection** — automatic coordinate reference system detection via projicio
 - **Imagery tiling** — XYZ/TMS tile pyramid generation from raster sources
 - **DEM tile caching** — LRU cache for terrain DEM tiles
 

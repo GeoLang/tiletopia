@@ -55,7 +55,7 @@ Tiletopia has **real, working** code for:
 *Goal: "match Ion's input format support and output quality"*
 
 ### 2.1 Automatic CRS reprojection
-- **Current**: CRS module has UTM↔WGS84 + proj4rs fallback, but not wired into ingest pipeline
+- **Current**: CRS module transforms through projicio (EPSG, projstring, WKT), but not wired into ingest pipeline
 - **Need**: Auto-detect source CRS (from GeoTIFF tags, LAS VLR, PRJ files), reproject to WGS84/ECEF
 - **Work**: Add CRS detection to each reader, reproject before tiling
 - **Impact**: Users don't need to manually reproject

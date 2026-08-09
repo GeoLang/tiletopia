@@ -6986,12 +6986,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "proj4wkt"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "098a0cc36b6bfd623f7a34354be6f6bd7ac3621e96ccaf2cf08720f28868203d"
+dependencies = [
+ "console_log",
+ "js-sys",
+ "nom 8.0.0",
+ "thiserror 1.0.69",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "projicio-core"
 version = "0.1.0"
-source = "git+https://github.com/GeoLang/projicio.git?branch=master#74bfd55b86ea95eadde772371a016c4611d6008b"
+source = "git+https://github.com/GeoLang/projicio.git?branch=master#e0fc8c04a2322d327a447da89c749021a2bc774a"
 dependencies = [
  "crs-definitions",
  "proj4rs",
+ "proj4wkt",
  "thiserror 2.0.18",
 ]
 
@@ -9351,7 +9366,7 @@ dependencies = [
  "meshopt",
  "ort",
  "pollster",
- "proj4rs",
+ "projicio-core",
  "rayon",
  "reqwest 0.12.28",
  "serde",

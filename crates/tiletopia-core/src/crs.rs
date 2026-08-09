@@ -3,7 +3,12 @@
 //! Transforms coordinates between arbitrary coordinate reference systems.
 //! Supports EPSG codes, WKT, and PROJ strings.
 
-use std::f64::consts::PI;
+use projicio_core::{
+    Ellipsoid, GeocentricCoord, Transform, geocentric_to_geodetic, geodetic_to_geocentric,
+};
+
+const WGS84_GEODETIC_EPSG: u32 = 4326;
+const EARTH_CENTERED_EARTH_FIXED_EPSG: u32 = 4978;
 
 /// Supported CRS definitions.
 #[derive(Debug, Clone)]
@@ -14,6 +19,15 @@ pub enum CrsDef {
     Proj(String),
     /// WKT definition
     Wkt(String),
+}
+
+impl CrsDef {
+    fn definition(&self) -> String {
+        match self {
+            Self::Epsg(code) => format!("EPSG:{code}"),
+            Self::Proj(text) | Self::Wkt(text) => text.clone(),
+        }
+    }
 }
 
 /// A coordinate reprojection transformer.
@@ -31,6 +45,15 @@ pub struct Coord3D {
     pub z: f64,
 }
 
+/// How a source/target pair is transformed.
+enum Route {
+    Identity,
+    GeodeticToGeocentric,
+    GeocentricToGeodetic,
+    /// projicio transforms x and y, z is carried through untouched.
+    HorizontalOnly(Transform),
+}
+
 impl Transformer {
     /// Create a new transformer from source to target CRS.
     pub fn new(source: CrsDef, target: CrsDef) -> Self {
@@ -39,47 +62,78 @@ impl Transformer {
 
     /// Transform a single coordinate from source to target CRS.
     pub fn transform(&self, coord: Coord3D) -> Result<Coord3D, ReprojError> {
-        match (&self.source, &self.target) {
-            (CrsDef::Epsg(src), CrsDef::Epsg(tgt)) if *src == *tgt => Ok(coord),
-            (CrsDef::Epsg(4326), CrsDef::Epsg(epsg)) if is_utm(*epsg) => {
-                let (zone, north) = utm_zone_from_epsg(*epsg);
-                let (e, n) = latlon_to_utm(coord.y, coord.x, zone, north)?;
-                Ok(Coord3D {
-                    x: e,
-                    y: n,
-                    z: coord.z,
-                })
-            }
-            (CrsDef::Epsg(epsg), CrsDef::Epsg(4326)) if is_utm(*epsg) => {
-                let (zone, north) = utm_zone_from_epsg(*epsg);
-                let (lat, lon) = utm_to_latlon(coord.x, coord.y, zone, north)?;
-                Ok(Coord3D {
-                    x: lon,
-                    y: lat,
-                    z: coord.z,
-                })
-            }
-            (CrsDef::Epsg(4326), CrsDef::Epsg(4978)) => {
-                // WGS84 geodetic to ECEF
-                let (x, y, z) = geodetic_to_ecef(coord.y, coord.x, coord.z);
-                Ok(Coord3D { x, y, z })
-            }
-            (CrsDef::Epsg(4978), CrsDef::Epsg(4326)) => {
-                let (lat, lon, h) = ecef_to_geodetic(coord.x, coord.y, coord.z);
-                Ok(Coord3D {
-                    x: lon,
-                    y: lat,
-                    z: h,
-                })
-            }
-            _ => Err(ReprojError::UnsupportedTransform),
-        }
+        self.route()?.apply(coord)
     }
 
     /// Transform a batch of coordinates.
     pub fn transform_batch(&self, coords: &[Coord3D]) -> Result<Vec<Coord3D>, ReprojError> {
-        coords.iter().map(|c| self.transform(*c)).collect()
+        let route = self.route()?;
+        coords.iter().map(|c| route.apply(*c)).collect()
     }
+
+    fn route(&self) -> Result<Route, ReprojError> {
+        match (&self.source, &self.target) {
+            (CrsDef::Epsg(source), CrsDef::Epsg(target)) if source == target => Ok(Route::Identity),
+            (CrsDef::Epsg(WGS84_GEODETIC_EPSG), CrsDef::Epsg(EARTH_CENTERED_EARTH_FIXED_EPSG)) => {
+                Ok(Route::GeodeticToGeocentric)
+            }
+            (CrsDef::Epsg(EARTH_CENTERED_EARTH_FIXED_EPSG), CrsDef::Epsg(WGS84_GEODETIC_EPSG)) => {
+                Ok(Route::GeocentricToGeodetic)
+            }
+            // any other geocentric pairing would run 3D coordinates through a 2D transform
+            (CrsDef::Epsg(EARTH_CENTERED_EARTH_FIXED_EPSG), _)
+            | (_, CrsDef::Epsg(EARTH_CENTERED_EARTH_FIXED_EPSG)) => {
+                Err(ReprojError::UnsupportedTransform)
+            }
+            (source, target) => Ok(Route::HorizontalOnly(build_transform(source, target)?)),
+        }
+    }
+}
+
+impl Route {
+    fn apply(&self, coord: Coord3D) -> Result<Coord3D, ReprojError> {
+        match self {
+            Self::Identity => Ok(coord),
+            Self::GeodeticToGeocentric => {
+                let geocentric = geodetic_to_geocentric(
+                    coord.y.to_radians(),
+                    coord.x.to_radians(),
+                    coord.z,
+                    &Ellipsoid::WGS84,
+                );
+                Ok(Coord3D {
+                    x: geocentric.x,
+                    y: geocentric.y,
+                    z: geocentric.z,
+                })
+            }
+            Self::GeocentricToGeodetic => {
+                let geocentric = GeocentricCoord {
+                    x: coord.x,
+                    y: coord.y,
+                    z: coord.z,
+                };
+                let (latitude, longitude, height) =
+                    geocentric_to_geodetic(&geocentric, &Ellipsoid::WGS84);
+                Ok(Coord3D {
+                    x: longitude.to_degrees(),
+                    y: latitude.to_degrees(),
+                    z: height,
+                })
+            }
+            Self::HorizontalOnly(transform) => {
+                let (x, y) = transform
+                    .convert(coord.x, coord.y)
+                    .map_err(|error| ReprojError::Projicio(error.to_string()))?;
+                Ok(Coord3D { x, y, z: coord.z })
+            }
+        }
+    }
+}
+
+fn build_transform(source: &CrsDef, target: &CrsDef) -> Result<Transform, ReprojError> {
+    Transform::new(&source.definition(), &target.definition())
+        .map_err(|error| ReprojError::Projicio(error.to_string()))
 }
 
 /// Reprojection errors.
@@ -87,186 +141,16 @@ impl Transformer {
 pub enum ReprojError {
     #[error("unsupported CRS transform")]
     UnsupportedTransform,
-    #[error("coordinate out of range: {0}")]
-    OutOfRange(String),
-    #[error("proj4rs error: {0}")]
-    Proj4(String),
-}
-
-/// Transform coordinates between arbitrary CRS using proj4rs.
-///
-/// Falls back to proj4rs for any transform not handled by the
-/// hand-coded UTM/ECEF paths above.
-pub fn transform_proj4(
-    source_epsg: u32,
-    target_epsg: u32,
-    coords: &[Coord3D],
-) -> Result<Vec<Coord3D>, ReprojError> {
-    let src_def = format!("+init=epsg:{source_epsg}");
-    let tgt_def = format!("+init=epsg:{target_epsg}");
-
-    let src = proj4rs::Proj::from_proj_string(&src_def)
-        .map_err(|e| ReprojError::Proj4(format!("source EPSG:{source_epsg}: {e}")))?;
-    let tgt = proj4rs::Proj::from_proj_string(&tgt_def)
-        .map_err(|e| ReprojError::Proj4(format!("target EPSG:{target_epsg}: {e}")))?;
-
-    let mut result = Vec::with_capacity(coords.len());
-    for c in coords {
-        let mut point = (c.x.to_radians(), c.y.to_radians(), c.z);
-        proj4rs::transform::transform(&src, &tgt, &mut point)
-            .map_err(|e| ReprojError::Proj4(e.to_string()))?;
-
-        // proj4rs outputs geographic CRS in radians; convert back to degrees
-        // for geographic targets, otherwise keep as-is (projected).
-        let (x, y) = if tgt.is_latlong() {
-            (point.0.to_degrees(), point.1.to_degrees())
-        } else {
-            (point.0, point.1)
-        };
-
-        result.push(Coord3D { x, y, z: point.2 });
-    }
-    Ok(result)
-}
-
-fn is_utm(epsg: u32) -> bool {
-    (32601..=32660).contains(&epsg) || (32701..=32760).contains(&epsg)
-}
-
-fn utm_zone_from_epsg(epsg: u32) -> (u32, bool) {
-    if epsg >= 32701 {
-        (epsg - 32700, false)
-    } else {
-        (epsg - 32600, true)
-    }
-}
-
-const WGS84_A: f64 = 6_378_137.0;
-const WGS84_F: f64 = 1.0 / 298.257_223_563;
-const WGS84_E2: f64 = 2.0 * WGS84_F - WGS84_F * WGS84_F;
-
-fn geodetic_to_ecef(lat_deg: f64, lon_deg: f64, h: f64) -> (f64, f64, f64) {
-    let lat = lat_deg * PI / 180.0;
-    let lon = lon_deg * PI / 180.0;
-    let sin_lat = lat.sin();
-    let cos_lat = lat.cos();
-    let n = WGS84_A / (1.0 - WGS84_E2 * sin_lat * sin_lat).sqrt();
-    let x = (n + h) * cos_lat * lon.cos();
-    let y = (n + h) * cos_lat * lon.sin();
-    let z = (n * (1.0 - WGS84_E2) + h) * sin_lat;
-    (x, y, z)
-}
-
-fn ecef_to_geodetic(x: f64, y: f64, z: f64) -> (f64, f64, f64) {
-    let lon = y.atan2(x);
-    let p = (x * x + y * y).sqrt();
-    let b = WGS84_A * (1.0 - WGS84_F);
-    let ep2 = (WGS84_A * WGS84_A - b * b) / (b * b);
-    let theta = (z * WGS84_A).atan2(p * b);
-    let lat =
-        (z + ep2 * b * theta.sin().powi(3)).atan2(p - WGS84_E2 * WGS84_A * theta.cos().powi(3));
-    let sin_lat = lat.sin();
-    let n = WGS84_A / (1.0 - WGS84_E2 * sin_lat * sin_lat).sqrt();
-    let h = p / lat.cos() - n;
-    (lat * 180.0 / PI, lon * 180.0 / PI, h)
-}
-
-/// Convert lat/lon (degrees) to UTM easting/northing.
-fn latlon_to_utm(
-    lat_deg: f64,
-    lon_deg: f64,
-    zone: u32,
-    _north: bool,
-) -> Result<(f64, f64), ReprojError> {
-    if !(-80.0..=84.0).contains(&lat_deg) {
-        return Err(ReprojError::OutOfRange("latitude out of UTM range".into()));
-    }
-    let lat = lat_deg * PI / 180.0;
-    let lon = lon_deg * PI / 180.0;
-    let lon0 = ((zone as f64 - 1.0) * 6.0 - 180.0 + 3.0) * PI / 180.0;
-    let k0 = 0.9996;
-    let e = WGS84_E2.sqrt();
-    let e_prime_sq = WGS84_E2 / (1.0 - WGS84_E2);
-    let n_val = WGS84_A / (1.0 - WGS84_E2 * lat.sin().powi(2)).sqrt();
-    let t = lat.tan().powi(2);
-    let c = e_prime_sq * lat.cos().powi(2);
-    let a_val = lat.cos() * (lon - lon0);
-    let m = WGS84_A
-        * ((1.0 - WGS84_E2 / 4.0 - 3.0 * WGS84_E2.powi(2) / 64.0) * lat
-            - (3.0 * WGS84_E2 / 8.0 + 3.0 * WGS84_E2.powi(2) / 32.0) * (2.0 * lat).sin()
-            + (15.0 * WGS84_E2.powi(2) / 256.0) * (4.0 * lat).sin());
-    let _ = e; // used for clarity
-
-    let easting = k0
-        * n_val
-        * (a_val
-            + (1.0 - t + c) * a_val.powi(3) / 6.0
-            + (5.0 - 18.0 * t + t * t) * a_val.powi(5) / 120.0)
-        + 500_000.0;
-    let mut northing = k0
-        * (m + n_val
-            * lat.tan()
-            * (a_val.powi(2) / 2.0
-                + (5.0 - t + 9.0 * c + 4.0 * c * c) * a_val.powi(4) / 24.0
-                + (61.0 - 58.0 * t + t * t) * a_val.powi(6) / 720.0));
-    if lat_deg < 0.0 {
-        northing += 10_000_000.0;
-    }
-    Ok((easting, northing))
-}
-
-/// Convert UTM easting/northing to lat/lon (degrees).
-fn utm_to_latlon(
-    easting: f64,
-    northing: f64,
-    zone: u32,
-    north: bool,
-) -> Result<(f64, f64), ReprojError> {
-    let k0 = 0.9996;
-    let e1 = (1.0 - (1.0 - WGS84_E2).sqrt()) / (1.0 + (1.0 - WGS84_E2).sqrt());
-    let x = easting - 500_000.0;
-    let y = if north {
-        northing
-    } else {
-        northing - 10_000_000.0
-    };
-
-    let m = y / k0;
-    let mu = m / (WGS84_A * (1.0 - WGS84_E2 / 4.0 - 3.0 * WGS84_E2.powi(2) / 64.0));
-    let phi1 = mu
-        + (3.0 * e1 / 2.0 - 27.0 * e1.powi(3) / 32.0) * (2.0 * mu).sin()
-        + (21.0 * e1.powi(2) / 16.0 - 55.0 * e1.powi(4) / 32.0) * (4.0 * mu).sin()
-        + (151.0 * e1.powi(3) / 96.0) * (6.0 * mu).sin();
-
-    let e_prime_sq = WGS84_E2 / (1.0 - WGS84_E2);
-    let n1 = WGS84_A / (1.0 - WGS84_E2 * phi1.sin().powi(2)).sqrt();
-    let t1 = phi1.tan().powi(2);
-    let c1 = e_prime_sq * phi1.cos().powi(2);
-    let r1 = WGS84_A * (1.0 - WGS84_E2) / (1.0 - WGS84_E2 * phi1.sin().powi(2)).powf(1.5);
-    let d = x / (n1 * k0);
-
-    let lat = phi1
-        - (n1 * phi1.tan() / r1)
-            * (d.powi(2) / 2.0
-                - (5.0 + 3.0 * t1 + 10.0 * c1 - 4.0 * c1 * c1 - 9.0 * e_prime_sq) * d.powi(4)
-                    / 24.0
-                + (61.0 + 90.0 * t1 + 298.0 * c1 + 45.0 * t1 * t1 - 252.0 * e_prime_sq)
-                    * d.powi(6)
-                    / 720.0);
-    let lon0 = ((zone as f64 - 1.0) * 6.0 - 180.0 + 3.0) * PI / 180.0;
-    let lon = lon0
-        + (d - (1.0 + 2.0 * t1 + c1) * d.powi(3) / 6.0
-            + (5.0 - 2.0 * c1 + 28.0 * t1 - 3.0 * c1 * c1 + 8.0 * e_prime_sq + 24.0 * t1 * t1)
-                * d.powi(5)
-                / 120.0)
-            / phi1.cos();
-
-    Ok((lat * 180.0 / PI, lon * 180.0 / PI))
+    #[error("projicio error: {0}")]
+    Projicio(String),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // the content of a typical ESRI .prj: NAD83 UTM zone 18N
+    const UTM_18N_WKT: &str = r#"PROJCS["NAD_1983_UTM_Zone_18N",GEOGCS["GCS_North_American_1983",DATUM["D_North_American_1983",SPHEROID["GRS_1980",6378137.0,298.257222101]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["False_Easting",500000.0],PARAMETER["False_Northing",0.0],PARAMETER["Central_Meridian",-75.0],PARAMETER["Scale_Factor",0.9996],PARAMETER["Latitude_Of_Origin",0.0],UNIT["Meter",1.0]]"#;
 
     #[test]
     fn test_identity_transform() {
@@ -316,34 +200,46 @@ mod tests {
             z: 0.0,
         }; // null island
         let r = t.transform(c).unwrap();
-        assert!((r.x - WGS84_A).abs() < 1.0);
+        assert!((r.x - Ellipsoid::WGS84.a).abs() < 1.0);
         assert!(r.y.abs() < 1.0);
         assert!(r.z.abs() < 1.0);
     }
 
     #[test]
-    fn test_transform_proj4_returns_error_for_unsupported_init() {
-        // proj4rs 0.1 does not ship an EPSG database, so +init=epsg:XXXX
-        // should return a Proj4 error rather than panicking.
+    fn test_transform_batch_projects_to_utm_and_keeps_z() {
         let coords = vec![Coord3D {
             x: 9.0,
             y: 48.0,
-            z: 0.0,
+            z: 250.0,
         }];
-        let result = transform_proj4(4326, 32632, &coords);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ReprojError::Proj4(msg) => assert!(
-                msg.contains("EPSG:4326"),
-                "error should mention EPSG: {msg}"
-            ),
-            other => panic!("expected Proj4 error, got: {other:?}"),
-        }
+        let result = Transformer::new(CrsDef::Epsg(4326), CrsDef::Epsg(32632))
+            .transform_batch(&coords)
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert!((result[0].x - 500_000.0).abs() < 1.0, "{}", result[0].x);
+        assert!((result[0].z - 250.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_transform_from_wkt_definition() {
+        let t = Transformer::new(
+            CrsDef::Wkt(UTM_18N_WKT.to_string()),
+            CrsDef::Epsg(WGS84_GEODETIC_EPSG),
+        );
+        let c = Coord3D {
+            x: 500_000.0,
+            y: 4_510_000.0,
+            z: 12.0,
+        };
+        let r = t.transform(c).unwrap();
+        // false easting on a central meridian of -75 degrees
+        assert!((r.x - (-75.0)).abs() < 1e-6, "lon={}", r.x);
+        assert!((r.y - 40.74).abs() < 0.05, "lat={}", r.y);
+        assert!((r.z - 12.0).abs() < 1e-9);
     }
 
     #[test]
     fn test_transformer_utm_roundtrip() {
-        // Use the hand-coded Transformer path for UTM→WGS84 roundtrip
         let fwd = Transformer::new(CrsDef::Epsg(4326), CrsDef::Epsg(32632));
         let inv = Transformer::new(CrsDef::Epsg(32632), CrsDef::Epsg(4326));
         let c = Coord3D {

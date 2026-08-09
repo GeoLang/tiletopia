@@ -62,7 +62,7 @@ shapefile = "0.8"
 geo-types = "0.7"
 
 # CRS transforms
-proj4rs = "0.1"
+projicio-core = { git = "https://github.com/GeoLang/projicio.git", branch = "master" }
 
 # Mesh compression
 meshopt = "0.6"

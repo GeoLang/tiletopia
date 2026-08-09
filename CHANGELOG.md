@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-08
+
+### Changed
+- CRS reprojection runs on `projicio-core` instead of proj4rs. The old
+  `transform_proj4` fed `+init=epsg:XXXX` to a proj4rs build with no EPSG
+  database, so it could only ever error, and the hand-rolled UTM series did
+  the real work for the four zone ranges it covered. `transform_between_epsg_codes`
+  replaces it and works, and `Transformer` now reaches every CRS projicio
+  knows, from an EPSG code, a projstring or a WKT definition. EPSG:4978 keeps
+  a separate path, since it is the one 3D pair and projicio transforms x and y
+  only. `ReprojError::Proj4` is now `ReprojError::Projicio`, and
+  `ReprojError::OutOfRange` is gone with the UTM series that raised it.
+- `reproject_to_wgs84` transforms the whole point slice in one batch, so the
+  transform is built once per call rather than once per point.
+
 ## [Unreleased] - 2026-08-05
 
 ### Added

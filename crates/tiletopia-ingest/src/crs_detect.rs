@@ -256,29 +256,23 @@ pub fn reproject_to_wgs84(points: &mut [[f64; 3]], from: &DetectedCrs) {
     }
 
     let transformer = Transformer::new(CrsDef::Epsg(src_epsg), CrsDef::Epsg(4326));
-
-    for pt in points.iter_mut() {
-        let coord = Coord3D {
+    let coords: Vec<Coord3D> = points
+        .iter()
+        .map(|pt| Coord3D {
             x: pt[0],
             y: pt[1],
             z: pt[2],
-        };
-        match transformer.transform(coord) {
-            Ok(out) => {
-                pt[0] = out.x;
-                pt[1] = out.y;
-                pt[2] = out.z;
-            }
-            Err(_) => {
-                // For CRS not handled by the built-in transformer, try proj4rs
-                let coords = &[coord];
-                if let Ok(result) = tiletopia_core::crs::transform_proj4(src_epsg, 4326, coords) {
-                    pt[0] = result[0].x;
-                    pt[1] = result[0].y;
-                    pt[2] = result[0].z;
-                }
-            }
-        }
+        })
+        .collect();
+
+    let Ok(transformed) = transformer.transform_batch(&coords) else {
+        return;
+    };
+
+    for (pt, out) in points.iter_mut().zip(transformed) {
+        pt[0] = out.x;
+        pt[1] = out.y;
+        pt[2] = out.z;
     }
 }
 
