@@ -38,7 +38,7 @@ Tiletopia has **real, working** code for:
 - **Impact**: Schema can evolve without per-column pragma probes
 
 ### 1.4 Async job queue
-- **Current**: `job_queue::JobQueue` writes jobs to the `jobs` table and a background tokio task claims queued rows. Point cloud upload and `POST /api/v1/assets/{id}/tile` return 202 with the job id, pollable at `GET /api/v1/jobs/{id}`
+- **Current**: `job_queue::JobQueue` writes jobs to the `jobs` table and a background tokio task claims queued rows. Point cloud upload returns 201 with a `job_id` field, `POST /api/v1/assets/{id}/tile` returns 202 with the job record, and either id polls at `GET /api/v1/jobs/{id}`
 - **Need**: Progress between queued and done (it jumps 0.0 → 1.0), cancellation, requeue of rows left `running` by a crashed process, and more than one concurrent worker. `tiletopia-worker::run_job` is a second synchronous tiling path that no server route calls
 - **Work**: Progress callback through `tile_point_cloud`, notify instead of the 2 s poll, `cancelled` status, stale-job sweep at startup, fold or delete `tiletopia-worker`
 - **Impact**: Real progress bars and a queue that survives a restart mid-job
