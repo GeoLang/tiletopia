@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-09
+
+### Changed
+- `POST /api/v1/assets` reports the tiling job it queued. The handler discarded
+  the `JobRecord` that point cloud uploads create, so a client had no id to poll
+  `GET /api/v1/jobs/{id}` with and could not show tiling progress. The response
+  now carries a `job_id` alongside the asset fields, omitted for asset types
+  that tile on demand rather than on upload.
+
 ## [Unreleased] - 2026-08-08
 
 ### Changed

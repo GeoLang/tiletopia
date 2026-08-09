@@ -5,17 +5,28 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Json,
 };
+use serde::Serialize;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{AppState, Asset, AssetStatus, AssetType, users};
+
+/// The created asset, plus the tiling job the upload queued. Only asset types
+/// that tile on upload get a `job_id`; the rest tile via `/assets/{id}/tile`.
+#[derive(Debug, Serialize)]
+pub struct UploadResponse {
+    #[serde(flatten)]
+    pub asset: Asset,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<Uuid>,
+}
 
 /// Handle multipart file upload.
 pub async fn upload_asset(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<Asset>), StatusCode> {
+) -> Result<(StatusCode, Json<UploadResponse>), StatusCode> {
     // the route sits behind require_editor, so a valid token is always present
     let owner_id = users::claims_from_headers(&headers)?.sub;
 
@@ -85,18 +96,21 @@ pub async fn upload_asset(
 
     // point clouds get tiled to 3d tiles right away; the job worker flips the
     // asset to Ready and tileset.json becomes servable
-    if asset.asset_type == AssetType::PointCloud {
-        state
+    let job_id = if asset.asset_type == AssetType::PointCloud {
+        let job = state
             .job_queue
             .submit(asset.id, input_path.to_string_lossy().into_owned())
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    }
+        Some(job.id)
+    } else {
+        None
+    };
 
     tracing::info!("Uploaded asset {} ({} bytes)", asset.id, file_data.len());
     tracing::info!("metric: assets_uploaded");
 
-    Ok((StatusCode::CREATED, Json(asset)))
+    Ok((StatusCode::CREATED, Json(UploadResponse { asset, job_id })))
 }
 
 fn detect_asset_type(name: &str) -> AssetType {

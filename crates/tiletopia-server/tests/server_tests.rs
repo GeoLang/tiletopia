@@ -1228,10 +1228,18 @@ mod tests {
         state: &Arc<AppState>,
         token: Option<&str>,
     ) -> (StatusCode, serde_json::Value) {
+        upload_named(state, token, "t.glb").await
+    }
+
+    async fn upload_named(
+        state: &Arc<AppState>,
+        token: Option<&str>,
+        filename: &str,
+    ) -> (StatusCode, serde_json::Value) {
         let boundary = "tiletopiatestboundary";
         let body = format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
-             filename=\"t.glb\"\r\n\r\nglTF-bytes\r\n--{boundary}--\r\n"
+             filename=\"{filename}\"\r\n\r\nglTF-bytes\r\n--{boundary}--\r\n"
         );
         let mut req = Request::builder()
             .method("POST")
@@ -1277,6 +1285,27 @@ mod tests {
         let (status, asset) = upload_glb(&state, Some(&editor_token)).await;
         assert_eq!(status, StatusCode::CREATED);
         assert!(asset["id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn upload_returns_tiling_job_id() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "upload-job-editor@example.com").await;
+
+        let (status, asset) = upload_named(&state, Some(&editor_token), "cloud.las").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let job_id = uuid::Uuid::parse_str(asset["job_id"].as_str().expect("job_id in response"))
+            .expect("job_id is a uuid");
+        let job = state.db.get_job(job_id).await.unwrap().expect("job exists");
+        assert_eq!(
+            job.asset_id,
+            uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap()
+        );
+
+        // a model tiles on demand, not on upload, so it reports no job
+        let (status, model) = upload_glb(&state, Some(&editor_token)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(model.get("job_id").is_none());
     }
 
     #[tokio::test]
