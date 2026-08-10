@@ -667,6 +667,7 @@ struct IsochroneQuery {
     lat: Option<f64>,
     minutes: Option<String>, // comma-separated: "5,10,15"
     profile: Option<String>,
+    concavity: Option<f64>,
 }
 
 async fn compute_isochrone(Query(params): Query<IsochroneQuery>) -> Json<serde_json::Value> {
@@ -689,6 +690,10 @@ async fn compute_isochrone(Query(params): Query<IsochroneQuery>) -> Json<serde_j
         profile,
         contours_minutes: contours,
         denoise: 0.5,
+        concavity: params
+            .concavity
+            .filter(|c| *c >= 0.0)
+            .unwrap_or(isochrone::DEFAULT_CONCAVITY),
     };
     let result = isochrone::compute_isochrone(&request);
     Json(serde_json::json!(result))

@@ -3,10 +3,20 @@
 //! Wraps `itinera_core::isochrone()` for graph-based reachability analysis,
 //! with a grid-based fallback for areas without loaded road network data.
 
+use geo::ConcaveHull;
+use geo::concave_hull::ConcaveHullOptions;
 use itinera_core::isochrone as itinera_isochrone;
 use itinera_graph::{Graph, NodeId, SpeedProfile};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Default contour concavity. Lower values hug the reachable area more closely,
+/// infinity gives a convex hull.
+pub const DEFAULT_CONCAVITY: f64 = 2.0;
+
+fn default_concavity() -> f64 {
+    DEFAULT_CONCAVITY
+}
 
 /// An isochrone request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,6 +25,9 @@ pub struct IsochroneRequest {
     pub profile: TravelProfile,
     pub contours_minutes: Vec<u32>, // e.g., [5, 10, 15]
     pub denoise: f32,               // 0.0–1.0 smoothing factor
+    /// Contour concavity, zero or greater. See `DEFAULT_CONCAVITY`.
+    #[serde(default = "default_concavity")]
+    pub concavity: f64,
 }
 
 /// Travel profile.
@@ -45,6 +58,8 @@ pub struct IsochroneContour {
 const KM_PER_DEG: f64 = 111.32;
 
 /// Compute isochrone contours using itinera on a provided graph.
+///
+/// TODO: this path ignores `request.concavity`, itinera's `isochrone` does not accept it yet.
 pub fn compute_isochrone_graph(
     request: &IsochroneRequest,
     graph: &Graph,
@@ -124,7 +139,7 @@ pub fn compute_isochrone(request: &IsochroneRequest) -> IsochroneResult {
             let polygon = if reachable.is_empty() {
                 vec![request.origin, request.origin]
             } else {
-                convex_hull(reachable)
+                concave_hull(&reachable, request.concavity)
             };
             let area_km2 = polygon_area_km2(&polygon);
             IsochroneContour {
@@ -234,47 +249,19 @@ fn dijkstra_grid(grid_size: usize, center: usize, cell_size_km: f64, speed_kmh: 
     dist
 }
 
-fn convex_hull(mut points: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
-    if points.len() < 3 {
-        if !points.is_empty() {
-            points.push(points[0]);
-        }
-        return points;
-    }
+/// Exterior ring around `points`, closed so the first coord repeats at the end.
+fn concave_hull(points: &[[f64; 2]], concavity: f64) -> Vec<[f64; 2]> {
+    let coords: Vec<geo::Coord<f64>> = points
+        .iter()
+        .map(|p| geo::Coord { x: p[0], y: p[1] })
+        .collect();
 
-    points.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
-    points.dedup();
+    let hull = coords.concave_hull_with_options(ConcaveHullOptions {
+        concavity,
+        length_threshold: 0.0,
+    });
 
-    if points.len() < 3 {
-        points.push(points[0]);
-        return points;
-    }
-
-    let mut hull: Vec<[f64; 2]> = Vec::new();
-
-    // Lower hull
-    for &p in &points {
-        while hull.len() >= 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0 {
-            hull.pop();
-        }
-        hull.push(p);
-    }
-
-    // Upper hull
-    let lower_len = hull.len();
-    for &p in points.iter().rev().skip(1) {
-        while hull.len() > lower_len && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0
-        {
-            hull.pop();
-        }
-        hull.push(p);
-    }
-
-    hull
-}
-
-fn cross(o: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
-    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    hull.exterior().0.iter().map(|c| [c.x, c.y]).collect()
 }
 
 fn polygon_area_km2(polygon: &[[f64; 2]]) -> f64 {
@@ -296,6 +283,80 @@ fn polygon_area_km2(polygon: &[[f64; 2]]) -> f64 {
 mod tests {
     use super::*;
 
+    const CELL_DEGREES: f64 = 0.01;
+
+    /// 9x7 lattice of points with the top middle cut out, leaving a U with an open mouth.
+    fn u_shaped_points() -> Vec<[f64; 2]> {
+        let mouth_columns = 3..=5;
+        let mouth_rows = 4..=6;
+        (0..9u32)
+            .flat_map(|x| (0..7u32).map(move |y| (x, y)))
+            .filter(|(x, y)| !(mouth_columns.contains(x) && mouth_rows.contains(y)))
+            .map(|(x, y)| [f64::from(x) * CELL_DEGREES, f64::from(y) * CELL_DEGREES])
+            .collect()
+    }
+
+    /// Middle of the U's mouth, strictly inside the convex hull but off the network.
+    const MOUTH: [f64; 2] = [4.0 * CELL_DEGREES, 5.5 * CELL_DEGREES];
+
+    fn ring_contains(ring: &[[f64; 2]], point: [f64; 2]) -> bool {
+        use geo::Contains;
+        let exterior: Vec<geo::Coord<f64>> = ring
+            .iter()
+            .map(|p| geo::Coord { x: p[0], y: p[1] })
+            .collect();
+        geo::Polygon::new(geo::LineString::new(exterior), vec![])
+            .contains(&geo::Point::new(point[0], point[1]))
+    }
+
+    fn walking_contour_area(concavity: f64) -> f64 {
+        let req = IsochroneRequest {
+            origin: [0.0, 0.0],
+            profile: TravelProfile::Walking,
+            contours_minutes: vec![10],
+            denoise: 0.0,
+            concavity,
+        };
+        compute_isochrone(&req).contours[0].area_km2
+    }
+
+    #[test]
+    fn test_hull_excludes_the_mouth_of_a_u_shaped_set() {
+        let hull = concave_hull(&u_shaped_points(), DEFAULT_CONCAVITY);
+
+        assert_eq!(hull.first(), hull.last());
+        assert!(
+            !ring_contains(&hull, MOUTH),
+            "hull {hull:?} still covers the unreachable mouth"
+        );
+    }
+
+    #[test]
+    fn test_infinite_concavity_gives_the_convex_hull() {
+        let hull = concave_hull(&u_shaped_points(), f64::INFINITY);
+
+        assert!(ring_contains(&hull, MOUTH));
+        assert_eq!(hull.len(), 5);
+    }
+
+    #[test]
+    fn test_hull_with_fewer_than_four_points() {
+        for count in 1..4u32 {
+            let points: Vec<[f64; 2]> = (0..count)
+                .map(|i| [f64::from(i) * CELL_DEGREES, f64::from(i * i) * CELL_DEGREES])
+                .collect();
+            let hull = concave_hull(&points, DEFAULT_CONCAVITY);
+
+            assert!(!hull.is_empty());
+            assert_eq!(hull.first(), hull.last());
+        }
+    }
+
+    #[test]
+    fn test_concavity_changes_the_contour_area() {
+        assert!(walking_contour_area(DEFAULT_CONCAVITY) < walking_contour_area(f64::INFINITY));
+    }
+
     #[test]
     fn test_compute_isochrone() {
         let req = IsochroneRequest {
@@ -303,6 +364,7 @@ mod tests {
             profile: TravelProfile::Driving,
             contours_minutes: vec![5, 10, 15],
             denoise: 0.5,
+            concavity: DEFAULT_CONCAVITY,
         };
         let result = compute_isochrone(&req);
         assert_eq!(result.contours.len(), 3);
@@ -317,6 +379,7 @@ mod tests {
             profile: TravelProfile::Walking,
             contours_minutes: vec![10],
             denoise: 0.0,
+            concavity: DEFAULT_CONCAVITY,
         };
         let result = compute_isochrone(&req);
         assert_eq!(result.contours.len(), 1);
@@ -331,6 +394,7 @@ mod tests {
             profile: TravelProfile::Cycling,
             contours_minutes: vec![5],
             denoise: 0.0,
+            concavity: DEFAULT_CONCAVITY,
         };
         let result = compute_isochrone(&req);
         let poly = &result.contours[0].polygon;
@@ -344,6 +408,7 @@ mod tests {
             profile: TravelProfile::Driving,
             contours_minutes: vec![5, 15],
             denoise: 0.0,
+            concavity: DEFAULT_CONCAVITY,
         };
         let result = compute_isochrone(&req);
         assert!(result.contours[0].area_km2 < result.contours[1].area_km2);

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 2026-08-09
 
+### Changed
+- Isochrone contours are a concave hull instead of a convex one. A convex hull
+  spans every bay and dead end in the reachable area, so `GET /api/v1/isochrone/compute`
+  claimed reach over ground nothing can get to. The request carries a `concavity`
+  field and the endpoint an optional `concavity` query parameter, both defaulting
+  to 2.0. Lower values hug the reachable area more closely, infinity reproduces
+  the old convex contour. The graph-backed path still takes its boundary from
+  itinera and ignores `concavity`.
+
 ### Added
 - `GET /api/v1/assets/{id}/jobs` lists an asset's tiling jobs, newest first.
   The job id came back on the upload response alone, so only the session that
