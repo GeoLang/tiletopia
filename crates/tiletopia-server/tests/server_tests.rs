@@ -1309,6 +1309,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn asset_jobs_route_finds_the_tiling_job_without_the_upload_response() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "asset-jobs-editor@example.com").await;
+
+        let (status, asset) = upload_named(&state, Some(&editor_token), "cloud.las").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let uri = format!("/api/v1/assets/{}/jobs", asset["id"].as_str().unwrap());
+
+        // the route a client that only listed the asset has to use
+        let req = Request::builder()
+            .method("GET")
+            .uri(&uri)
+            .header("authorization", format!("Bearer {editor_token}"));
+        let resp = router(Arc::clone(&state))
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let jobs: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(jobs.as_array().expect("a list of jobs").len(), 1);
+        assert_eq!(jobs[0]["id"], asset["job_id"]);
+        assert_eq!(jobs[0]["asset_id"], asset["id"]);
+    }
+
+    #[tokio::test]
     async fn native_delete_asset_requires_editor() {
         let state = test_state().await;
         let editor_token = bootstrap_editor(&state, "native-del-editor@example.com").await;

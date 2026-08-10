@@ -328,6 +328,7 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `GET` | `/api/v1/assets/{id}` | Get asset details |
 | `DELETE` | `/api/v1/assets/{id}` | Delete asset |
 | `POST` | `/api/v1/assets/{id}/tile` | Start tiling job |
+| `GET` | `/api/v1/assets/{id}/jobs` | The asset's tiling jobs, newest first |
 | `GET` | `/api/v1/assets/{id}/tileset.json` | Serve tileset |
 | `GET` | `/api/v1/assets/{id}/tiles/{path}` | Serve individual tile |
 | `WS` | `/api/v1/realtime/{room}` | WebSocket for live data and collaboration |

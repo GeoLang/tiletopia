@@ -275,6 +275,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/assets/{id}/tiles/{path}", get(get_tile))
         .route("/api/v1/assets/{id}/thumbnail", get(get_thumbnail))
         .route("/api/v1/assets/{id}/annotations", get(list_annotations))
+        .route("/api/v1/assets/{id}/jobs", get(list_asset_jobs))
         .route("/api/v1/jobs/{id}", get(get_job_status))
         .route("/api/v1/users/me", get(users::get_me).put(users::update_me))
         .merge(asset_write_routes)
@@ -502,6 +503,20 @@ async fn start_tiling(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+/// The asset's tiling jobs, newest first. The upload response names the job it
+/// queued, which only helps the session that did the uploading.
+async fn list_asset_jobs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<db::JobRecord>>, StatusCode> {
+    state
+        .db
+        .list_jobs_for_asset(id)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn get_job_status(

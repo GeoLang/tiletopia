@@ -314,6 +314,8 @@ mod tests {
             "/api/v1/analysis/export/hillshade"
         ));
         assert!(!is_public_read(&Method::GET, "/api/v1/portal/items"));
+        // an asset's jobs sit under the same prefix as its public tiles
+        assert!(!is_public_read(&Method::GET, "/api/v1/assets/abc/jobs"));
         // the realtime websocket needs a token like any other non-tile route
         assert!(!is_public_read(&Method::GET, "/api/v1/realtime/room-1"));
     }

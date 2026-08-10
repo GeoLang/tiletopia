@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 2026-08-09
 
+### Added
+- `GET /api/v1/assets/{id}/jobs` lists an asset's tiling jobs, newest first.
+  The job id came back on the upload response alone, so only the session that
+  uploaded could read progress and an asset listed on a later page load showed
+  its status by itself. Needs a token, like the rest of the job surface.
+
 ### Changed
 - `POST /api/v1/assets` reports the tiling job it queued. The handler discarded
   the `JobRecord` that point cloud uploads create, so a client had no id to poll
