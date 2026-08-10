@@ -663,46 +663,89 @@ pub fn isochrone_routes() -> Router<Arc<AppState>> {
 
 #[derive(Deserialize)]
 struct IsochroneQuery {
-    lon: Option<f64>,
-    lat: Option<f64>,
+    lon: f64,
+    lat: f64,
     minutes: Option<String>, // comma-separated: "5,10,15"
     profile: Option<String>,
     concavity: Option<f64>,
 }
 
-async fn compute_isochrone(Query(params): Query<IsochroneQuery>) -> Json<serde_json::Value> {
-    let contours: Vec<u32> = params
-        .minutes
-        .unwrap_or_else(|| "5,10,15".into())
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
-    let profile = match params.profile.as_deref() {
-        Some("walking") => isochrone::TravelProfile::Walking,
-        Some("cycling") => isochrone::TravelProfile::Cycling,
-        _ => isochrone::TravelProfile::Driving,
-    };
-    let request = isochrone::IsochroneRequest {
-        origin: [
-            params.lon.unwrap_or(-122.4194),
-            params.lat.unwrap_or(37.7749),
-        ],
-        profile,
-        contours_minutes: contours,
-        denoise: 0.5,
-        concavity: params
-            .concavity
-            .filter(|c| *c >= 0.0)
-            .unwrap_or(isochrone::DEFAULT_CONCAVITY),
-    };
-    let result = isochrone::compute_isochrone(&request);
-    Json(serde_json::json!(result))
+const DEFAULT_CONTOUR_MINUTES: &str = "5,10,15";
+const ISOCHRONE_PROFILES: [&str; 3] = ["driving", "walking", "cycling"];
+const ISOCHRONE_DENOISE: f32 = 0.5;
+
+fn bad_request(reason: String) -> (StatusCode, String) {
+    (StatusCode::BAD_REQUEST, reason)
+}
+
+fn parse_travel_profile(name: &str) -> Option<isochrone::TravelProfile> {
+    match name {
+        "driving" => Some(isochrone::TravelProfile::Driving),
+        "walking" => Some(isochrone::TravelProfile::Walking),
+        "cycling" => Some(isochrone::TravelProfile::Cycling),
+        _ => None,
+    }
+}
+
+impl IsochroneQuery {
+    fn into_request(self) -> Result<isochrone::IsochroneRequest, (StatusCode, String)> {
+        if !(-180.0..=180.0).contains(&self.lon) || !(-90.0..=90.0).contains(&self.lat) {
+            return Err(bad_request(format!(
+                "lon must be within -180..180 and lat within -90..90, got {},{}",
+                self.lon, self.lat
+            )));
+        }
+
+        let contours_minutes = self
+            .minutes
+            .as_deref()
+            .unwrap_or(DEFAULT_CONTOUR_MINUTES)
+            .split(',')
+            .map(|entry| {
+                entry.trim().parse::<u32>().map_err(|_| {
+                    bad_request(format!(
+                        "minutes must be a comma-separated list of whole numbers, got '{entry}'"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<u32>, _>>()?;
+
+        let profile = match self.profile.as_deref() {
+            Some(name) => parse_travel_profile(name).ok_or_else(|| {
+                bad_request(format!(
+                    "unknown profile '{name}'; valid options: {}",
+                    ISOCHRONE_PROFILES.join(", ")
+                ))
+            })?,
+            None => isochrone::TravelProfile::Driving,
+        };
+
+        let concavity = self.concavity.unwrap_or(itinera_core::DEFAULT_CONCAVITY);
+        if concavity < 0.0 || concavity.is_nan() {
+            return Err(bad_request(format!(
+                "concavity must be zero or greater, got {concavity}"
+            )));
+        }
+
+        Ok(isochrone::IsochroneRequest {
+            origin: [self.lon, self.lat],
+            profile,
+            contours_minutes,
+            denoise: ISOCHRONE_DENOISE,
+            concavity,
+        })
+    }
+}
+
+async fn compute_isochrone(
+    Query(params): Query<IsochroneQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let result = isochrone::compute_isochrone(&params.into_request()?);
+    Ok(Json(serde_json::json!(result)))
 }
 
 async fn isochrone_profiles() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "profiles": ["Walking", "Cycling", "Driving", "PublicTransit"]
-    }))
+    Json(serde_json::json!({ "profiles": ISOCHRONE_PROFILES }))
 }
 
 /// Routes for geoprocessing operations.
@@ -1546,4 +1589,81 @@ async fn query_entity_links_by_position(
     let radius = params.radius.unwrap_or(100.0);
     let links = store.query_by_position([params.x, params.y, params.z], radius);
     Json(serde_json::json!({ "links": links }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn isochrone_query(minutes: Option<&str>, profile: Option<&str>) -> IsochroneQuery {
+        IsochroneQuery {
+            lon: -122.4194,
+            lat: 37.7749,
+            minutes: minutes.map(str::to_string),
+            profile: profile.map(str::to_string),
+            concavity: None,
+        }
+    }
+
+    fn reason(result: Result<isochrone::IsochroneRequest, (StatusCode, String)>) -> String {
+        let (status, reason) = result.expect_err("expected a rejection");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        reason
+    }
+
+    #[test]
+    fn test_isochrone_query_defaults() {
+        let request = isochrone_query(None, None).into_request().unwrap();
+
+        assert_eq!(request.origin, [-122.4194, 37.7749]);
+        assert_eq!(request.contours_minutes, vec![5, 10, 15]);
+        assert_eq!(request.profile, isochrone::TravelProfile::Driving);
+        assert_eq!(request.concavity, itinera_core::DEFAULT_CONCAVITY);
+    }
+
+    #[test]
+    fn test_isochrone_query_accepts_every_listed_profile() {
+        for name in ISOCHRONE_PROFILES {
+            assert!(
+                isochrone_query(None, Some(name)).into_request().is_ok(),
+                "profiles endpoint lists '{name}' but compute rejects it"
+            );
+        }
+    }
+
+    #[test]
+    fn test_isochrone_query_rejects_unknown_profile() {
+        let rejection = reason(isochrone_query(None, Some("teleport")).into_request());
+        assert!(rejection.contains("teleport"), "{rejection}");
+    }
+
+    #[test]
+    fn test_isochrone_query_rejects_unparseable_minutes() {
+        let rejection = reason(isochrone_query(Some("5,soon,15"), None).into_request());
+        assert!(rejection.contains("soon"), "{rejection}");
+    }
+
+    #[test]
+    fn test_isochrone_query_rejects_out_of_range_origin() {
+        let mut query = isochrone_query(None, None);
+        query.lat = 91.0;
+        reason(query.into_request());
+    }
+
+    #[test]
+    fn test_isochrone_query_rejects_bad_concavity() {
+        for concavity in [-1.0, f64::NAN] {
+            let mut query = isochrone_query(None, None);
+            query.concavity = Some(concavity);
+            reason(query.into_request());
+        }
+    }
+
+    #[test]
+    fn test_isochrone_query_keeps_a_valid_concavity() {
+        let mut query = isochrone_query(None, None);
+        query.concavity = Some(0.5);
+
+        assert_eq!(query.into_request().unwrap().concavity, 0.5);
+    }
 }

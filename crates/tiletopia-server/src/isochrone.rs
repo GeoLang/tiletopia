@@ -5,14 +5,10 @@
 
 use geo::ConcaveHull;
 use geo::concave_hull::ConcaveHullOptions;
-use itinera_core::isochrone as itinera_isochrone;
+use itinera_core::{DEFAULT_CONCAVITY, isochrone as itinera_isochrone};
 use itinera_graph::{Graph, NodeId, SpeedProfile};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-/// Default contour concavity. Lower values hug the reachable area more closely,
-/// infinity gives a convex hull.
-pub const DEFAULT_CONCAVITY: f64 = 2.0;
 
 fn default_concavity() -> f64 {
     DEFAULT_CONCAVITY
@@ -25,7 +21,7 @@ pub struct IsochroneRequest {
     pub profile: TravelProfile,
     pub contours_minutes: Vec<u32>, // e.g., [5, 10, 15]
     pub denoise: f32,               // 0.0–1.0 smoothing factor
-    /// Contour concavity, zero or greater. See `DEFAULT_CONCAVITY`.
+    /// Contour concavity, zero or greater. See `itinera_core::DEFAULT_CONCAVITY`.
     #[serde(default = "default_concavity")]
     pub concavity: f64,
 }
@@ -58,8 +54,6 @@ pub struct IsochroneContour {
 const KM_PER_DEG: f64 = 111.32;
 
 /// Compute isochrone contours using itinera on a provided graph.
-///
-/// TODO: this path ignores `request.concavity`, itinera's `isochrone` does not accept it yet.
 pub fn compute_isochrone_graph(
     request: &IsochroneRequest,
     graph: &Graph,
@@ -72,7 +66,8 @@ pub fn compute_isochrone_graph(
             let max_seconds = minutes as f64 * 60.0;
             let profile = to_speed_profile(&request.profile);
 
-            let result = itinera_isochrone(graph, origin_node, max_seconds, &profile);
+            let result =
+                itinera_isochrone(graph, origin_node, max_seconds, &profile, request.concavity);
 
             let polygon: Vec<[f64; 2]> = if result.boundary.is_empty() {
                 vec![request.origin, request.origin]

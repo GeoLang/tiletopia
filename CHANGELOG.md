@@ -13,8 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   claimed reach over ground nothing can get to. The request carries a `concavity`
   field and the endpoint an optional `concavity` query parameter, both defaulting
   to 2.0. Lower values hug the reachable area more closely, infinity reproduces
-  the old convex contour. The graph-backed path still takes its boundary from
-  itinera and ignores `concavity`.
+  the old convex contour. Both the grid and graph paths honour it, and
+  `DEFAULT_CONCAVITY` comes from `itinera_core` so the two repos cannot drift.
+
+### Fixed
+- `GET /api/v1/isochrone/compute` rejects bad parameters instead of quietly
+  substituting its own. It defaulted a missing `lon`/`lat` to San Francisco,
+  dropped any `minutes` entry that would not parse, and turned an unknown
+  `profile` into driving, so a typo came back as a plausible-looking isochrone
+  of somewhere else. `lon` and `lat` are now required and range-checked, and a
+  `minutes`, `profile` or `concavity` value that is present but unusable returns
+  400 with the reason. Omitting an optional parameter still takes the default.
+- `GET /api/v1/isochrone/profiles` lists the three profiles the compute endpoint
+  actually accepts. It advertised `PublicTransit`, which does not exist, and
+  capitalised the names, which the parser did not match.
 
 ### Added
 - `GET /api/v1/assets/{id}/jobs` lists an asset's tiling jobs, newest first.
