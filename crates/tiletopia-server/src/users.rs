@@ -11,7 +11,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode};
+use jsonwebtoken::{EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::sync::{Arc, LazyLock};
@@ -218,19 +218,16 @@ pub fn claims_from_headers(headers: &axum::http::HeaderMap) -> Result<Claims, St
 /// the `Authorization` header. Same key and validation as
 /// [`claims_from_headers`].
 pub fn claims_from_token(token: &str) -> Result<Claims, StatusCode> {
-    decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(jwt_secret().as_bytes()),
-        &Validation::default(),
-    )
-    .map(|data| data.claims)
-    .map_err(|_| StatusCode::UNAUTHORIZED)
+    crate::auth::verify_token_with_secret(token, &jwt_secret())
+        .map(|authenticated| authenticated.claims)
 }
 
 /// Middleware that requires the user to have Admin role.
 pub async fn require_admin(request: Request, next: Next) -> Result<Response, StatusCode> {
-    let claims = extract_claims(&request)?;
-    if !claims.can_admin() {
+    let token = crate::auth::request_token(request.headers(), request.uri())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let authenticated = crate::auth::verify_token_with_secret(token, &jwt_secret())?;
+    if !authenticated.can_admin() {
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(next.run(request).await)
@@ -239,8 +236,10 @@ pub async fn require_admin(request: Request, next: Next) -> Result<Response, Sta
 /// Middleware that requires the user to have Editor or Admin role. Same JWT
 /// claims check as `require_admin`, widened to the Edit permission tier.
 pub async fn require_editor(request: Request, next: Next) -> Result<Response, StatusCode> {
-    let claims = extract_claims(&request)?;
-    if !claims.can_write() {
+    let token = crate::auth::request_token(request.headers(), request.uri())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let authenticated = crate::auth::verify_token_with_secret(token, &jwt_secret())?;
+    if !authenticated.can_write() {
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(next.run(request).await)

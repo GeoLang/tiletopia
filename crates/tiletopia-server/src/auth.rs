@@ -9,6 +9,10 @@ use axum::{
 use jsonwebtoken::{DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 
+const TOOL_TOKEN_USE: &str = "tool";
+pub const TILETOPIA_READ_SCOPE: &str = "tiletopia:read";
+pub const TILETOPIA_WRITE_SCOPE: &str = "tiletopia:write";
+
 /// Shortest HS256 secret we accept, matching ptolemy and collecta.
 pub const MIN_SECRET_LEN: usize = 32;
 
@@ -21,6 +25,123 @@ pub struct Claims {
     /// [`Claims::parsed_role`], never by comparing the string, so an unknown
     /// role is refused instead of landing in a tier.
     pub role: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenClaims {
+    sub: String,
+    exp: usize,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    token_use: Option<String>,
+    #[serde(default)]
+    scope: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthenticatedClaims {
+    pub claims: Claims,
+    authority: TokenAuthority,
+}
+
+#[derive(Debug, Clone)]
+enum TokenAuthority {
+    Platform,
+    Tool(Vec<String>),
+}
+
+impl AuthenticatedClaims {
+    pub fn can_write(&self) -> bool {
+        match &self.authority {
+            TokenAuthority::Platform => self.claims.can_write(),
+            TokenAuthority::Tool(scopes) => {
+                scopes.iter().any(|scope| scope == TILETOPIA_WRITE_SCOPE)
+            }
+        }
+    }
+
+    pub fn can_admin(&self) -> bool {
+        matches!(self.authority, TokenAuthority::Platform) && self.claims.can_admin()
+    }
+
+    fn allows_scope(&self, required: &str) -> bool {
+        match &self.authority {
+            TokenAuthority::Platform => true,
+            TokenAuthority::Tool(scopes) => scopes.iter().any(|scope| scope == required),
+        }
+    }
+}
+
+pub(crate) fn verify_token_with_secret(
+    token: &str,
+    secret: &str,
+) -> Result<AuthenticatedClaims, StatusCode> {
+    let claims = decode::<TokenClaims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &Validation::default(),
+    )
+    .map_err(|_| StatusCode::UNAUTHORIZED)?
+    .claims;
+
+    let (authority, role) = match claims.token_use.as_deref() {
+        None => (
+            TokenAuthority::Platform,
+            claims.role.ok_or(StatusCode::UNAUTHORIZED)?,
+        ),
+        Some(TOOL_TOKEN_USE) => {
+            if claims.sub.is_empty() || claims.role.is_some() {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+            let scopes = claims
+                .scope
+                .and_then(|scope| scope.as_array().cloned())
+                .ok_or(StatusCode::UNAUTHORIZED)?
+                .into_iter()
+                .map(|scope| {
+                    scope
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or(StatusCode::UNAUTHORIZED)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            (TokenAuthority::Tool(scopes), String::new())
+        }
+        Some(_) => return Err(StatusCode::UNAUTHORIZED),
+    };
+
+    Ok(AuthenticatedClaims {
+        claims: Claims {
+            sub: claims.sub,
+            exp: claims.exp,
+            role,
+        },
+        authority,
+    })
+}
+
+fn required_tool_scope(method: &Method, path: &str) -> &'static str {
+    if path.starts_with(REALTIME_PREFIX)
+        || !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+    {
+        TILETOPIA_WRITE_SCOPE
+    } else {
+        TILETOPIA_READ_SCOPE
+    }
+}
+
+fn authorize_request(
+    token: &str,
+    secret: &str,
+    method: &Method,
+    path: &str,
+) -> Result<AuthenticatedClaims, StatusCode> {
+    let authenticated = verify_token_with_secret(token, secret)?;
+    authenticated
+        .allows_scope(required_tool_scope(method, path))
+        .then_some(authenticated)
+        .ok_or(StatusCode::FORBIDDEN)
 }
 
 impl Claims {
@@ -219,12 +340,7 @@ pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, S
 
     let token = request_token(request.headers(), request.uri()).ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let _claims = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
-    )
-    .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let _claims = authorize_request(token, &secret, request.method(), request.uri().path())?;
 
     Ok(next.run(request).await)
 }
@@ -232,6 +348,123 @@ pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonwebtoken::{EncodingKey, Header, encode};
+
+    const SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    fn live_expiry() -> i64 {
+        chrono::Utc::now().timestamp() + 300
+    }
+
+    fn signed(claims: serde_json::Value) -> String {
+        encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(SECRET.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn tool_tokens_need_the_exact_operation_scope() {
+        let read = signed(serde_json::json!({
+            "sub": "user-1",
+            "exp": live_expiry(),
+            "token_use": "tool",
+            "scope": [TILETOPIA_READ_SCOPE]
+        }));
+        assert!(authorize_request(&read, SECRET, &Method::GET, "/api/v1/assets").is_ok());
+        assert_eq!(
+            authorize_request(&read, SECRET, &Method::POST, "/api/v1/assets").unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
+
+        let wrong_service = signed(serde_json::json!({
+            "sub": "user-1",
+            "exp": live_expiry(),
+            "token_use": "tool",
+            "scope": ["ptolemy:read"]
+        }));
+        assert_eq!(
+            authorize_request(&wrong_service, SECRET, &Method::GET, "/api/v1/assets").unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn a_tool_token_cannot_fall_back_to_a_role() {
+        let token = signed(serde_json::json!({
+            "sub": "user-1",
+            "exp": live_expiry(),
+            "role": "admin",
+            "token_use": "tool",
+            "scope": [TILETOPIA_READ_SCOPE]
+        }));
+        assert_eq!(
+            authorize_request(&token, SECRET, &Method::GET, "/api/v1/assets").unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn resource_ownership_does_not_replace_a_missing_operation_scope() {
+        let token = signed(serde_json::json!({
+            "sub": "user-1",
+            "exp": live_expiry(),
+            "token_use": "tool",
+            "scope": [TILETOPIA_READ_SCOPE]
+        }));
+        let authenticated = verify_token_with_secret(&token, SECRET).unwrap();
+        assert!(crate::may_modify_asset(
+            &authenticated.claims,
+            Some("user-1")
+        ));
+        assert_eq!(
+            authorize_request(&token, SECRET, &Method::POST, "/api/v1/assets").unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn malformed_and_unknown_tool_claims_are_unauthorized() {
+        for claims in [
+            serde_json::json!({
+                "sub": "user-1", "exp": live_expiry(), "token_use": "tool"
+            }),
+            serde_json::json!({
+                "sub": "user-1", "exp": live_expiry(), "token_use": "tool", "scope": "tiletopia:read"
+            }),
+            serde_json::json!({
+                "sub": "user-1", "exp": live_expiry(), "token_use": "other", "scope": [TILETOPIA_READ_SCOPE]
+            }),
+        ] {
+            let token = signed(claims);
+            assert_eq!(
+                authorize_request(&token, SECRET, &Method::GET, "/api/v1/assets").unwrap_err(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+    }
+
+    #[test]
+    fn platform_roles_keep_the_existing_authority() {
+        let editor = signed(serde_json::json!({
+            "sub": "user-1", "exp": live_expiry(), "role": "editor"
+        }));
+        let viewer = signed(serde_json::json!({
+            "sub": "user-1", "exp": live_expiry(), "role": "viewer"
+        }));
+        assert!(
+            authorize_request(&editor, SECRET, &Method::POST, "/api/v1/assets")
+                .unwrap()
+                .can_write()
+        );
+        assert!(
+            !authorize_request(&viewer, SECRET, &Method::POST, "/api/v1/assets")
+                .unwrap()
+                .can_write()
+        );
+    }
 
     #[test]
     fn missing_secret_refuses_startup() {
