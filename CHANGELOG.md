@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-13
+
+### Added
+- Prebuilt quantized-mesh terrain bundles are served from
+  `<data-dir>/terrain_bundles/<name>/`, so a viewer can have terrain with no
+  Ion token and no reach upstream. `GET /api/v1/terrain/bundles` lists them,
+  `GET /api/v1/terrain/bundles/{name}/layer.json` and
+  `GET /api/v1/terrain/bundles/{name}/{z}/{x}/{y}.terrain` are the pair
+  `CesiumTerrainProvider.fromUrl` asks for. The layout is what `ctb-tile`
+  writes and what the `terrain_bundle` export format already produces, so
+  nothing has to be converted on the way in. Anonymous like the rest of
+  `/api/v1/terrain/`, because a terrain provider cannot send a header.
+
+  The bundle's own `layer.json` goes out with its `tiles` template replaced by
+  a relative one, so a bundle built against another host resolves back here
+  instead of sending the viewer off the server it is being hosted on. Tiles a
+  tiler gzipped in place carry `Content-Encoding: gzip`, without which the
+  browser hands Cesium the gzip container as a mesh. A bundle with no
+  `available` array gets one read off its tile tree, because CesiumJS builds a
+  child mask from that array and throws on the first tile when it is missing.
+  Bundles must be `quantized-mesh-1.x` on a scheme and projection CesiumJS
+  accepts, and one that is not is refused with the reason logged rather than
+  served for the client to reject.
+
 ## [Unreleased] - 2026-08-09
 
 ### Changed

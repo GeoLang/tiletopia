@@ -341,6 +341,242 @@ mod tests {
         assert!(body.contains(&name), "{body} should name the failed tile");
     }
 
+    // -- prebuilt terrain bundles --
+
+    /// Bytes a tiler would have written into one `.terrain` file. Only the
+    /// server's own handling is under test here, so the payload just has to
+    /// survive the round trip byte for byte.
+    const BUNDLE_TILE_BODY: &[u8] = b"quantized-mesh payload";
+
+    fn gzipped(data: &[u8]) -> Vec<u8> {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn write_bundle_tile(dir: &std::path::Path, z: u32, x: u32, y: u32, body: Vec<u8>) {
+        let column = dir.join(z.to_string()).join(x.to_string());
+        std::fs::create_dir_all(&column).unwrap();
+        std::fs::write(column.join(format!("{y}.terrain")), body).unwrap();
+    }
+
+    /// Lay a bundle out the way an external tiler does: a layer.json beside a
+    /// {z}/{x}/{y}.terrain tree, gzipped at 0/0/0 and plain at 0/1/0.
+    fn seed_terrain_bundle(
+        data_dir: &std::path::Path,
+        name: &str,
+        layer_json: serde_json::Value,
+    ) -> std::path::PathBuf {
+        let dir = data_dir.join("terrain_bundles").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("layer.json"),
+            serde_json::to_vec(&layer_json).unwrap(),
+        )
+        .unwrap();
+        write_bundle_tile(&dir, 0, 0, 0, gzipped(BUNDLE_TILE_BODY));
+        write_bundle_tile(&dir, 0, 1, 0, BUNDLE_TILE_BODY.to_vec());
+        write_bundle_tile(&dir, 1, 2, 1, BUNDLE_TILE_BODY.to_vec());
+        write_bundle_tile(&dir, 1, 3, 1, BUNDLE_TILE_BODY.to_vec());
+        dir
+    }
+
+    fn bundle_layer_json() -> serde_json::Value {
+        serde_json::json!({
+            "tilejson": "2.1.0",
+            "name": "alps",
+            "version": "1.1.0",
+            "format": "quantized-mesh-1.0",
+            "scheme": "tms",
+            "projection": "EPSG:4326",
+            "bounds": [-180.0, -90.0, 180.0, 90.0],
+            "tiles": ["https://assets.example.com/{z}/{x}/{y}.terrain?v={version}"],
+            "available": [
+                [{ "startX": 0, "startY": 0, "endX": 1, "endY": 0 }],
+                [{ "startX": 2, "startY": 1, "endX": 3, "endY": 1 }]
+            ]
+        })
+    }
+
+    async fn get(state: &Arc<AppState>, uri: &str) -> axum::response::Response {
+        router(Arc::clone(state))
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn body_bytes(resp: axum::response::Response) -> Vec<u8> {
+        axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn bundle_layer_json_is_served_and_repointed_at_this_server() {
+        let state = test_state().await;
+        seed_terrain_bundle(&state.data_dir, "alps", bundle_layer_json());
+
+        let resp = get(&state, "/api/v1/terrain/bundles/alps/layer.json").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cache = resp
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .to_string();
+        assert!(cache.contains("public"), "{cache}");
+
+        let layer: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        // what CesiumTerrainProvider's layer.json parser insists on, passed
+        // through from the bundle
+        assert_eq!(layer["format"], "quantized-mesh-1.0");
+        assert_eq!(layer["scheme"], "tms");
+        assert_eq!(layer["projection"], "EPSG:4326");
+        assert_eq!(layer["version"], "1.1.0");
+        // the bundle pointed at someone else's host, which would have defeated
+        // the whole point of hosting it here
+        assert_eq!(layer["tiles"][0], "{z}/{x}/{y}.terrain?v={version}");
+        // availability the bundle carries is left exactly as it was
+        assert_eq!(layer["available"][0][0]["endX"], 1);
+        assert_eq!(layer["available"][1][0]["startX"], 2);
+        assert_eq!(layer["available"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn bundle_availability_is_read_off_the_tile_tree_when_absent() {
+        let state = test_state().await;
+        let mut layer_json = bundle_layer_json();
+        layer_json.as_object_mut().unwrap().remove("available");
+        seed_terrain_bundle(&state.data_dir, "derived", layer_json);
+
+        let resp = get(&state, "/api/v1/terrain/bundles/derived/layer.json").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let layer: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+
+        let available = layer["available"].as_array().unwrap();
+        // both levels the fixture wrote, and nothing past the deepest one
+        assert_eq!(available.len(), 2);
+        assert_eq!(available[0][0]["startX"], 0);
+        assert_eq!(available[0][0]["endX"], 1);
+        assert_eq!(available[0][0]["startY"], 0);
+        assert_eq!(available[0][0]["endY"], 0);
+        assert_eq!(available[1][0]["startX"], 2);
+        assert_eq!(available[1][0]["endX"], 3);
+        assert_eq!(available[1][0]["startY"], 1);
+        assert_eq!(available[1][0]["endY"], 1);
+    }
+
+    #[tokio::test]
+    async fn bundle_gzipped_tile_says_so_and_arrives_intact() {
+        let state = test_state().await;
+        seed_terrain_bundle(&state.data_dir, "alps", bundle_layer_json());
+
+        let resp = get(&state, "/api/v1/terrain/bundles/alps/0/0/0.terrain?v=1.1.0").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/vnd.quantized-mesh")
+        );
+        // without this the browser hands Cesium the gzip container as a mesh
+        assert_eq!(
+            resp.headers()
+                .get("content-encoding")
+                .and_then(|v| v.to_str().ok()),
+            Some("gzip")
+        );
+
+        let body = body_bytes(resp).await;
+        let mut decoded = Vec::new();
+        std::io::Read::read_to_end(
+            &mut flate2::read::GzDecoder::new(body.as_slice()),
+            &mut decoded,
+        )
+        .unwrap();
+        assert_eq!(decoded, BUNDLE_TILE_BODY);
+    }
+
+    #[tokio::test]
+    async fn bundle_plain_tile_is_not_labelled_gzip() {
+        let state = test_state().await;
+        seed_terrain_bundle(&state.data_dir, "alps", bundle_layer_json());
+
+        let resp = get(&state, "/api/v1/terrain/bundles/alps/0/1/0.terrain").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get("content-encoding").is_none());
+        assert_eq!(body_bytes(resp).await, BUNDLE_TILE_BODY);
+    }
+
+    #[tokio::test]
+    async fn bundle_misses_are_404_not_empty_tiles() {
+        let state = test_state().await;
+        seed_terrain_bundle(&state.data_dir, "alps", bundle_layer_json());
+
+        for uri in [
+            "/api/v1/terrain/bundles/alps/0/0/9.terrain", // tile the bundle has no file for
+            "/api/v1/terrain/bundles/alps/7/1/1.terrain", // level the bundle has no directory for
+            "/api/v1/terrain/bundles/nosuch/0/0/0.terrain",
+            "/api/v1/terrain/bundles/nosuch/layer.json",
+        ] {
+            let resp = get(&state, uri).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bundle_names_and_coords_that_are_not_tiles_are_refused() {
+        let state = test_state().await;
+        seed_terrain_bundle(&state.data_dir, "alps", bundle_layer_json());
+
+        for uri in [
+            "/api/v1/terrain/bundles/%2E%2E/layer.json",
+            "/api/v1/terrain/bundles/%2E%2E/0/0/0.terrain",
+            "/api/v1/terrain/bundles/alps/0/0/abc.terrain",
+            "/api/v1/terrain/bundles/alps/0/0/0.png",
+        ] {
+            let resp = get(&state, uri).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bundle_in_another_format_is_refused_rather_than_mislabelled() {
+        let state = test_state().await;
+        let mut layer_json = bundle_layer_json();
+        layer_json["format"] = serde_json::json!("heightmap-1.0");
+        seed_terrain_bundle(&state.data_dir, "heights", layer_json);
+
+        let resp = get(&state, "/api/v1/terrain/bundles/heights/layer.json").await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn bundle_listing_names_what_is_hosted() {
+        let state = test_state().await;
+        seed_terrain_bundle(&state.data_dir, "alps", bundle_layer_json());
+        seed_terrain_bundle(&state.data_dir, "iceland", bundle_layer_json());
+        // a directory with no layer.json is not a bundle
+        std::fs::create_dir_all(state.data_dir.join("terrain_bundles/half-copied")).unwrap();
+
+        let resp = get(&state, "/api/v1/terrain/bundles").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let names: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(names, serde_json::json!(["alps", "iceland"]));
+    }
+
+    #[tokio::test]
+    async fn bundles_do_not_shadow_the_on_demand_terrain_routes() {
+        let state = test_state().await;
+        seed_local_dem(&state.data_dir, TERRAIN_TILE.bounds());
+
+        let resp = get(&state, "/api/v1/terrain/12/2200/1400").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
     // signs up a user and returns (bearer_token, user_id).
     async fn signup(state: &Arc<AppState>, email: &str) -> (String, String) {
         let body =

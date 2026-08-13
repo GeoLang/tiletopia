@@ -246,9 +246,13 @@ pub fn is_public_read(method: &Method, path: &str) -> bool {
         ["api", "v1", "assets", _, "tiles", _] => true,
 
         // quantized-mesh terrain: layer.json, the {z}/{x}/{y} tiles it
-        // advertises, and the terrain-rgb variant. Matching "terrain" as a whole
-        // segment is what keeps the /api/v1/terrain-analysis/ compute routes
-        // gated, rather than the trailing slash this used to lean on.
+        // advertises, the terrain-rgb variant, and the same two under
+        // /bundles/{name}/ for a prebuilt bundle. A terrain provider is a tile
+        // layer like any other and cannot send a header, and the bundle listing
+        // names directories an operator chose to serve, so the whole subtree is
+        // read-open. Matching "terrain" as a whole segment is what keeps the
+        // /api/v1/terrain-analysis/ compute routes gated, rather than the
+        // trailing slash this used to lean on.
         ["api", "v1", "terrain", rest @ ..] => !rest.is_empty(),
 
         // On-demand terrain-analysis tiles. A map library fetches these with no
@@ -510,6 +514,17 @@ mod tests {
     fn terrain_reads_are_public() {
         assert!(is_public_read(&Method::GET, "/api/v1/terrain/layer.json"));
         assert!(is_public_read(&Method::GET, "/api/v1/terrain/12/2200/1400"));
+        // a prebuilt bundle is the same tile layer from a directory, and the
+        // listing is the names an operator chose to host
+        assert!(is_public_read(&Method::GET, "/api/v1/terrain/bundles"));
+        assert!(is_public_read(
+            &Method::GET,
+            "/api/v1/terrain/bundles/alps/layer.json"
+        ));
+        assert!(is_public_read(
+            &Method::GET,
+            "/api/v1/terrain/bundles/alps/9/271/183.terrain"
+        ));
     }
 
     #[test]

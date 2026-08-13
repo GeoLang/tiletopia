@@ -40,6 +40,7 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Multi-LOD terrain** with quadtree tiling
 - **Bilinear interpolation** for smooth subsampling
 - **Delta + zigzag encoding** per Cesium terrain spec
+- **Prebuilt terrain bundles** — serve a `ctb-tile` directory as a Cesium terrain source, no Ion token
 
 ### Digital Twin Support
 - **Real-time data injection** — push live sensor values into 3D scene via WebSocket
@@ -277,6 +278,31 @@ which `TILETOPIA_SRTM_BASE_URL` overrides. A download that fails answers 503
 naming the tile, rather than a flat mesh that would read as terrain at sea
 level.
 
+### Prebuilt terrain bundles
+
+For terrain that never reaches upstream, drop a prebuilt bundle under
+`<data-dir>/terrain_bundles/<name>/`: a `layer.json` beside a
+`{z}/{x}/{y}.terrain` tree, which is what `ctb-tile` writes and what the
+`terrain_bundle` export format produces. `GET /api/v1/terrain/bundles` lists
+the names, and each one is a terrain source of its own:
+
+```javascript
+const terrain = await Cesium.CesiumTerrainProvider.fromUrl(
+    'http://localhost:3000/api/v1/terrain/bundles/alps/'
+);
+viewer.terrainProvider = terrain;
+```
+
+The bundle's own `layer.json` is served with its `tiles` template replaced by a
+relative one, so a bundle built against another host still resolves back here.
+Tiles gzipped in place go out with `Content-Encoding: gzip`. A bundle whose
+`layer.json` carries no `available` array gets one read off the tile tree,
+because CesiumJS throws on the first tile without it. That walk touches every
+tile, so ship `available` in the bundle if it is a large one. Bundles must be
+`quantized-mesh-1.x`, on `tms` or `slippyMap` in EPSG:4326 or EPSG:3857.
+Anything else is refused with the reason in the log, rather than served for
+CesiumJS to reject.
+
 ### Use with CesiumJS
 
 ```javascript
@@ -331,6 +357,12 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `GET` | `/api/v1/assets/{id}/jobs` | The asset's tiling jobs, newest first |
 | `GET` | `/api/v1/assets/{id}/tileset.json` | Serve tileset |
 | `GET` | `/api/v1/assets/{id}/tiles/{path}` | Serve individual tile |
+| `GET` | `/api/v1/terrain/layer.json` | Quantized-mesh layer metadata, generated from DEM |
+| `GET` | `/api/v1/terrain/{z}/{x}/{y}.terrain` | Quantized-mesh tile, generated from DEM |
+| `GET` | `/api/v1/terrain/bundles` | Prebuilt terrain bundles this server hosts |
+| `GET` | `/api/v1/terrain/bundles/{name}/layer.json` | A bundle's layer metadata |
+| `GET` | `/api/v1/terrain/bundles/{name}/{z}/{x}/{y}.terrain` | A bundle's quantized-mesh tile |
+| `GET` | `/api/v1/terrain/rgb/{z}/{x}/{y}.png` | Terrain-RGB tile for MapLibre |
 | `WS` | `/api/v1/realtime/{room}` | WebSocket for live data and collaboration |
 | `GET` | `/api/v1/tiles/sources` | List 2D tile sources (OSM, etc.) |
 | `GET` | `/api/v1/tiles/styles` | MapLibre GL style JSON |
@@ -358,9 +390,10 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `GET` | `/api/v1/multispectral/indices` | Spectral indices (NDVI, etc.) |
 | `GET` | `/metrics` | Prometheus metrics |
 
-Tile data reads are anonymous: `tileset.json`, `tiles/{path}`, the
-`/api/v1/terrain/` quantized-mesh routes and the `/api/v1/analysis/xyz/`
-analysis tiles, none of which a map library can send a header with. The rest of
+Tile data reads are anonymous: `tileset.json`, `tiles/{path}`, everything under
+`/api/v1/terrain/` (the generated quantized-mesh routes, the prebuilt bundles
+and their listing, terrain-RGB) and the `/api/v1/analysis/xyz/` analysis tiles,
+none of which a map library can send a header with. The rest of
 `/api/v1/analysis/` is compute and stays gated. Everything else needs
 `Authorization: Bearer <jwt>`, and writes need the editor or admin role.
 
@@ -475,9 +508,9 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 cargo test
 ```
 
-686 tests (661 Rust + 25 GUI) on default features, counted per crate:
-- Core (111): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
-- Server (433): health, assets, tilesets, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine, audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing, retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
+738 tests (713 Rust + 25 GUI) on default features, counted per crate:
+- Core (112): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
+- Server (484): health, assets, tilesets, prebuilt terrain bundles, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine, audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing, retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
 - Ingest (72): LAS/LAZ, GeoTIFF, BIM/IFC readers, CRS detection, photogrammetry (SfM)
 - Terrain (28): quantized mesh generation, global DEM terrain
 - Store (12): local filesystem CRUD, path traversal
@@ -486,7 +519,7 @@ cargo test
 GUI: `cd gui && pnpm run test:all` (10 vitest unit tests + 15 Playwright e2e).
 
 Feature-gated tests (`gpu`, `onnx`, `video`, `ml`, `martin`, `wasm-plugins`, cloud
-stores) are not in the 661 and need their feature enabled to run.
+stores) are not in the 713 and need their feature enabled to run.
 
 ---
 
