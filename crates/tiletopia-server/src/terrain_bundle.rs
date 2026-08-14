@@ -137,6 +137,17 @@ async fn bundle_tile(
     Ok((headers, bytes))
 }
 
+/// Whether a bundle by this name is on disk with the layer.json
+/// CesiumTerrainProvider asks for first.
+pub(crate) async fn bundle_exists(state: &AppState, bundle: &str) -> bool {
+    let Ok(dir) = bundle_dir(state, bundle) else {
+        return false;
+    };
+    tokio::fs::try_exists(dir.join(LAYER_JSON))
+        .await
+        .unwrap_or(false)
+}
+
 /// Directory of a bundle, or a refusal for a name that is not one path segment
 /// of ordinary characters. Axum hands back a percent-decoded segment, so `..`
 /// can arrive here even though the router never matches a slash.

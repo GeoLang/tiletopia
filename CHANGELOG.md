@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 2026-08-13
 
+### Fixed
+- A tiling job is no longer announced as `Done` before the asset status write
+  lands. The worker wrote the job record first and the asset second, so a
+  client that polled the job, saw `Done` and read the asset straight after
+  could get `Tiling` instead of `Ready`, and it never corrected because the
+  client had stopped polling. The asset write now goes first, and a failed one
+  is logged instead of discarded. `job_lifecycle_queued_to_running_to_done`
+  spins between reads rather than sleeping, so it reads the asset in the
+  instant the job settles: it failed 40 runs out of 60 against the old order
+  and 0 out of 60 against the new one.
+- `GET /v1/assets/{id}/endpoint` answers a terrain asset with the directory of
+  its prebuilt bundle, `/api/v1/terrain/bundles/{asset-id}/`, instead of a
+  `tileset.json` URL no terrain client can read. `CesiumTerrainProvider.fromUrl`
+  appends `layer.json` to whatever URL arrives, and a 404 there is not an error
+  to CesiumJS: it reads the miss as a pre-metadata heightmap layer and then
+  404s every tile, so the old answer failed silently. An asset with no bundle
+  under `<data-dir>/terrain_bundles/<asset-id>/` gets 404 with a message naming
+  the directory to put one in, rather than a URL that cannot work.
+- The endpoint response carries an `attributions` array. CesiumJS maps that
+  field without checking it is there when it builds a provider's credits, so
+  every Ion-compat asset threw before its first tile.
+
+### Changed
+- `docs/ecosystem.html` describes panoptes as imagery feature extraction,
+  fluvius as a real-time stream processor, fenestra as an OGC services gateway
+  and ptolemy as a versioned geodatabase, each matching what the repo says it
+  is. The old lines named work those repos do not do.
+
 ### Added
 - Prebuilt quantized-mesh terrain bundles are served from
   `<data-dir>/terrain_bundles/<name>/`, so a viewer can have terrain with no

@@ -303,6 +303,15 @@ tile, so ship `available` in the bundle if it is a large one. Bundles must be
 Anything else is refused with the reason in the log, rather than served for
 CesiumJS to reject.
 
+A terrain asset in the Ion-compat layer resolves to a bundle too. Name the
+bundle directory after the asset id and `GET /v1/assets/{id}/endpoint` answers
+with `/api/v1/terrain/bundles/{id}/`, which is what `CesiumTerrainProvider`
+takes: it appends `layer.json` to that URL itself. An asset with no bundle
+under `<data-dir>/terrain_bundles/{id}/` gets a 404 naming the directory,
+because a URL CesiumJS cannot read as terrain would not fail loudly. A missed
+`layer.json` is read as a pre-metadata heightmap layer, and the failure only
+shows up as every tile 404ing.
+
 ### Use with CesiumJS
 
 ```javascript
@@ -508,9 +517,9 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 cargo test
 ```
 
-738 tests (713 Rust + 25 GUI) on default features, counted per crate:
+742 tests (717 Rust + 25 GUI) on default features, counted per crate:
 - Core (112): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
-- Server (484): health, assets, tilesets, prebuilt terrain bundles, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine, audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing, retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
+- Server (488): health, assets, tilesets, prebuilt terrain bundles, Ion endpoint resolution, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine, audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing, retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
 - Ingest (72): LAS/LAZ, GeoTIFF, BIM/IFC readers, CRS detection, photogrammetry (SfM)
 - Terrain (28): quantized mesh generation, global DEM terrain
 - Store (12): local filesystem CRUD, path traversal

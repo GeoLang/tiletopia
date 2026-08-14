@@ -12,10 +12,11 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AppState, AssetType, users};
+use crate::{AppState, AssetType, terrain_bundle, users};
 
 // ─── Ion-format response types ───────────────────────────────────────────────
 
@@ -46,6 +47,10 @@ struct IonEndpoint {
     url: String,
     #[serde(rename = "accessToken")]
     access_token: String,
+    /// CesiumJS maps this without checking it is there when it builds the
+    /// credits for a provider, so an endpoint missing it throws before the
+    /// first tile is asked for.
+    attributions: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -225,24 +230,51 @@ async fn create_asset(
     Ok((StatusCode::CREATED, Json(to_ion_asset(&asset))))
 }
 
+/// Status plus a message, because the only thing a CesiumJS developer sees when
+/// this call fails is the response body in the console.
+type EndpointError = (StatusCode, Json<serde_json::Value>);
+
+fn endpoint_error(status: StatusCode, message: impl Into<String>) -> EndpointError {
+    (status, Json(json!({ "message": message.into() })))
+}
+
 async fn get_endpoint(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
-) -> Result<Json<IonEndpoint>, StatusCode> {
+) -> Result<Json<IonEndpoint>, EndpointError> {
     let asset = state
         .db
         .get_asset(id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|_| endpoint_error(StatusCode::INTERNAL_SERVER_ERROR, "asset lookup failed"))?
+        .ok_or_else(|| endpoint_error(StatusCode::NOT_FOUND, format!("no asset {id}")))?;
 
     let base_url = get_base_url();
-    let endpoint_type = map_asset_type(&asset.asset_type);
+    let url = match asset.asset_type {
+        // CesiumTerrainProvider appends layer.json to whatever url arrives
+        // here, so it has to be the directory of a quantized-mesh bundle. A
+        // tileset.json url does not even fail loudly: the 404 on layer.json is
+        // read as a pre-metadata heightmap layer, and every tile 404s after.
+        AssetType::Terrain => {
+            let bundle = id.to_string();
+            if !terrain_bundle::bundle_exists(&state, &bundle).await {
+                return Err(endpoint_error(
+                    StatusCode::NOT_FOUND,
+                    format!(
+                        "terrain asset {id} has no terrain to serve: put a quantized-mesh bundle at <data-dir>/terrain_bundles/{id}/"
+                    ),
+                ));
+            }
+            format!("{base_url}/api/v1/terrain/bundles/{bundle}/")
+        }
+        _ => format!("{base_url}/api/v1/assets/{id}/tileset.json"),
+    };
 
     Ok(Json(IonEndpoint {
-        endpoint_type,
-        url: format!("{}/api/v1/assets/{}/tileset.json", base_url, asset.id),
+        endpoint_type: map_asset_type(&asset.asset_type),
+        url,
         access_token: String::new(),
+        attributions: Vec::new(),
     }))
 }
 

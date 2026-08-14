@@ -1438,6 +1438,126 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
     }
 
+    // -- ion endpoint resolution --
+
+    async fn seed_asset(
+        state: &Arc<AppState>,
+        asset_type: tiletopia_server::AssetType,
+    ) -> uuid::Uuid {
+        use tiletopia_server::{Asset, AssetStatus};
+
+        let id = uuid::Uuid::new_v4();
+        state
+            .db
+            .create_asset(&Asset {
+                id,
+                name: "seeded".into(),
+                asset_type,
+                status: AssetStatus::Ready,
+                created_at: chrono::Utc::now(),
+                tile_count: 0,
+                size_bytes: 0,
+                description: String::new(),
+                tags: vec![],
+                owner_id: None,
+            })
+            .await
+            .unwrap();
+        id
+    }
+
+    async fn ion_endpoint(
+        state: &Arc<AppState>,
+        id: uuid::Uuid,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = get(state, &format!("/v1/assets/{id}/endpoint")).await;
+        let status = resp.status();
+        let body = serde_json::from_slice(&body_bytes(resp).await).unwrap_or_default();
+        (status, body)
+    }
+
+    /// Path of an absolute url, so a test can follow the endpoint back into the
+    /// router without depending on TILETOPIA_ION_BASE_URL.
+    fn url_path(url: &str) -> String {
+        let after_scheme = url.split_once("://").unwrap().1;
+        format!("/{}", after_scheme.split_once('/').unwrap().1)
+    }
+
+    #[tokio::test]
+    async fn ion_endpoint_for_terrain_points_at_a_bundle_cesium_can_load() {
+        let state = test_state().await;
+        let id = seed_asset(&state, tiletopia_server::AssetType::Terrain).await;
+        seed_terrain_bundle(&state.data_dir, &id.to_string(), bundle_layer_json());
+
+        let (status, body) = ion_endpoint(&state, id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["type"], "TERRAIN");
+        // CesiumJS maps attributions unguarded, so a missing field throws
+        // before any tile is asked for
+        assert_eq!(body["attributions"], serde_json::json!([]));
+
+        let url = body["url"].as_str().unwrap();
+        assert!(
+            url.ends_with(&format!("/api/v1/terrain/bundles/{id}/")),
+            "{url} is not a terrain directory"
+        );
+
+        // what CesiumTerrainProvider.fromUrl does with that url: append a
+        // forward slash and fetch layer.json off it
+        let path = url_path(url);
+        let resp = get(&state, &format!("{path}layer.json")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let layer: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(layer["format"], "quantized-mesh-1.0");
+
+        // and the tile template that layer.json advertises, resolved against it
+        let tile = get(&state, &format!("{path}0/0/0.terrain?v=1.1.0")).await;
+        assert_eq!(tile.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn ion_endpoint_for_terrain_without_a_bundle_says_so() {
+        let state = test_state().await;
+        let id = seed_asset(&state, tiletopia_server::AssetType::Terrain).await;
+
+        let (status, body) = ion_endpoint(&state, id).await;
+        // a tileset.json url here would not even fail loudly: CesiumJS reads
+        // the 404 on layer.json as a legacy heightmap layer and 404s every tile
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let message = body["message"].as_str().unwrap();
+        assert!(
+            message.contains("terrain_bundles") && message.contains(&id.to_string()),
+            "{message} does not name the bundle the operator has to put there"
+        );
+    }
+
+    #[tokio::test]
+    async fn ion_endpoint_for_a_tileset_asset_is_unchanged() {
+        let state = test_state().await;
+        let id = seed_asset(&state, tiletopia_server::AssetType::PointCloud).await;
+
+        let (status, body) = ion_endpoint(&state, id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["type"], "3DTILES");
+        assert_eq!(body["attributions"], serde_json::json!([]));
+        assert!(
+            body["url"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("/api/v1/assets/{id}/tileset.json")),
+            "{}",
+            body["url"]
+        );
+    }
+
+    #[tokio::test]
+    async fn ion_endpoint_for_a_missing_asset_is_not_a_terrain_answer() {
+        let state = test_state().await;
+        let (status, body) = ion_endpoint(&state, uuid::Uuid::new_v4()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body["url"].is_null());
+    }
+
     // -- native asset write auth --
 
     // send a bodyless native asset write and return just the status.
@@ -2927,15 +3047,21 @@ end_header\n0.0 0.0 0.0 255 0 0\n1.0 0.0 0.0 0 255 0\n0.0 1.0 0.0 0 0 255\n\
 
         let worker = Arc::clone(&state.job_queue).start().await;
 
+        // spun rather than slept between reads, so the asset is read in the
+        // instant the job settles. A worker that announced Done before the
+        // asset status write landed would be caught here rather than whenever
+        // the machine happened to be slow enough.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut settled = None;
-        for _ in 0..200 {
+        while std::time::Instant::now() < deadline {
             let current = state.db.get_job(job.id).await.unwrap().unwrap();
             if matches!(current.status, JobStatus::Done | JobStatus::Failed) {
                 settled = Some(current);
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
+        let tiled = state.db.get_asset(id).await.unwrap().unwrap();
         worker.abort();
 
         let settled = settled.expect("job never left the queue");
@@ -2954,9 +3080,13 @@ end_header\n0.0 0.0 0.0 255 0 0\n1.0 0.0 0.0 0 255 0\n0.0 1.0 0.0 0 0 255\n\
         assert!(settled.tiles_written > 0);
         assert!(settled.error.is_none());
 
-        // the worker owns the asset status too
-        let tiled = state.db.get_asset(id).await.unwrap().unwrap();
-        assert!(matches!(tiled.status, AssetStatus::Ready));
+        // the worker owns the asset status too, and a client that sees Done
+        // stops polling, so the asset has to already say Ready by then
+        assert!(
+            matches!(tiled.status, AssetStatus::Ready),
+            "job was Done while the asset still said {:?}",
+            tiled.status
+        );
         assert_eq!(tiled.tile_count, settled.tiles_written);
 
         // and no queued work is left behind

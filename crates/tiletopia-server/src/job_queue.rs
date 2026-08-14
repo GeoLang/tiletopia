@@ -70,53 +70,48 @@ impl JobQueue {
                         })
                         .await;
 
-                        match result {
-                            Ok(Ok(stats)) => {
-                                job.status = JobStatus::Done;
-                                job.progress = 1.0;
-                                job.completed_at = Some(chrono::Utc::now());
-                                job.tiles_written = stats.total_nodes as u64;
-                                let _ = self.db.update_job(&job).await;
+                        let outcome: Result<u64, String> = match result {
+                            Ok(Ok(stats)) => Ok(stats.total_nodes as u64),
+                            Ok(Err(error)) => Err(error),
+                            Err(error) => Err(error.to_string()),
+                        };
 
-                                if let Ok(Some(mut asset)) = self.db.get_asset(asset_id).await {
+                        // the asset write goes first: a client polling the job
+                        // stops at Done and reads the asset straight after, so
+                        // an asset still saying Tiling there never corrects
+                        if let Ok(Some(mut asset)) = self.db.get_asset(asset_id).await {
+                            match &outcome {
+                                Ok(tiles) => {
                                     asset.status = crate::AssetStatus::Ready;
-                                    asset.tile_count = stats.total_nodes as u64;
-                                    let _ = self.db.update_asset(&asset).await;
+                                    asset.tile_count = *tiles;
                                 }
-
-                                tracing::info!(
-                                    "Job {} completed: {} nodes",
+                                Err(_) => asset.status = crate::AssetStatus::Error,
+                            }
+                            if let Err(error) = self.db.update_asset(&asset).await {
+                                tracing::error!(
+                                    "Job {}: asset {} status write failed: {}",
                                     job.id,
-                                    stats.total_nodes
+                                    asset_id,
+                                    error
                                 );
                             }
-                            Ok(Err(e)) => {
-                                job.status = JobStatus::Failed;
-                                job.error = Some(e.clone());
-                                job.completed_at = Some(chrono::Utc::now());
-                                let _ = self.db.update_job(&job).await;
+                        }
 
-                                if let Ok(Some(mut asset)) = self.db.get_asset(asset_id).await {
-                                    asset.status = crate::AssetStatus::Error;
-                                    let _ = self.db.update_asset(&asset).await;
-                                }
-
-                                tracing::error!("Job {} failed: {}", job.id, e);
+                        job.completed_at = Some(chrono::Utc::now());
+                        match outcome {
+                            Ok(tiles) => {
+                                job.status = JobStatus::Done;
+                                job.progress = 1.0;
+                                job.tiles_written = tiles;
+                                tracing::info!("Job {} completed: {} nodes", job.id, tiles);
                             }
-                            Err(e) => {
+                            Err(error) => {
                                 job.status = JobStatus::Failed;
-                                job.error = Some(e.to_string());
-                                job.completed_at = Some(chrono::Utc::now());
-                                let _ = self.db.update_job(&job).await;
-
-                                if let Ok(Some(mut asset)) = self.db.get_asset(asset_id).await {
-                                    asset.status = crate::AssetStatus::Error;
-                                    let _ = self.db.update_asset(&asset).await;
-                                }
-
-                                tracing::error!("Job {} panicked: {}", job.id, e);
+                                tracing::error!("Job {} failed: {}", job.id, error);
+                                job.error = Some(error);
                             }
                         }
+                        let _ = self.db.update_job(&job).await;
                     }
                     Ok(None) => {}
                     Err(e) => {
