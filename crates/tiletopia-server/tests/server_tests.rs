@@ -569,6 +569,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bundle_listing_is_empty_when_none_are_hosted() {
+        let state = test_state().await;
+
+        let resp = get(&state, "/api/v1/terrain/bundles").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let names: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(names, serde_json::json!([]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bundle_listing_that_cannot_be_read_is_an_error_not_an_empty_list() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let state = test_state().await;
+        seed_terrain_bundle(&state.data_dir, "alps", bundle_layer_json());
+        let root = state.data_dir.join("terrain_bundles");
+        let readable = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // root reads a directory whatever its mode says, so there is no
+        // unreadable directory to answer for
+        if std::fs::read_dir(&root).is_ok() {
+            std::fs::set_permissions(&root, readable).unwrap();
+            return;
+        }
+
+        let resp = get(&state, "/api/v1/terrain/bundles").await;
+        std::fs::set_permissions(&root, readable).unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
     async fn bundles_do_not_shadow_the_on_demand_terrain_routes() {
         let state = test_state().await;
         seed_local_dem(&state.data_dir, TERRAIN_TILE.bounds());

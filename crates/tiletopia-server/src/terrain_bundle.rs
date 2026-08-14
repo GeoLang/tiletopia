@@ -64,21 +64,39 @@ pub fn terrain_bundle_routes() -> Router<Arc<AppState>> {
 
 /// Names of the bundles this server hosts, so a viewer can offer them without
 /// being told what an operator dropped on disk.
-async fn list_bundles(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn list_bundles(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, StatusCode> {
     let root = state.data_dir.join(BUNDLE_ROOT);
+    let names = bundle_names(&root).await.map_err(|error| {
+        tracing::warn!(
+            "terrain bundles: {} could not be read: {error}",
+            root.display()
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok((cache_headers(CachePolicy::metadata()), Json(names)))
+}
+
+/// Sorted names of the bundles under `root`. A server that was never given a
+/// bundles directory hosts none, so that miss is an empty list, but any other
+/// read failure is an error rather than an empty list that hides it.
+async fn bundle_names(root: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let mut entries = match tokio::fs::read_dir(root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+
     let mut names = Vec::new();
-    if let Ok(mut entries) = tokio::fs::read_dir(&root).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-                continue;
-            };
-            if is_bundle_name(&name) && entry.path().join(LAYER_JSON).is_file() {
-                names.push(name);
-            }
+    while let Some(entry) = entries.next_entry().await? {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if is_bundle_name(&name) && entry.path().join(LAYER_JSON).is_file() {
+            names.push(name);
         }
     }
     names.sort();
-    (cache_headers(CachePolicy::metadata()), Json(names))
+    Ok(names)
 }
 
 async fn bundle_layer_json(

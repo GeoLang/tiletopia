@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - 2026-08-13
 
 ### Fixed
+- `GET /api/v1/terrain/bundles` answers 500 and logs the reason when the
+  bundles directory cannot be read, instead of an empty array that reads as a
+  server hosting nothing. A missing `<data-dir>/terrain_bundles/` is still an
+  empty list, because a server with no bundles configured never has one, but a
+  permissions or I/O failure is no longer indistinguishable from that.
 - The id `GET /v1/assets` hands out is the id `GET /v1/assets/{id}` and
   `GET /v1/assets/{id}/endpoint` take back. The list rendered a number folded
   out of the asset's uuid, half its bytes dropped and the sign thrown away,
