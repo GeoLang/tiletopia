@@ -128,7 +128,6 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Ion REST API compatibility layer** — drop-in replacement for Cesium Ion REST endpoints
 - **Asset catalog** — searchable/filterable asset catalog with pagination
 - **CRS auto-detection & reprojection** — automatic coordinate reference system detection via projicio
-- **Imagery tiling** — XYZ/TMS tile pyramid generation from raster sources
 - **DEM tile caching** — LRU cache for terrain DEM tiles
 
 ### Geospatial Services
@@ -517,9 +516,9 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 cargo test
 ```
 
-742 tests (717 Rust + 25 GUI) on default features, counted per crate:
+746 tests (721 Rust + 25 GUI) on default features, counted per crate:
 - Core (112): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
-- Server (488): health, assets, tilesets, prebuilt terrain bundles, Ion endpoint resolution, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine, audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing, retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
+- Server (492): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine, audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing, retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
 - Ingest (72): LAS/LAZ, GeoTIFF, BIM/IFC readers, CRS detection, photogrammetry (SfM)
 - Terrain (28): quantized mesh generation, global DEM terrain
 - Store (12): local filesystem CRUD, path traversal
@@ -528,7 +527,7 @@ cargo test
 GUI: `cd gui && pnpm run test:all` (10 vitest unit tests + 15 Playwright e2e).
 
 Feature-gated tests (`gpu`, `onnx`, `video`, `ml`, `martin`, `wasm-plugins`, cloud
-stores) are not in the 713 and need their feature enabled to run.
+stores) are not in the 721 and need their feature enabled to run.
 
 ---
 

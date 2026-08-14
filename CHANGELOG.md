@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - 2026-08-13
 
 ### Fixed
+- The id `GET /v1/assets` hands out is the id `GET /v1/assets/{id}` and
+  `GET /v1/assets/{id}/endpoint` take back. The list rendered a number folded
+  out of the asset's uuid, half its bytes dropped and the sign thrown away,
+  while the id routes parsed a uuid, so a client that read an id off the list
+  had nothing it could ask for the asset with. The number is all an Ion client
+  ever has, and `IonImageryProvider.fromAssetId` refuses an id that is not one.
+  Every asset now carries a stored ion id,
+  taken from a counter that only ever climbs and held unique by an index, so
+  two assets can never share a number and a deleted asset's number is not
+  handed out again. A database written before the column gets it added and its
+  rows numbered oldest first. The id routes still take a uuid, so a link built
+  against the native asset id keeps working.
+- `GET /v1/assets/{id}/endpoint` refuses an imagery asset with 501 and a
+  message saying why, instead of answering `IMAGERY` with a `tileset.json` url.
+  Nothing here can serve imagery: the worker rejects a raster upload as an
+  unsupported format and no route serves image tiles, so there was never
+  anything behind that url. CesiumJS hands the url from an `IMAGERY` endpoint
+  to a TMS provider, which goes looking for `tilemapresource.xml` beside it, so
+  the old answer could only fail in the client. Same shape of bug as the
+  terrain endpoint below.
 - A tiling job is no longer announced as `Done` before the asset status write
   lands. The worker wrote the job record first and the asset second, so a
   client that polled the job, saw `Done` and read the asset straight after
@@ -30,6 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every Ion-compat asset threw before its first tile.
 
 ### Changed
+- The README no longer lists imagery tiling under Cesium Ion compatibility. A
+  tile pyramid generator sits in tiletopia-ingest, but no upload, worker or
+  route reaches it, and the parity roadmap already records the pipeline as
+  unbuilt.
 - `docs/ecosystem.html` describes panoptes as imagery feature extraction,
   fluvius as a real-time stream processor, fenestra as an OGC services gateway
   and ptolemy as a versioned geodatabase, each matching what the repo says it

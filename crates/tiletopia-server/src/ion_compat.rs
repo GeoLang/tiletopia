@@ -141,18 +141,9 @@ fn percent_for_status(status: &crate::AssetStatus) -> u8 {
     }
 }
 
-/// Deterministic i64 from the first 8 bytes of a UUID (for Ion's numeric asset IDs).
-fn uuid_to_ion_id(id: Uuid) -> i64 {
-    let bytes = id.as_bytes();
-    i64::from_be_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-    ])
-    .abs()
-}
-
-fn to_ion_asset(asset: &crate::Asset) -> IonAsset {
+fn to_ion_asset(asset: &crate::Asset, ion_id: i64) -> IonAsset {
     IonAsset {
-        id: uuid_to_ion_id(asset.id),
+        id: ion_id,
         asset_type: map_asset_type(&asset.asset_type),
         name: asset.name.clone(),
         description: asset.description.clone(),
@@ -167,30 +158,47 @@ fn get_base_url() -> String {
     std::env::var("TILETOPIA_ION_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string())
 }
 
+/// An Ion client only ever has the number it read off the asset list, and
+/// `IonImageryProvider.fromAssetId` will not even accept anything else. Uuids
+/// still resolve, so a link written against the native asset id keeps working.
+async fn resolve_asset(
+    state: &AppState,
+    id: &str,
+) -> Result<Option<(crate::Asset, i64)>, sqlx::Error> {
+    if let Ok(ion_id) = id.parse::<i64>() {
+        return state.db.get_asset_by_ion_id(ion_id).await;
+    }
+    let Ok(uuid) = Uuid::parse_str(id) else {
+        return Ok(None);
+    };
+    state.db.get_asset_with_ion_id(uuid).await
+}
+
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 async fn list_assets(State(state): State<Arc<AppState>>) -> Result<Json<IonAssetList>, StatusCode> {
     let assets = state
         .db
-        .list_assets()
+        .list_assets_with_ion_ids()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let items: Vec<IonAsset> = assets.iter().map(to_ion_asset).collect();
+    let items: Vec<IonAsset> = assets
+        .iter()
+        .map(|(asset, ion_id)| to_ion_asset(asset, *ion_id))
+        .collect();
     Ok(Json(IonAssetList { items }))
 }
 
 async fn get_asset(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<IonAsset>, StatusCode> {
-    let asset = state
-        .db
-        .get_asset(id)
+    let (asset, ion_id) = resolve_asset(&state, &id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(to_ion_asset(&asset)))
+    Ok(Json(to_ion_asset(&asset, ion_id)))
 }
 
 async fn create_asset(
@@ -221,13 +229,13 @@ async fn create_asset(
         owner_id: Some(owner_id),
     };
 
-    state
+    let ion_id = state
         .db
         .create_asset(&asset)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok((StatusCode::CREATED, Json(to_ion_asset(&asset))))
+    Ok((StatusCode::CREATED, Json(to_ion_asset(&asset, ion_id))))
 }
 
 /// Status plus a message, because the only thing a CesiumJS developer sees when
@@ -240,11 +248,9 @@ fn endpoint_error(status: StatusCode, message: impl Into<String>) -> EndpointErr
 
 async fn get_endpoint(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<IonEndpoint>, EndpointError> {
-    let asset = state
-        .db
-        .get_asset(id)
+    let (asset, _) = resolve_asset(&state, &id)
         .await
         .map_err(|_| endpoint_error(StatusCode::INTERNAL_SERVER_ERROR, "asset lookup failed"))?
         .ok_or_else(|| endpoint_error(StatusCode::NOT_FOUND, format!("no asset {id}")))?;
@@ -256,18 +262,28 @@ async fn get_endpoint(
         // tileset.json url does not even fail loudly: the 404 on layer.json is
         // read as a pre-metadata heightmap layer, and every tile 404s after.
         AssetType::Terrain => {
-            let bundle = id.to_string();
+            let bundle = asset.id.to_string();
             if !terrain_bundle::bundle_exists(&state, &bundle).await {
                 return Err(endpoint_error(
                     StatusCode::NOT_FOUND,
                     format!(
-                        "terrain asset {id} has no terrain to serve: put a quantized-mesh bundle at <data-dir>/terrain_bundles/{id}/"
+                        "terrain asset {bundle} has no terrain to serve: put a quantized-mesh bundle at <data-dir>/terrain_bundles/{bundle}/"
                     ),
                 ));
             }
             format!("{base_url}/api/v1/terrain/bundles/{bundle}/")
         }
-        _ => format!("{base_url}/api/v1/assets/{id}/tileset.json"),
+        // nothing here serves image tiles, and cesium reads an IMAGERY url as a
+        // TMS root, so a tileset.json would send it after tilemapresource.xml
+        AssetType::Imagery => {
+            return Err(endpoint_error(
+                StatusCode::NOT_IMPLEMENTED,
+                format!(
+                    "asset {id} is imagery, and tiletopia has no imagery tiling: there is no tile pyramid for an imagery provider to read"
+                ),
+            ));
+        }
+        _ => format!("{base_url}/api/v1/assets/{}/tileset.json", asset.id),
     };
 
     Ok(Json(IonEndpoint {

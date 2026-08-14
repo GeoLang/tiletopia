@@ -78,5 +78,6 @@ tiletopia-store = { path = "../tiletopia-store" }
 quick-xml = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+sqlx = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }

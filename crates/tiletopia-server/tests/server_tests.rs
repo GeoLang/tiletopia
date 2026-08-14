@@ -1468,7 +1468,7 @@ mod tests {
 
     async fn ion_endpoint(
         state: &Arc<AppState>,
-        id: uuid::Uuid,
+        id: impl std::fmt::Display,
     ) -> (StatusCode, serde_json::Value) {
         let resp = get(state, &format!("/v1/assets/{id}/endpoint")).await;
         let status = resp.status();
@@ -1548,6 +1548,111 @@ mod tests {
             "{}",
             body["url"]
         );
+    }
+
+    #[tokio::test]
+    async fn ion_endpoint_for_imagery_refuses_instead_of_naming_a_tileset() {
+        let state = test_state().await;
+        let id = seed_asset(&state, tiletopia_server::AssetType::Imagery).await;
+
+        let (status, body) = ion_endpoint(&state, id).await;
+        // a tileset.json url typed IMAGERY sends cesium's TMS provider looking
+        // for tilemapresource.xml next to a 3D Tiles tileset
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert!(body["url"].is_null());
+        let message = body["message"].as_str().unwrap();
+        assert!(
+            message.contains("imagery"),
+            "{message} does not say why there is no endpoint"
+        );
+    }
+
+    async fn ion_assets(state: &Arc<AppState>) -> Vec<serde_json::Value> {
+        let resp = get(state, "/v1/assets").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        body["items"].as_array().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn ion_list_id_is_what_the_id_routes_take() {
+        let state = test_state().await;
+        let uuid = seed_asset(&state, tiletopia_server::AssetType::PointCloud).await;
+
+        let items = ion_assets(&state).await;
+        let ion_id = items[0]["id"].as_i64().unwrap();
+
+        // the number off the list is all an Ion client has, and
+        // IonImageryProvider.fromAssetId refuses an id that is not one
+        let resp = get(&state, &format!("/v1/assets/{ion_id}")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let asset: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(asset["id"].as_i64().unwrap(), ion_id);
+
+        let (status, body) = ion_endpoint(&state, ion_id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body["url"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("/api/v1/assets/{uuid}/tileset.json")),
+            "{} is not the asset the number stands for",
+            body["url"]
+        );
+    }
+
+    #[tokio::test]
+    async fn ion_ids_are_never_shared_or_reused() {
+        let state = test_state().await;
+        seed_asset(&state, tiletopia_server::AssetType::PointCloud).await;
+        let second = seed_asset(&state, tiletopia_server::AssetType::PointCloud).await;
+
+        let ids: Vec<i64> = ion_assets(&state)
+            .await
+            .iter()
+            .map(|a| a["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+
+        // deleting the newest asset must not put its number back in circulation
+        state.db.delete_asset(second).await.unwrap();
+        seed_asset(&state, tiletopia_server::AssetType::PointCloud).await;
+        let after: Vec<i64> = ion_assets(&state)
+            .await
+            .iter()
+            .map(|a| a["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(after.len(), 2);
+        assert_ne!(after[0], after[1]);
+        assert!(!ids.contains(&after.iter().copied().max().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn ion_ids_are_backfilled_for_rows_that_predate_them() {
+        let state = test_state().await;
+        seed_asset(&state, tiletopia_server::AssetType::PointCloud).await;
+        seed_asset(&state, tiletopia_server::AssetType::PointCloud).await;
+
+        // what a database written before ion_id existed looks like
+        sqlx::query("UPDATE assets SET ion_id = NULL")
+            .execute(&state.db.pool)
+            .await
+            .unwrap();
+        state.db.migrate().await.unwrap();
+
+        let ids: Vec<i64> = ion_assets(&state)
+            .await
+            .iter()
+            .map(|a| a["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        assert!(ids.iter().all(|id| *id > 0));
+
+        // and the routes take the numbers the backfill handed out
+        let (status, _) = ion_endpoint(&state, ids[0]).await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]

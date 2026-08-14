@@ -64,6 +64,9 @@ pub struct Database {
     pub pool: SqlitePool,
 }
 
+const ASSET_COLUMNS: &str =
+    "id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id";
+
 fn enum_to_str<T: Serialize>(val: &T) -> String {
     serde_json::to_string(val)
         .unwrap_or_default()
@@ -98,6 +101,7 @@ impl Database {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS assets (
                 id TEXT PRIMARY KEY,
+                ion_id INTEGER,
                 name TEXT NOT NULL,
                 asset_type TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -124,6 +128,42 @@ impl Database {
                 .execute(&self.pool)
                 .await?;
         }
+
+        // assets predates ion_id. sqlite cannot add a column with a UNIQUE
+        // constraint, so the index below is what keeps two assets off one number
+        let has_ion_id =
+            sqlx::query("SELECT 1 FROM pragma_table_info('assets') WHERE name = 'ion_id'")
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some();
+        if !has_ion_id {
+            sqlx::query("ALTER TABLE assets ADD COLUMN ion_id INTEGER")
+                .execute(&self.pool)
+                .await?;
+        }
+        self.number_assets_without_an_ion_id().await?;
+        sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS assets_ion_id ON assets(ion_id)")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS ion_id_counter (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                last_ion_id INTEGER NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // the counter only ever climbs, so deleting an asset does not put its
+        // number back in circulation for a client holding a stale link
+        sqlx::query(
+            "INSERT INTO ion_id_counter (id, last_ion_id)
+             VALUES (1, (SELECT COALESCE(MAX(ion_id), 0) FROM assets))
+             ON CONFLICT(id) DO UPDATE SET last_ion_id = MAX(last_ion_id, excluded.last_ion_id)",
+        )
+        .execute(&self.pool)
+        .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS jobs (
@@ -246,20 +286,57 @@ impl Database {
         Ok(())
     }
 
+    /// Gives an ion id to every asset row that has none, so a database written
+    /// before ion ids existed answers the Ion API the same as a fresh one.
+    async fn number_assets_without_an_ion_id(&self) -> Result<(), sqlx::Error> {
+        let unnumbered: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM assets WHERE ion_id IS NULL ORDER BY created_at")
+                .fetch_all(&self.pool)
+                .await?;
+
+        let mut next: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(ion_id), 0) FROM assets")
+            .fetch_one(&self.pool)
+            .await?;
+
+        for id in unnumbered {
+            next += 1;
+            sqlx::query("UPDATE assets SET ion_id = ? WHERE id = ?")
+                .bind(next)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
+
+        Ok(())
+    }
+
     // -- Asset CRUD --
 
-    pub async fn create_asset(&self, asset: &Asset) -> Result<(), sqlx::Error> {
+    /// Returns the asset's ion id. Ion asset ids are numbers, so every asset
+    /// gets one at creation: a client that read an id off the Ion asset list
+    /// has nothing else to ask for the asset by.
+    pub async fn create_asset(&self, asset: &Asset) -> Result<i64, sqlx::Error> {
         let id = asset.id.to_string();
         let asset_type = enum_to_str(&asset.asset_type);
         let status = enum_to_str(&asset.status);
         let created_at = asset.created_at.to_rfc3339();
         let tags = serde_json::to_string(&asset.tags).unwrap_or_else(|_| "[]".into());
 
+        // one statement, so two creates at once take different numbers, and the
+        // unique index on ion_id refuses a repeat rather than leaving two assets
+        // a client cannot tell apart
+        let ion_id: i64 = sqlx::query_scalar(
+            "UPDATE ion_id_counter SET last_ion_id = last_ion_id + 1 WHERE id = 1 RETURNING last_ion_id",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
         sqlx::query(
-            "INSERT INTO assets (id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO assets (id, ion_id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
+        .bind(ion_id)
         .bind(&asset.name)
         .bind(&asset_type)
         .bind(&status)
@@ -272,28 +349,67 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
-        Ok(())
+        Ok(ion_id)
     }
 
     pub async fn get_asset(&self, id: Uuid) -> Result<Option<Asset>, sqlx::Error> {
-        let row = sqlx::query(
-            "SELECT id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id FROM assets WHERE id = ?",
-        )
-        .bind(id.to_string())
-        .fetch_optional(&self.pool)
-        .await?;
+        let row = sqlx::query(&format!("SELECT {ASSET_COLUMNS} FROM assets WHERE id = ?"))
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
 
         Ok(row.map(|r| row_to_asset(&r)))
     }
 
+    pub async fn get_asset_with_ion_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<(Asset, i64)>, sqlx::Error> {
+        let row = sqlx::query(&format!(
+            "SELECT {ASSET_COLUMNS}, ion_id FROM assets WHERE id = ?"
+        ))
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| (row_to_asset(&r), r.get("ion_id"))))
+    }
+
+    pub async fn get_asset_by_ion_id(
+        &self,
+        ion_id: i64,
+    ) -> Result<Option<(Asset, i64)>, sqlx::Error> {
+        let row = sqlx::query(&format!(
+            "SELECT {ASSET_COLUMNS}, ion_id FROM assets WHERE ion_id = ?"
+        ))
+        .bind(ion_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| (row_to_asset(&r), r.get("ion_id"))))
+    }
+
     pub async fn list_assets(&self) -> Result<Vec<Asset>, sqlx::Error> {
-        let rows = sqlx::query(
-            "SELECT id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id FROM assets ORDER BY created_at DESC",
-        )
+        let rows = sqlx::query(&format!(
+            "SELECT {ASSET_COLUMNS} FROM assets ORDER BY created_at DESC"
+        ))
         .fetch_all(&self.pool)
         .await?;
 
         Ok(rows.iter().map(row_to_asset).collect())
+    }
+
+    pub async fn list_assets_with_ion_ids(&self) -> Result<Vec<(Asset, i64)>, sqlx::Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {ASSET_COLUMNS}, ion_id FROM assets ORDER BY created_at DESC"
+        ))
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| (row_to_asset(r), r.get("ion_id")))
+            .collect())
     }
 
     pub async fn update_asset(&self, asset: &Asset) -> Result<(), sqlx::Error> {
@@ -656,9 +772,7 @@ impl Database {
         asset_type: Option<&str>,
         status: Option<&str>,
     ) -> Result<Vec<Asset>, sqlx::Error> {
-        let mut sql = String::from(
-            "SELECT id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id FROM assets WHERE 1=1",
-        );
+        let mut sql = format!("SELECT {ASSET_COLUMNS} FROM assets WHERE 1=1");
         let mut binds: Vec<String> = Vec::new();
 
         if let Some(q) = q {
