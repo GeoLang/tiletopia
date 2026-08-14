@@ -14,7 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries a fixed set of collaboration messages, Join, Leave, Cursor, Chat,
   Presence and ViewChanged. Anything else that arrives is logged and dropped,
   so no IoT reading can travel over it. The feature list and the Cesium Ion
-  comparison row now say presence, cursors and chat.
+  comparison row now say presence, cursors and chat. The test inventory marks
+  rules engine and geofencing as modules no route reaches, which is their
+  actual state: both are written and unit-tested, neither is constructed by
+  the binary.
 
 ### Removed
 
