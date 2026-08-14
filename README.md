@@ -32,7 +32,7 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Multipart upload** — stream large files directly
 - **Tile streaming** with geometric error-based LOD (client-side frustum culling via CesiumJS)
 - **CORS support** for cross-origin CesiumJS access
-- **WebSocket real-time layer** for live IoT/sensor data overlay
+- **WebSocket real-time layer** for presence, cursors, chat and view sync
 - **JWT authentication** (`TILETOPIA_JWT_SECRET`, 32+ bytes, required to serve; `TILETOPIA_AUTH_DISABLED=true` to opt out)
 
 ### Terrain
@@ -43,13 +43,10 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 - **Prebuilt terrain bundles** — serve a `ctb-tile` directory as a Cesium terrain source, no Ion token
 
 ### Digital Twin Support
-- **Real-time data injection** — push live sensor values into 3D scene via WebSocket
 - **Temporal versioning** — serve different model states over time
-- **Entity linking** — map 3D tiles to metadata (building ID → sensor readings)
 - **3D annotation layers** — persist user-drawn annotations server-side
 - **Update API** — push model changes without full re-tile
 - **Change detection & time slider** — compare point clouds across epochs, generate heatmaps
-- **Scripting / rules engine** — trigger alerts when sensor thresholds are crossed
 - **CRDT collaborative editing** — conflict-free concurrent annotations via hybrid logical clocks
 
 ### Advanced Analytics
@@ -473,7 +470,7 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 | Web dashboard | ✅ | ✅ |
 | **Self-hosted / on-premises** | ✅ | ❌ |
 | **GPU-accelerated tiling (Metal/Vulkan)** | ✅ | ❌ |
-| **WebSocket real-time layer** | ✅ | ❌ |
+| **WebSocket real-time layer (presence, cursors, chat)** | ✅ | ❌ |
 | **Digital twin support** | ✅ | ❌ |
 | **Temporal versioning (time-series)** | ✅ | ❌ |
 | **Air-gapped / offline deployment** | ✅ | ❌ |

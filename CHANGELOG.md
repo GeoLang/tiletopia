@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-14
+
+### Changed
+
+- The README no longer sells the realtime websocket as a sensor feed. The
+  socket at `/api/v1/realtime/{room}` is real, mounted and JWT-gated, but it
+  carries a fixed set of collaboration messages, Join, Leave, Cursor, Chat,
+  Presence and ViewChanged. Anything else that arrives is logged and dropped,
+  so no IoT reading can travel over it. The feature list and the Cesium Ion
+  comparison row now say presence, cursors and chat.
+
+### Removed
+
+- Three digital-twin README claims that nothing in the shipped server backs.
+  "Real-time data injection" described pushing sensor values into the scene
+  over the websocket: the `push_update` broadcast helper exists but no route
+  and no other module ever calls it. "Entity linking" described mapping
+  building ids to sensor readings: the three `GET /api/v1/entity-links` routes
+  are mounted, but the store is built empty at startup and its create, update
+  and delete methods are unreachable from any route, so the endpoints can only
+  ever answer an empty list. "Scripting / rules engine" described firing alerts
+  on sensor thresholds: the engine is written and unit-tested, with threshold
+  triggers and alert actions, but `pub mod scripting` is the only reference to
+  it anywhere, so the binary never constructs it and no request can reach it.
+  The code stays, the claims go until a route exposes them.
+
 ## [Unreleased] - 2026-08-13
 
 ### Fixed
