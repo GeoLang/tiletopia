@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 2026-08-15: docs test count is 737. `docs/ecosystem.html` puts fenestra
+  under Platform (server) and fluvius under Streaming.
 - The README no longer sells the realtime websocket as a sensor feed. The
   socket at `/api/v1/realtime/{room}` is real, mounted and JWT-gated, but it
   carries a fixed set of collaboration messages, Join, Leave, Cursor, Chat,
