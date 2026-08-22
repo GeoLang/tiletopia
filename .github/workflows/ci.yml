@@ -34,15 +34,20 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets --no-default-features --features ${{ matrix.features }} -- -D warnings
+      # the mago jar ships linux/x64 and windows/x64 natives only, so the
+      # external tiler test skips itself on macos
       - uses: actions/setup-java@v4
+        if: runner.os != 'macOS'
         with:
           distribution: temurin
           java-version: 21
       - uses: actions/cache@v4
+        if: runner.os != 'macOS'
         with:
           path: ${{ runner.temp }}/mago-3d-tiler.jar
           key: mago-${{ env.MAGO_VERSION }}
       - name: Download mago-3d-tiler
+        if: runner.os != 'macOS'
         shell: bash
         run: |
           jar="$RUNNER_TEMP/mago-3d-tiler.jar"
@@ -50,16 +55,10 @@ jobs:
             curl -fsSL -o "$jar" \
               "https://github.com/Gaia3D/mago-3d-tiler/releases/download/v$MAGO_VERSION/mago-3d-tiler-$MAGO_VERSION.jar"
           fi
-          # macOS runners ship shasum, not sha256sum
-          if command -v sha256sum >/dev/null; then
-            echo "$MAGO_SHA256  $jar" | sha256sum -c -
-          else
-            echo "$MAGO_SHA256  $jar" | shasum -a 256 -c -
-          fi
+          echo "$MAGO_SHA256  $jar" | sha256sum -c -
+          echo "TILETOPIA_MAGO_JAR=$jar" >> "$GITHUB_ENV"
       - name: Test
         run: cargo test --all --no-default-features --features ${{ matrix.features }}
-        env:
-          TILETOPIA_MAGO_JAR: ${{ runner.temp }}/mago-3d-tiler.jar
 
   deny:
     runs-on: ubuntu-latest

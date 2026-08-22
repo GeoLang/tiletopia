@@ -20,7 +20,7 @@ Ingest point clouds, tile them into OGC 3D Tiles 1.1, and serve them with view-d
 - Optional GPU point-cloud decimation via wgpu (`--features gpu`)
 - Draco/meshopt compression for tile delivery
 
-The job queue tiles point clouds with the native tiler. Meshes (glTF, glb, OBJ, FBX) and vector files (GeoJSON, GeoPackage, KML, CityGML) go to [mago-3d-tiler](https://github.com/Gaia3D/mago-3d-tiler) (MPL-2.0), which the Docker image bundles with a JRE 21. `TILETOPIA_MAGO_JAR` points at the jar, and without it a mesh or vector job fails naming the variable. IFC and DAE uploads fail with an error naming the format: the external tiler has no input type for either. An upload whose extension is not on the list answers 400.
+The job queue tiles point clouds with the native tiler. Meshes (glTF, glb, OBJ, FBX) and vector files (GeoJSON, GeoPackage, KML, CityGML) go to [mago-3d-tiler](https://github.com/Gaia3D/mago-3d-tiler) (MPL-2.0), which the Docker image bundles with a JRE 21. `TILETOPIA_MAGO_JAR` points at the jar, and without it a mesh or vector job fails naming the variable. The jar ships natives for Linux and Windows x64 only, so on macOS those jobs fail inside mago. IFC and DAE uploads fail with an error naming the format: the external tiler has no input type for either. An upload whose extension is not on the list answers 400.
 
 A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields beside the file. Longitude and latitude place a model that has local coordinates, and one without the other is refused. The tiles land at `/api/v1/assets/{id}/tileset.json`, with content under `/api/v1/assets/{id}/data/{file}`.
 
