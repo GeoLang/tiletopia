@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-22
+
+### Added
+
+- Mesh and vector uploads are tiled to 3D Tiles by mago-3d-tiler, called from
+  the tiling job queue. glTF, glb, OBJ, FBX, GeoJSON, GeoPackage, KML and
+  CityGML all queue a job on upload, beside point clouds, which keep the native
+  tiler. The upload takes optional `longitude`, `latitude` and `crs` fields, and
+  refuses one of longitude/latitude without the other. `TILETOPIA_MAGO_JAR`
+  points at the jar; the Docker image bundles it with a JRE 21 and sets the
+  variable. IFC and DAE uploads fail with an error naming the format.
+- `GET /api/v1/assets/{id}/data/{path}` serves the tile content mago-3d-tiler
+  references from tileset.json, open to anonymous reads like `/tiles/{path}`.
+
+### Changed
+
+- An upload whose extension is not recognised answers 400 naming the accepted
+  extensions. It used to be filed as a point cloud by a catch-all arm and tiled
+  into a failing job.
+- `GET /api/v1/assets/{id}/tileset.json` returns the stored bytes instead of a
+  parsed and re-serialised `Tileset`, which cannot represent the region bounding
+  volumes and nested children mago-3d-tiler writes.
+- `jobs` gains nullable `longitude`, `latitude` and `crs` columns, added to
+  existing databases on migrate.
+
 ## [Unreleased] - 2026-08-21
 
 ### Changed

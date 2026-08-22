@@ -13,6 +13,23 @@ mod tests {
     async fn state_with_engines(
         analysis_engines: tiletopia_server::analysis_tiles::AnalysisEngines,
     ) -> Arc<AppState> {
+        build_state(analysis_engines, None).await
+    }
+
+    async fn state_with_external_tiler(
+        external_tiler_jar: Option<std::path::PathBuf>,
+    ) -> Arc<AppState> {
+        build_state(
+            tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+            external_tiler_jar,
+        )
+        .await
+    }
+
+    async fn build_state(
+        analysis_engines: tiletopia_server::analysis_tiles::AnalysisEngines,
+        external_tiler_jar: Option<std::path::PathBuf>,
+    ) -> Arc<AppState> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -41,6 +58,7 @@ mod tests {
             Arc::clone(&db),
             dir.clone(),
             Arc::clone(&store),
+            external_tiler_jar,
         ));
 
         Arc::new(AppState {
@@ -1716,8 +1734,7 @@ mod tests {
             .status()
     }
 
-    // multipart upload of a tiny .glb, which detects as Model so no tiling job
-    // is queued by the upload itself.
+    // multipart upload of a tiny .glb, which detects as Model.
     async fn upload_glb(
         state: &Arc<AppState>,
         token: Option<&str>,
@@ -1796,10 +1813,15 @@ mod tests {
             uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap()
         );
 
-        // a model tiles on demand, not on upload, so it reports no job
+        // a model goes to the external tiler on upload the same way
         let (status, model) = upload_glb(&state, Some(&editor_token)).await;
         assert_eq!(status, StatusCode::CREATED);
-        assert!(model.get("job_id").is_none());
+        assert!(model["job_id"].as_str().is_some());
+
+        // terrain has no 3D Tiles path at all, so it reports no job
+        let (status, terrain) = upload_named(&state, Some(&editor_token), "dem.tif").await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(terrain.get("job_id").is_none());
     }
 
     #[tokio::test]
@@ -3088,6 +3110,7 @@ end_header\n0.0 0.0 0.0 255 0 0\n1.0 0.0 0.0 0 255 0\n0.0 1.0 0.0 0 0 255\n\
             error: None,
             points_processed: 42,
             tiles_written: 7,
+            placement: tiletopia_server::db::ModelPlacement::default(),
         };
 
         {
@@ -3167,7 +3190,11 @@ end_header\n0.0 0.0 0.0 255 0 0\n1.0 0.0 0.0 0 255 0\n0.0 1.0 0.0 0 0 255\n\
 
         let job = state
             .job_queue
-            .submit(id, input_path.to_string_lossy().into_owned())
+            .submit(
+                id,
+                input_path.to_string_lossy().into_owned(),
+                tiletopia_server::db::ModelPlacement::default(),
+            )
             .await
             .unwrap();
         assert_eq!(job.status, JobStatus::Queued);
@@ -3229,6 +3256,257 @@ end_header\n0.0 0.0 0.0 255 0 0\n1.0 0.0 0.0 0 255 0\n0.0 1.0 0.0 0 0 255\n\
 
         // and no queued work is left behind
         assert!(state.db.next_queued_job().await.unwrap().is_none());
+    }
+
+    // -- the external tiler --
+
+    const MAGO_JAR_VAR: &str = "TILETOPIA_MAGO_JAR";
+
+    const CUBE_OBJ: &str = "\
+v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\n\
+f 1 2 3 4\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
+
+    /// Multipart upload of `contents` under `filename`, with any extra text
+    /// fields the upload takes beside the file.
+    async fn upload_with_fields(
+        state: &Arc<AppState>,
+        token: &str,
+        filename: &str,
+        contents: &str,
+        fields: &[(&str, &str)],
+    ) -> (StatusCode, Vec<u8>) {
+        let boundary = "tiletopiatestboundary";
+        let mut body = String::new();
+        for (name, value) in fields {
+            body.push_str(&format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            ));
+        }
+        body.push_str(&format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
+             filename=\"{filename}\"\r\n\r\n{contents}\r\n--{boundary}--\r\n"
+        ));
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/assets")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .header("authorization", format!("Bearer {token}"));
+        let resp = router(Arc::clone(state))
+            .oneshot(req.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, bytes.to_vec())
+    }
+
+    async fn get_with_token(
+        state: &Arc<AppState>,
+        uri: &str,
+        token: &str,
+    ) -> (StatusCode, Vec<u8>) {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"));
+        let resp = router(Arc::clone(state))
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, bytes.to_vec())
+    }
+
+    /// Drive the queue until the asset's only job settles, then report it.
+    async fn settle_only_job(
+        state: &Arc<AppState>,
+        asset_id: uuid::Uuid,
+    ) -> tiletopia_server::db::JobRecord {
+        use tiletopia_server::db::JobStatus;
+
+        let worker = Arc::clone(&state.job_queue).start().await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let mut settled = None;
+        while std::time::Instant::now() < deadline {
+            let jobs = state.db.list_jobs_for_asset(asset_id).await.unwrap();
+            let current = jobs.into_iter().next().expect("a job for the asset");
+            if matches!(current.status, JobStatus::Done | JobStatus::Failed) {
+                settled = Some(current);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        worker.abort();
+        settled.expect("job never settled")
+    }
+
+    /// Every `uri` anywhere in a tileset tree, root first.
+    fn content_uris(node: &serde_json::Value, found: &mut Vec<String>) {
+        if let Some(uri) = node.pointer("/content/uri").and_then(|u| u.as_str()) {
+            found.push(uri.to_string());
+        }
+        if let Some(children) = node["children"].as_array() {
+            for child in children {
+                content_uris(child, found);
+            }
+        }
+    }
+
+    /// An OBJ upload comes back as a 3D Tiles tileset whose content the `data`
+    /// route serves. Needs the jar, so it is skipped when the variable is unset.
+    #[tokio::test]
+    async fn obj_upload_is_tiled_by_the_external_tiler() {
+        use tiletopia_server::db::JobStatus;
+
+        let Ok(jar) = std::env::var(MAGO_JAR_VAR) else {
+            eprintln!("skipped: {MAGO_JAR_VAR} is not set");
+            return;
+        };
+
+        let state = state_with_external_tiler(Some(jar.into())).await;
+        let token = bootstrap_editor(&state, "mago-obj-editor@example.com").await;
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "cube.obj",
+            CUBE_OBJ,
+            &[("longitude", "10"), ("latitude", "20"), ("crs", "3857")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(
+            settled.status,
+            JobStatus::Done,
+            "error: {:?}",
+            settled.error
+        );
+        assert!(settled.tiles_written > 0, "no tile files were counted");
+
+        let (status, body) = get_with_token(
+            &state,
+            &format!("/api/v1/assets/{asset_id}/tileset.json"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tileset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(tileset["asset"]["version"], "1.1");
+
+        let mut uris = Vec::new();
+        content_uris(&tileset["root"], &mut uris);
+        let uri = uris
+            .iter()
+            .find(|u| u.starts_with("data/"))
+            .unwrap_or_else(|| panic!("no data/ content uri in {uris:?}"));
+
+        let (status, tile) =
+            get_with_token(&state, &format!("/api/v1/assets/{asset_id}/{uri}"), &token).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&tile[..4], b"glTF", "tile content is not a glb");
+    }
+
+    /// With no jar configured the job fails naming the variable, rather than
+    /// leaving the asset at Uploading forever.
+    #[tokio::test]
+    async fn a_model_upload_without_the_jar_fails_naming_the_variable() {
+        use tiletopia_server::AssetStatus;
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "mago-nojar-editor@example.com").await;
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "cube.obj",
+            CUBE_OBJ,
+            &[("longitude", "10"), ("latitude", "20"), ("crs", "3857")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(settled.status, JobStatus::Failed);
+        let error = settled.error.expect("a failed job says why");
+        assert!(error.contains(MAGO_JAR_VAR), "{error}");
+
+        let stored = state.db.get_asset(asset_id).await.unwrap().unwrap();
+        assert!(
+            matches!(stored.status, AssetStatus::Error),
+            "asset says {:?}",
+            stored.status
+        );
+    }
+
+    /// IFC is a Model extension the external tiler has no input type for. The
+    /// format check runs before the jar lookup, so this fails the same way with
+    /// or without a jar.
+    #[tokio::test]
+    async fn an_ifc_upload_fails_as_a_format_the_external_tiler_refuses() {
+        use tiletopia_server::db::JobStatus;
+
+        let jar = std::env::var(MAGO_JAR_VAR)
+            .ok()
+            .map(std::path::PathBuf::from);
+        let state = state_with_external_tiler(jar).await;
+        let token = bootstrap_editor(&state, "mago-ifc-editor@example.com").await;
+
+        let (status, body) =
+            upload_with_fields(&state, &token, "thing.ifc", "not really ifc", &[]).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(settled.status, JobStatus::Failed);
+        let error = settled.error.expect("a failed job says why");
+        assert!(error.contains("ifc"), "{error}");
+        assert!(error.contains("external tiler"), "{error}");
+    }
+
+    /// The catch-all that used to call every unknown extension a point cloud is
+    /// gone, so an extension with no tiler behind it is refused at the door.
+    #[tokio::test]
+    async fn an_unknown_extension_is_refused_with_the_accepted_list() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "unknown-ext-editor@example.com").await;
+
+        let (status, body) = upload_with_fields(&state, &token, "notes.txt", "hello", &[]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = String::from_utf8_lossy(&body);
+        assert!(message.contains("notes.txt"), "{message}");
+        assert!(message.contains("glb"), "{message}");
+    }
+
+    /// mago takes longitude and latitude together or not at all, so half a
+    /// placement is refused before anything is stored.
+    #[tokio::test]
+    async fn longitude_without_latitude_is_refused() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "half-placement-editor@example.com").await;
+
+        let (status, body) =
+            upload_with_fields(&state, &token, "cube.obj", CUBE_OBJ, &[("longitude", "10")]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = String::from_utf8_lossy(&body);
+        assert!(message.contains("latitude"), "{message}");
+        assert_eq!(state.db.list_assets().await.unwrap().len(), 0);
     }
 
     // -- asset exports --

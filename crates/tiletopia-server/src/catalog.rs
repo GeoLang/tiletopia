@@ -487,6 +487,7 @@ async fn add_dataset(
         error: None,
         points_processed: 0,
         tiles_written: 0,
+        placement: crate::db::ModelPlacement::default(),
     };
 
     state

@@ -9,6 +9,16 @@ use uuid::Uuid;
 use crate::users::{Organization, User, UserRole};
 use crate::{Asset, AssetStatus, AssetType};
 
+/// Where a model with local coordinates sits on the globe, and which CRS its
+/// coordinates are in. The uploader supplies these, the external tiler has its
+/// own defaults for whatever is left out.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelPlacement {
+    pub longitude: Option<f64>,
+    pub latitude: Option<f64>,
+    pub crs: Option<String>,
+}
+
 /// Persistent database record for a tiling job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobRecord {
@@ -24,6 +34,8 @@ pub struct JobRecord {
     pub error: Option<String>,
     pub points_processed: u64,
     pub tiles_written: u64,
+    #[serde(default)]
+    pub placement: ModelPlacement,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -66,6 +78,8 @@ pub struct Database {
 
 const ASSET_COLUMNS: &str =
     "id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id";
+
+const JOB_COLUMNS: &str = "id, asset_id, status, progress, input_path, output_format, created_at, started_at, completed_at, error, points_processed, tiles_written, longitude, latitude, crs";
 
 fn enum_to_str<T: Serialize>(val: &T) -> String {
     serde_json::to_string(val)
@@ -178,11 +192,31 @@ impl Database {
                 completed_at TEXT,
                 error TEXT,
                 points_processed INTEGER DEFAULT 0,
-                tiles_written INTEGER DEFAULT 0
+                tiles_written INTEGER DEFAULT 0,
+                longitude REAL,
+                latitude REAL,
+                crs TEXT
             )",
         )
         .execute(&self.pool)
         .await?;
+
+        // jobs predates the placement the external tiler takes. same
+        // ADD COLUMN dance as assets above; rows written before this stay NULL,
+        // which is what "the uploader gave no placement" already means
+        for column in ["longitude REAL", "latitude REAL", "crs TEXT"] {
+            let name = column.split(' ').next().unwrap_or_default();
+            let present = sqlx::query("SELECT 1 FROM pragma_table_info('jobs') WHERE name = ?")
+                .bind(name)
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some();
+            if !present {
+                sqlx::query(&format!("ALTER TABLE jobs ADD COLUMN {column}"))
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS api_keys (
@@ -460,10 +494,10 @@ impl Database {
         let started_at = job.started_at.map(|dt| dt.to_rfc3339());
         let completed_at = job.completed_at.map(|dt| dt.to_rfc3339());
 
-        sqlx::query(
-            "INSERT INTO jobs (id, asset_id, status, progress, input_path, output_format, created_at, started_at, completed_at, error, points_processed, tiles_written)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
+        sqlx::query(&format!(
+            "INSERT INTO jobs ({JOB_COLUMNS})
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ))
         .bind(&id)
         .bind(&asset_id)
         .bind(&status)
@@ -476,6 +510,9 @@ impl Database {
         .bind(&job.error)
         .bind(job.points_processed as i64)
         .bind(job.tiles_written as i64)
+        .bind(job.placement.longitude)
+        .bind(job.placement.latitude)
+        .bind(&job.placement.crs)
         .execute(&self.pool)
         .await?;
 
@@ -483,20 +520,18 @@ impl Database {
     }
 
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobRecord>, sqlx::Error> {
-        let row = sqlx::query(
-            "SELECT id, asset_id, status, progress, input_path, output_format, created_at, started_at, completed_at, error, points_processed, tiles_written FROM jobs WHERE id = ?",
-        )
-        .bind(id.to_string())
-        .fetch_optional(&self.pool)
-        .await?;
+        let row = sqlx::query(&format!("SELECT {JOB_COLUMNS} FROM jobs WHERE id = ?"))
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
 
         Ok(row.map(|r| row_to_job(&r)))
     }
 
     pub async fn list_jobs_for_asset(&self, asset_id: Uuid) -> Result<Vec<JobRecord>, sqlx::Error> {
-        let rows = sqlx::query(
-            "SELECT id, asset_id, status, progress, input_path, output_format, created_at, started_at, completed_at, error, points_processed, tiles_written FROM jobs WHERE asset_id = ? ORDER BY created_at DESC",
-        )
+        let rows = sqlx::query(&format!(
+            "SELECT {JOB_COLUMNS} FROM jobs WHERE asset_id = ? ORDER BY created_at DESC"
+        ))
         .bind(asset_id.to_string())
         .fetch_all(&self.pool)
         .await?;
@@ -532,9 +567,9 @@ impl Database {
     }
 
     pub async fn next_queued_job(&self) -> Result<Option<JobRecord>, sqlx::Error> {
-        let row = sqlx::query(
-            "SELECT id, asset_id, status, progress, input_path, output_format, created_at, started_at, completed_at, error, points_processed, tiles_written FROM jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1",
-        )
+        let row = sqlx::query(&format!(
+            "SELECT {JOB_COLUMNS} FROM jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
+        ))
         .fetch_optional(&self.pool)
         .await?;
 
@@ -753,9 +788,9 @@ impl Database {
     }
 
     pub async fn list_recent_jobs(&self, limit: u32) -> Result<Vec<JobRecord>, sqlx::Error> {
-        let rows = sqlx::query(
-            "SELECT id, asset_id, status, progress, input_path, output_format, created_at, started_at, completed_at, error, points_processed, tiles_written FROM jobs ORDER BY created_at DESC LIMIT ?",
-        )
+        let rows = sqlx::query(&format!(
+            "SELECT {JOB_COLUMNS} FROM jobs ORDER BY created_at DESC LIMIT ?"
+        ))
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
@@ -1161,6 +1196,11 @@ fn row_to_job(row: &sqlx::sqlite::SqliteRow) -> JobRecord {
         error: row.get("error"),
         points_processed: row.get::<i64, _>("points_processed") as u64,
         tiles_written: row.get::<i64, _>("tiles_written") as u64,
+        placement: ModelPlacement {
+            longitude: row.get("longitude"),
+            latitude: row.get("latitude"),
+            crs: row.get("crs"),
+        },
     }
 }
 

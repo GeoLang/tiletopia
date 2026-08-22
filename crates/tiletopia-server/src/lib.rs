@@ -187,6 +187,7 @@ pub enum AssetType {
     Terrain,
     Model,
     Imagery,
+    Vector,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,6 +275,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // emits nested child URIs this needs {*path}, and the matching arm in
         // auth::is_public_read has to widen with it.
         .route("/api/v1/assets/{id}/tiles/{path}", get(get_tile))
+        .route("/api/v1/assets/{id}/data/{path}", get(get_data_file))
         .route("/api/v1/assets/{id}/thumbnail", get(get_thumbnail))
         .route("/api/v1/assets/{id}/annotations", get(list_annotations))
         .route("/api/v1/assets/{id}/jobs", get(list_asset_jobs))
@@ -435,19 +437,23 @@ async fn delete_asset(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The stored bytes, not a parsed tileset: the external tiler writes region
+/// bounding volumes and nested children that `tiletopia_core::Tileset` cannot
+/// represent, and a re-serialised tileset would drop them.
 async fn get_tileset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
-) -> Result<Json<tiletopia_core::Tileset>, StatusCode> {
+) -> Result<([(axum::http::HeaderName, &'static str); 1], Vec<u8>), StatusCode> {
     let key = format!("{}/tileset.json", id);
     let data = state
         .store
         .get(&key)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
-    let tileset: tiletopia_core::Tileset =
-        serde_json::from_slice(&data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(tileset))
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        data.to_vec(),
+    ))
 }
 
 async fn get_tile(
@@ -459,6 +465,24 @@ async fn get_tile(
         return Err(StatusCode::BAD_REQUEST);
     }
     let key = format!("{}/tiles/{}", id, tile_path);
+    let data = state
+        .store
+        .get(&key)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok(data.to_vec())
+}
+
+/// Tile content the external tiler wrote, which it references from tileset.json
+/// as `data/RC0000.glb` rather than under `tiles/`.
+async fn get_data_file(
+    State(state): State<Arc<AppState>>,
+    Path((id, data_path)): Path<(Uuid, String)>,
+) -> Result<Vec<u8>, StatusCode> {
+    if data_path.contains("..") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let key = format!("{}/data/{}", id, data_path);
     let data = state
         .store
         .get(&key)
@@ -500,7 +524,7 @@ async fn start_tiling(
 
     let job = state
         .job_queue
-        .submit(id, input_path)
+        .submit(id, input_path, db::ModelPlacement::default())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

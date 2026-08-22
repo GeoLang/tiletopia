@@ -169,10 +169,15 @@ async fn main() -> anyhow::Result<()> {
             let store: Arc<dyn tiletopia_store::TileStore> =
                 Arc::new(tiletopia_store::LocalStore::new(data_dir.clone()));
 
+            let external_tiler_jar = std::env::var("TILETOPIA_MAGO_JAR")
+                .ok()
+                .map(std::path::PathBuf::from);
+
             let job_queue = Arc::new(tiletopia_server::job_queue::JobQueue::new(
                 Arc::clone(&db),
                 data_dir.clone(),
                 Arc::clone(&store),
+                external_tiler_jar,
             ));
             Arc::clone(&job_queue).start().await;
 

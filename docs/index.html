@@ -91,14 +91,15 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <li>Parallel tiling (Rayon)</li>
 <li>Optional GPU via wgpu</li>
 <li>Draco/meshopt compression</li>
+<li>Meshes and vector files tiled by mago-3d-tiler (MPL-2.0), bundled in the image. IFC and DAE fail with an error naming the format</li>
 </ul>
 </div>
 <div class="card">
 <h3>Input Formats</h3>
 <ul>
-<li>LAS, LAZ, E57, PLY. The job queue tiles these</li>
-<li>glTF, OBJ, IFC, GeoTIFF, vectors: readers exist, the queue does not call them</li>
-<li>Uploading .tif / .glb / .obj / .ifc queues a job that fails</li>
+<li>LAS, LAZ, E57, PLY: the native tiler</li>
+<li>glTF, GLB, OBJ, FBX, GeoJSON, GeoPackage, KML, CityGML: mago-3d-tiler, with optional longitude, latitude and crs upload fields</li>
+<li>IFC and DAE upload but fail: no external tiler input type. Any other extension answers 400</li>
 </ul>
 </div>
 <div class="card">
@@ -174,7 +175,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td>WebSocket presence / chat</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
 <tr><td>3D annotations</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
 <tr><td>XYZ raster tiles</td><td class="check">yes</td><td class="cross">no</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td></tr>
-<tr><td>BIM / mesh / vector tiling</td><td class="cross">readers only</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
+<tr><td>Mesh / vector tiling</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
 </tbody>
 </table>
 </div>

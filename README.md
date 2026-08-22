@@ -20,7 +20,9 @@ Ingest point clouds, tile them into OGC 3D Tiles 1.1, and serve them with view-d
 - Optional GPU point-cloud decimation via wgpu (`--features gpu`)
 - Draco/meshopt compression for tile delivery
 
-The job queue only tiles point clouds. It always calls `read_point_cloud`. Readers exist for glTF, OBJ, FBX, IFC, GeoTIFF, Shapefile, GeoJSON, KML, GeoPackage, CityGML and CityJSON. None of them is on the tiling path. Uploading `.tif`, `.glb`, `.obj` or `.ifc` queues a job that fails. Several other extensions are classed as PointCloud by a catch-all arm.
+The job queue tiles point clouds with the native tiler. Meshes (glTF, glb, OBJ, FBX) and vector files (GeoJSON, GeoPackage, KML, CityGML) go to [mago-3d-tiler](https://github.com/Gaia3D/mago-3d-tiler) (MPL-2.0), which the Docker image bundles with a JRE 21. `TILETOPIA_MAGO_JAR` points at the jar, and without it a mesh or vector job fails naming the variable. IFC and DAE uploads fail with an error naming the format: the external tiler has no input type for either. An upload whose extension is not on the list answers 400.
+
+A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields beside the file. Longitude and latitude place a model that has local coordinates, and one without the other is refused. The tiles land at `/api/v1/assets/{id}/tileset.json`, with content under `/api/v1/assets/{id}/data/{file}`.
 
 ### Tile Server
 - REST API for assets, tiling jobs, access control
@@ -71,7 +73,7 @@ Not implemented, whatever the code in the repository suggests:
 
 | Subsystem | State |
 |-----------|-------|
-| Mesh / vector / BIM tiling | Readers and a mesh tiler exist. The job queue never calls them |
+| IFC and DAE tiling | mago-3d-tiler has no input type for either, so those jobs fail. Meshes and vector files do tile |
 | Scheduler | `spawn()` has no callers. `create_job` ignores cron. `Scheduler::new()` seeds three fabricated jobs. No job has ever run |
 | Webhooks | HMAC delivery is written in `process_pending`, which nothing calls. Subscribe is read-only. Seeded with demo secrets |
 | STAC search | Ignores bbox, datetime, collections and limit. Returns one hardcoded item |
@@ -174,6 +176,11 @@ tiletopia tile --input scan.las --output ./tileset --max-error 1.0
 ```bash
 tiletopia serve --data-dir ./data --port 3000
 ```
+
+- `TILETOPIA_MAGO_JAR` — path to the mago-3d-tiler jar that tiles meshes and
+  vector files. The Docker image sets it. Outside the image, download
+  `mago-3d-tiler-1.16.2.jar` from the Gaia3D releases and point this at it, with
+  a JDK 21 on `PATH`. Unset means mesh and vector jobs fail naming the variable.
 
 Analysis tiles (`/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png`) render from the
 loaded DEM store and a synthetic field by default. Two variables put them on

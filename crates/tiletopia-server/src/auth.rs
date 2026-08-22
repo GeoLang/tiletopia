@@ -244,6 +244,9 @@ pub fn is_public_read(method: &Method, path: &str) -> bool {
         // in lib.rs before widening either side.
         ["api", "v1", "assets", _, "tileset.json"] => true,
         ["api", "v1", "assets", _, "tiles", _] => true,
+        // the external tiler references its tile content as "data/RC0000.glb",
+        // one trailing segment the same way
+        ["api", "v1", "assets", _, "data", _] => true,
 
         // quantized-mesh terrain: layer.json, the {z}/{x}/{y} tiles it
         // advertises, the terrain-rgb variant, and the same two under

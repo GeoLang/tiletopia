@@ -9,6 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  MAGO_VERSION: 1.16.2
+  MAGO_SHA256: d37e58b634e91d7ce7ca046168b1db2cf950cd9b2ffacb826fd3b10a8d31f7e2
 
 jobs:
   check:
@@ -32,8 +34,32 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets --no-default-features --features ${{ matrix.features }} -- -D warnings
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/mago-3d-tiler.jar
+          key: mago-${{ env.MAGO_VERSION }}
+      - name: Download mago-3d-tiler
+        shell: bash
+        run: |
+          jar="$RUNNER_TEMP/mago-3d-tiler.jar"
+          if [ ! -f "$jar" ]; then
+            curl -fsSL -o "$jar" \
+              "https://github.com/Gaia3D/mago-3d-tiler/releases/download/v$MAGO_VERSION/mago-3d-tiler-$MAGO_VERSION.jar"
+          fi
+          # macOS runners ship shasum, not sha256sum
+          if command -v sha256sum >/dev/null; then
+            echo "$MAGO_SHA256  $jar" | sha256sum -c -
+          else
+            echo "$MAGO_SHA256  $jar" | shasum -a 256 -c -
+          fi
       - name: Test
         run: cargo test --all --no-default-features --features ${{ matrix.features }}
+        env:
+          TILETOPIA_MAGO_JAR: ${{ runner.temp }}/mago-3d-tiler.jar
 
   deny:
     runs-on: ubuntu-latest

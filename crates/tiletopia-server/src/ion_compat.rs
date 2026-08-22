@@ -117,7 +117,7 @@ pub fn ion_compat_write_routes() -> Router<Arc<AppState>> {
 
 fn map_asset_type(asset_type: &AssetType) -> String {
     match asset_type {
-        AssetType::PointCloud | AssetType::Model => "3DTILES".to_string(),
+        AssetType::PointCloud | AssetType::Model | AssetType::Vector => "3DTILES".to_string(),
         AssetType::Terrain => "TERRAIN".to_string(),
         AssetType::Imagery => "IMAGERY".to_string(),
     }
