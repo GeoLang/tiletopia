@@ -253,7 +253,8 @@ fn tiler_for(extension: &str, external_tiler_jar_configured: bool) -> Result<Til
         "gltf" => Ok(mesh("gltf", false)),
         "glb" => Ok(mesh("glb", false)),
         "obj" => Ok(mesh("obj", false)),
-        "fbx" => Ok(mesh("fbx", true)),
+        // fbx defaults to y up, a file's GlobalSettings UpAxis is not read
+        "fbx" => Ok(mesh("fbx", false)),
         "gml" => Ok(mesh("citygml", true)),
         "geojson" => Ok(Tiler::External("geojson")),
         "gpkg" => Ok(Tiler::External("gpkg")),
@@ -526,7 +527,7 @@ mod tests {
         assert_eq!(without_jar("gltf"), Y_UP);
         assert_eq!(without_jar("glb"), Y_UP);
         assert_eq!(without_jar("obj"), Y_UP);
-        assert_eq!(without_jar("fbx"), Z_UP);
+        assert_eq!(without_jar("fbx"), Y_UP);
         assert_eq!(without_jar("gml"), Z_UP);
         assert_eq!(without_jar("geojson"), Tiler::External("geojson"));
         assert_eq!(without_jar("gpkg"), Tiler::External("gpkg"));
