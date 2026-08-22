@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 2026-08-22
 
+### Removed
+
+- The unused readers in `tiletopia-ingest`: photogrammetry (SfM), imagery
+  tiling, the BIM reader, and the GeoJSON, Shapefile, KML and GeoPackage
+  vector readers, along with `read_vector`, `VectorFeature` and
+  `VectorGeometry`. Nothing in the workspace called any of them.
+- The dependencies no remaining ingest file imports: `rayon`, `memmap2`,
+  `serde`, `geojson`, `shapefile`, `geo-types`, `rusqlite` and `image`. The
+  `geojson`, `shapefile` and `rusqlite` entries also leave
+  `[workspace.dependencies]`, as no other crate used them.
+
+### Changed
+
+- glTF, glb, OBJ, FBX and CityGML uploads go to mago-3d-tiler when
+  `TILETOPIA_MAGO_JAR` is set and to this repository's own mesh tiler
+  otherwise, so the mesh readers have a caller without a jar installed. The
+  native path drops textures and materials, since the readers carry positions,
+  normals and indices only, and places the tileset from the upload's
+  `longitude` and `latitude`. A mesh with neither a placement nor a jar fails
+  naming both. GeoJSON, GeoPackage and KML stay mago only and still fail
+  naming the variable. IFC stays native and still falls back to its `IfcSite`
+  coordinates.
+- `tiler_for` takes whether a jar is configured and returns the tiler it
+  picked, so one table decides the routing and whether the source is z-up.
+
+## [Unreleased] - 2026-08-22
+
 ### Added
 
 - IFC uploads are tiled to 3D Tiles by this repository's own IFC reader and

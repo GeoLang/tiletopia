@@ -91,15 +91,18 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <li>Parallel tiling (Rayon)</li>
 <li>Optional GPU via wgpu</li>
 <li>Draco/meshopt compression</li>
-<li>Meshes and vector files tiled by mago-3d-tiler (MPL-2.0), bundled in the image</li>
-<li>IFC read and tiled natively, placed from the upload's longitude and latitude or the IfcSite coordinates. DAE fails with an error naming the format</li>
+<li>Meshes tiled by mago-3d-tiler (MPL-2.0), bundled in the image, when TILETOPIA_MAGO_JAR is set</li>
+<li>Without the jar meshes go to the native mesh tiler, which drops textures and materials and places the model from the upload's longitude and latitude</li>
+<li>Vector files tiled by mago-3d-tiler only</li>
+<li>IFC always read and tiled natively, placed from the upload's longitude and latitude or the IfcSite coordinates. DAE fails with an error naming the format</li>
 </ul>
 </div>
 <div class="card">
 <h3>Input Formats</h3>
 <ul>
 <li>LAS, LAZ, E57, PLY: the native tiler</li>
-<li>glTF, GLB, OBJ, FBX, GeoJSON, GeoPackage, KML, CityGML: mago-3d-tiler, with optional longitude, latitude and crs upload fields</li>
+<li>glTF, GLB, OBJ, FBX, CityGML: mago-3d-tiler when TILETOPIA_MAGO_JAR is set, the native mesh tiler otherwise, placed by the upload's longitude and latitude and without textures or materials</li>
+<li>GeoJSON, GeoPackage, KML: mago-3d-tiler only, with optional longitude, latitude and crs upload fields</li>
 <li>IFC: the native mesh tiler, placed by the upload's longitude and latitude or the IfcSite coordinates. crs is ignored</li>
 <li>DAE uploads but fails: neither tiler takes it. Any other extension answers 400</li>
 </ul>
@@ -162,7 +165,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <section id="comparison">
 <div class="container">
 <h2>GeoLang vs The Industry</h2>
-<p style="color:var(--muted);margin-bottom:20px">What this server actually does. BIM tiling, STAC, webhooks, scheduling, kriging and indoor mapping have mounted routes. They do not work, so they are not in the table.</p>
+<p style="color:var(--muted);margin-bottom:20px">What this server actually does. STAC, webhooks, scheduling, kriging and indoor mapping have mounted routes. They do not work, so they are not in the table.</p>
 <div style="overflow-x:auto">
 <table>
 <thead>
@@ -190,7 +193,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <li>Ion is cloud-only 3D Tiles hosting</li>
 <li>This binary runs on your machine, AGPL-3.0</li>
 <li>Point-cloud tiles and quantized-mesh terrain</li>
-<li>Mesh and BIM tiling are not on the job queue</li>
+<li>Mesh, IFC and vector tiling are on the job queue</li>
 </ul>
 </div>
 <div class="card">
@@ -229,7 +232,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 │   ├── tiletopia-core/       # Octree tiling engine, LOD, .pnts writer
 │   ├── tiletopia-server/     # Axum REST API, WebSocket, JWT auth
 │   ├── tiletopia-worker/     # Async tiling pipeline, job queue
-│   ├── tiletopia-ingest/     # LAS, GeoTIFF, glTF readers
+│   ├── tiletopia-ingest/     # Point cloud, DEM and mesh readers
 │   ├── tiletopia-terrain/    # Quantized mesh terrain generation
 │   ├── tiletopia-store/      # Storage: local + S3 + GCS + Azure
 │   └── tiletopia-cli/        # CLI binary (tile / serve / info)

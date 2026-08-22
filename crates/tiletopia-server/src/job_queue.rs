@@ -15,6 +15,10 @@ const TILES_VERSION: &str = "1.1";
 /// How much of the external tiler's stderr a failed job reports.
 const STDERR_LINES_IN_ERROR: usize = 20;
 
+/// What a native mesh job says when nothing tells it where the model sits.
+const NO_PLACEMENT_ERROR: &str = "the native mesh tiler has no coordinates for this model: \
+     upload it with longitude and latitude, or set TILETOPIA_MAGO_JAR to tile it with mago";
+
 pub struct JobQueue {
     db: Arc<Database>,
     data_dir: PathBuf,
@@ -188,8 +192,10 @@ fn tile(
                 .and_then(|e| e.to_str())
                 .unwrap_or_default()
                 .to_lowercase();
-            match tiler_for(&extension)? {
-                Tiler::Native => tile_ifc(input_path, asset_dir, placement),
+            match tiler_for(&extension, external_tiler_jar.is_some())? {
+                Tiler::Native { source_is_z_up } => {
+                    tile_native(input_path, asset_dir, &extension, source_is_z_up, placement)
+                }
                 Tiler::External(input_type) => {
                     run_external_tiler(asset_dir, input_type, placement, external_tiler_jar)
                 }
@@ -219,46 +225,61 @@ fn tile_point_cloud(input_path: &Path, asset_dir: &Path) -> Result<u64, String> 
     Ok(stats.total_nodes as u64)
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum Tiler {
-    /// This repository's own readers and mesh tiler.
-    Native,
+    /// This repository's own readers and mesh tiler. `source_is_z_up` says the
+    /// format's own coordinates are z-up, so the written glTF gets rotated.
+    Native { source_is_z_up: bool },
     /// mago-3d-tiler, carrying the `-it` value for the format.
     External(&'static str),
 }
 
-/// Which tiler takes this file extension. Both `gltf` and `glb` are accepted
-/// for either glTF spelling, so the extension goes through as it is.
-fn tiler_for(extension: &str) -> Result<Tiler, String> {
+/// Which tiler takes this file extension. Mesh formats go to mago when a jar is
+/// configured and to the native mesh tiler otherwise. Vector formats are mago
+/// only, and an IFC is always native. Both `gltf` and `glb` are accepted for
+/// either glTF spelling, so the extension goes through as it is.
+fn tiler_for(extension: &str, external_tiler_jar_configured: bool) -> Result<Tiler, String> {
+    let mesh = |input_type: &'static str, source_is_z_up: bool| {
+        if external_tiler_jar_configured {
+            Tiler::External(input_type)
+        } else {
+            Tiler::Native { source_is_z_up }
+        }
+    };
     match extension {
-        "ifc" => Ok(Tiler::Native),
-        "gltf" => Ok(Tiler::External("gltf")),
-        "glb" => Ok(Tiler::External("glb")),
-        "obj" => Ok(Tiler::External("obj")),
-        "fbx" => Ok(Tiler::External("fbx")),
+        "ifc" => Ok(Tiler::Native {
+            source_is_z_up: true,
+        }),
+        "gltf" => Ok(mesh("gltf", false)),
+        "glb" => Ok(mesh("glb", false)),
+        "obj" => Ok(mesh("obj", false)),
+        "fbx" => Ok(mesh("fbx", true)),
+        "gml" => Ok(mesh("citygml", true)),
         "geojson" => Ok(Tiler::External("geojson")),
         "gpkg" => Ok(Tiler::External("gpkg")),
         "kml" => Ok(Tiler::External("kml")),
-        "gml" => Ok(Tiler::External("citygml")),
         other => Err(format!(
             "{other}: neither the native tiler nor the external one takes this format"
         )),
     }
 }
 
-/// Tile an IFC with this repository's own reader and mesh tiler. The upload's
-/// `crs` is ignored here: the IFC's own coordinates are metres, placed by
-/// longitude and latitude alone.
-fn tile_ifc(
+/// Tile a mesh with this repository's own readers and mesh tiler. Textures and
+/// materials are dropped: the readers carry positions, normals and indices only.
+/// The upload's `crs` is ignored here: the source coordinates are metres, placed
+/// by longitude and latitude alone.
+fn tile_native(
     input_path: &Path,
     asset_dir: &Path,
+    extension: &str,
+    source_is_z_up: bool,
     placement: &ModelPlacement,
 ) -> Result<u64, String> {
-    let (longitude, latitude, height) = ifc_origin(input_path, placement)?;
+    let (longitude, latitude, height) = mesh_origin(input_path, extension, placement)?;
 
     let read = tiletopia_ingest::read_mesh(input_path).map_err(|e| e.to_string())?;
     if read.is_empty() {
-        return Err("the IFC holds no geometry".to_string());
+        return Err(format!("the {extension} holds no geometry"));
     }
 
     let meshes: Vec<tiletopia_core::mesh_tiler::MeshData> = read
@@ -271,15 +292,15 @@ fn tile_ifc(
         })
         .collect();
 
-    // the IFC's own coordinates are z-up, and the tileset's frame is the ENU
-    // one the root transform names, so only the written glTF is rotated
+    // the tileset's frame is the ENU one the root transform names, so a z-up
+    // source rotates the written glTF only
     let config = tiletopia_core::mesh_tiler::MeshTilingConfig {
         root_transform: Some(tiletopia_core::spatial::enu_to_ecef_matrix(
             latitude.to_radians(),
             longitude.to_radians(),
             height,
         )),
-        content_y_up: true,
+        content_y_up: source_is_z_up,
         ..Default::default()
     };
     let stats = tiletopia_core::mesh_tiler::tile_meshes(&meshes, asset_dir, &config)
@@ -287,11 +308,20 @@ fn tile_ifc(
     Ok(stats.tile_count as u64)
 }
 
-/// Longitude, latitude and height the IFC's local coordinates sit at. The
-/// upload's placement wins, at height 0, and the IfcSite answers otherwise.
-fn ifc_origin(input_path: &Path, placement: &ModelPlacement) -> Result<(f64, f64, f64), String> {
+/// Longitude, latitude and height the mesh's local coordinates sit at. The
+/// upload's placement wins, at height 0, and an IFC's own site answers otherwise.
+fn mesh_origin(
+    input_path: &Path,
+    extension: &str,
+    placement: &ModelPlacement,
+) -> Result<(f64, f64, f64), String> {
     if let (Some(longitude), Some(latitude)) = (placement.longitude, placement.latitude) {
         return Ok((longitude, latitude, 0.0));
+    }
+
+    // an IFC is always tiled natively, so the jar is no answer for one
+    if extension != "ifc" {
+        return Err(NO_PLACEMENT_ERROR.to_string());
     }
 
     let site = tiletopia_ingest::ifc_reader::site_placement(input_path)
@@ -466,15 +496,52 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ifc_goes_to_the_native_tiler_and_dae_to_neither() {
-        assert!(matches!(tiler_for("ifc"), Ok(Tiler::Native)));
-        assert!(matches!(tiler_for("obj"), Ok(Tiler::External("obj"))));
-        assert!(matches!(tiler_for("gml"), Ok(Tiler::External("citygml"))));
+    const Z_UP: Tiler = Tiler::Native {
+        source_is_z_up: true,
+    };
+    const Y_UP: Tiler = Tiler::Native {
+        source_is_z_up: false,
+    };
 
-        let error = tiler_for("dae").unwrap_err();
-        assert!(error.contains("dae"), "{error}");
-        assert!(error.contains("native tiler"), "{error}");
-        assert!(error.contains("external one"), "{error}");
+    #[test]
+    fn with_a_jar_meshes_and_vectors_both_go_to_mago() {
+        let with_jar = |extension| tiler_for(extension, true).unwrap();
+
+        assert_eq!(with_jar("ifc"), Z_UP);
+        assert_eq!(with_jar("gltf"), Tiler::External("gltf"));
+        assert_eq!(with_jar("glb"), Tiler::External("glb"));
+        assert_eq!(with_jar("obj"), Tiler::External("obj"));
+        assert_eq!(with_jar("fbx"), Tiler::External("fbx"));
+        assert_eq!(with_jar("gml"), Tiler::External("citygml"));
+        assert_eq!(with_jar("geojson"), Tiler::External("geojson"));
+        assert_eq!(with_jar("gpkg"), Tiler::External("gpkg"));
+        assert_eq!(with_jar("kml"), Tiler::External("kml"));
+    }
+
+    #[test]
+    fn without_a_jar_meshes_fall_back_to_the_native_tiler_and_vectors_do_not() {
+        let without_jar = |extension| tiler_for(extension, false).unwrap();
+
+        assert_eq!(without_jar("ifc"), Z_UP);
+        assert_eq!(without_jar("gltf"), Y_UP);
+        assert_eq!(without_jar("glb"), Y_UP);
+        assert_eq!(without_jar("obj"), Y_UP);
+        assert_eq!(without_jar("fbx"), Z_UP);
+        assert_eq!(without_jar("gml"), Z_UP);
+        assert_eq!(without_jar("geojson"), Tiler::External("geojson"));
+        assert_eq!(without_jar("gpkg"), Tiler::External("gpkg"));
+        assert_eq!(without_jar("kml"), Tiler::External("kml"));
+    }
+
+    #[test]
+    fn dae_and_txt_go_to_neither_tiler_with_or_without_a_jar() {
+        for jar_configured in [true, false] {
+            for extension in ["dae", "txt"] {
+                let error = tiler_for(extension, jar_configured).unwrap_err();
+                assert!(error.contains(extension), "{error}");
+                assert!(error.contains("native tiler"), "{error}");
+                assert!(error.contains("external one"), "{error}");
+            }
+        }
     }
 }

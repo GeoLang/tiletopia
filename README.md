@@ -20,7 +20,7 @@ Ingest point clouds, tile them into OGC 3D Tiles 1.1, and serve them with view-d
 - Optional GPU point-cloud decimation via wgpu (`--features gpu`)
 - Draco/meshopt compression for tile delivery
 
-The job queue tiles point clouds with the native tiler. Meshes (glTF, glb, OBJ, FBX) and vector files (GeoJSON, GeoPackage, KML, CityGML) go to [mago-3d-tiler](https://github.com/Gaia3D/mago-3d-tiler) (MPL-2.0), which the Docker image bundles with a JRE 21. `TILETOPIA_MAGO_JAR` points at the jar, and without it a mesh or vector job fails naming the variable. The jar ships natives for Linux and Windows x64 only, so on macOS those jobs fail inside mago. IFC goes to the native mesh tiler instead, reached by this repository's own IFC reader, and needs no jar. It is placed by the upload's `longitude` and `latitude`, or by the `IfcSite` reference coordinates when the upload leaves them out, and an IFC with neither fails rather than landing at the centre of the earth. `crs` is ignored on that path. DAE uploads still fail with an error naming the format: neither tiler takes it. An upload whose extension is not on the list answers 400.
+The job queue tiles point clouds with the native tiler. Meshes (glTF, glb, OBJ, FBX, CityGML) go to [mago-3d-tiler](https://github.com/Gaia3D/mago-3d-tiler) (MPL-2.0) when `TILETOPIA_MAGO_JAR` points at a jar, which the Docker image bundles with a JRE 21. Without the jar they go to this repository's own mesh tiler, which drops textures and materials and places the model by the upload's `longitude` and `latitude`, so a mesh upload with neither a placement nor a jar fails naming both. The jar ships natives for Linux and Windows x64 only, so on macOS the mago jobs fail inside mago. Vector files (GeoJSON, GeoPackage, KML) go to mago only, and without the jar they fail naming the variable. IFC always goes to the native mesh tiler and needs no jar. It is placed by the upload's `longitude` and `latitude`, or by the `IfcSite` reference coordinates when the upload leaves them out, and an IFC with neither fails rather than landing at the centre of the earth. `crs` is ignored on the native path. DAE uploads still fail with an error naming the format: neither tiler takes it. An upload whose extension is not on the list answers 400.
 
 A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields beside the file. Longitude and latitude place a model that has local coordinates, and one without the other is refused. The tiles land at `/api/v1/assets/{id}/tileset.json`, with content under `/api/v1/assets/{id}/data/{file}` from mago and `/api/v1/assets/{id}/tiles/{file}` from the native tiler.
 
@@ -396,7 +396,7 @@ What this server actually does, against Cesium Ion as a hosted 3D Tiles host.
 | 3D annotation layers | yes | no |
 | Local filesystem storage | yes | no |
 | Open source | AGPL-3.0 | proprietary |
-| 3D model / BIM / vector tiling | no (readers exist, the queue does not call them) | yes |
+| 3D model / BIM / vector tiling | yes | yes |
 | Temporal versioning, webhooks, scheduler | no | mixed |
 
 Price is not a capability. Ion is a hosted product. This is a binary you run.
@@ -409,10 +409,10 @@ Price is not a capability. Ion is a hosted product. This is a binary you run.
 cargo test
 ```
 
-746 tests (721 Rust + 25 GUI) on default features, counted per crate:
-- Core (112): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
-- Server (492): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine (module only, no route reaches it), audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing (module only, no route reaches it), retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
-- Ingest (72): LAS/LAZ, GeoTIFF, BIM/IFC readers, CRS detection, photogrammetry (SfM)
+739 tests (714 Rust + 25 GUI) on default features, counted per crate:
+- Core (115): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
+- Server (512): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine (module only, no route reaches it), audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing (module only, no route reaches it), retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
+- Ingest (42): LAS/LAZ, E57, PLY, GeoTIFF, DTED, HGT, USGS DEM, glTF, OBJ, FBX, CityGML, CityJSON and IFC readers, CRS detection
 - Terrain (28): quantized mesh generation, global DEM terrain
 - Store (12): local filesystem CRUD, path traversal
 - Worker (5): background job processing
@@ -420,7 +420,7 @@ cargo test
 GUI: `cd gui && pnpm run test:all` (10 vitest unit tests + 15 Playwright e2e).
 
 Feature-gated tests (`gpu`, `onnx`, `video`, `ml`, `martin`, `wasm-plugins`, cloud
-stores) are not in the 721 and need their feature enabled to run.
+stores) are not in the 714 and need their feature enabled to run.
 
 ---
 

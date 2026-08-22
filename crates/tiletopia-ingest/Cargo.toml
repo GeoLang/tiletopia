@@ -3,32 +3,24 @@ name = "tiletopia-ingest"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Format readers — LAS/LAZ, CityGML, GeoTIFF, glTF, OBJ, Shapefile"
+description = "Format readers: LAS/LAZ, E57, PLY, GeoTIFF, DTED, HGT, USGS DEM, glTF, OBJ, FBX, CityGML, CityJSON, IFC"
 
 [dependencies]
 tiletopia-core = { path = "../tiletopia-core", default-features = false }
 nubis-core = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-rayon = { workspace = true }
-memmap2 = { workspace = true }
 las = { workspace = true }
 tiff = { workspace = true }
 gltf = { workspace = true }
 e57 = { workspace = true }
 ply-rs = { workspace = true }
-geojson = { workspace = true }
-shapefile = { workspace = true }
-geo-types = { workspace = true }
 tobj = { workspace = true }
 quick-xml = { workspace = true }
-rusqlite = { workspace = true }
 fbxcel-dom = { workspace = true }
 ifc-lite-core = { workspace = true }
 ifc-lite-geometry = { workspace = true }
-image = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

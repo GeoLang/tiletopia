@@ -1,27 +1,20 @@
 //! tiletopia-ingest: geospatial format readers
 //!
-//! Parse point clouds (LAS/LAZ/E57/PLY), 3D models (glTF/OBJ/CityGML/IFC),
-//! terrain (GeoTIFF/DTED), and vector data (Shapefile/GeoJSON/KML).
+//! Parse point clouds (LAS/LAZ/E57/PLY), 3D models (glTF/OBJ/FBX/CityGML/CityJSON/IFC)
+//! and terrain (GeoTIFF/DTED/HGT/USGS DEM).
 
-pub mod bim_reader;
 pub mod citygml_reader;
 pub mod cityjson_reader;
 pub mod crs_detect;
 pub mod dted_reader;
 pub mod e57_reader;
 pub mod fbx_reader;
-pub mod geojson_reader;
 pub mod gltf_reader;
-pub mod gpkg_reader;
 pub mod hgt_reader;
 pub mod ifc_reader;
-pub mod imagery_tiler;
-pub mod kml_reader;
 pub mod las_reader;
 pub mod obj_reader;
-pub mod photogrammetry;
 pub mod ply_reader;
-pub mod shapefile_reader;
 pub mod tiff_reader;
 pub mod usgs_dem_reader;
 
@@ -102,24 +95,6 @@ pub fn ground_filter(points: &[Point3D], cell_size: f64, height_threshold: f64) 
     cloud.points().iter().map(Point3D::from_nubis).collect()
 }
 
-/// A vector feature with geometry and properties.
-#[derive(Debug, Clone)]
-pub struct VectorFeature {
-    pub geometry: VectorGeometry,
-    pub properties: std::collections::HashMap<String, String>,
-}
-
-/// Vector geometry types.
-#[derive(Debug, Clone)]
-pub enum VectorGeometry {
-    Point(f64, f64),
-    LineString(Vec<(f64, f64)>),
-    Polygon(Vec<Vec<(f64, f64)>>),
-    MultiPoint(Vec<(f64, f64)>),
-    MultiLineString(Vec<Vec<(f64, f64)>>),
-    MultiPolygon(Vec<Vec<Vec<(f64, f64)>>>),
-}
-
 /// Source data type.
 #[derive(Debug, Clone)]
 pub enum SourceData {
@@ -178,18 +153,6 @@ pub fn read_point_cloud_wgs84(path: &std::path::Path) -> Result<Vec<Point3D>, In
         }
     }
     Ok(points)
-}
-
-/// Read vector features from a GeoJSON, Shapefile, KML, or GeoPackage.
-pub fn read_vector(path: &std::path::Path) -> Result<Vec<VectorFeature>, IngestError> {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("geojson" | "json") => geojson_reader::read(path),
-        Some("shp") => shapefile_reader::read(path),
-        Some("kml") => kml_reader::read(path),
-        Some("gpkg") => gpkg_reader::read(path),
-        Some(ext) => Err(IngestError::UnsupportedFormat(ext.to_string())),
-        None => Err(IngestError::UnsupportedFormat("unknown".to_string())),
-    }
 }
 
 /// Read a heightmap from a GeoTIFF, DTED, or HGT file.

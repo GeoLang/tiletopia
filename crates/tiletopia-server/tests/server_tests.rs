@@ -3266,6 +3266,9 @@ end_header\n0.0 0.0 0.0 255 0 0\n1.0 0.0 0.0 0 255 0\n0.0 1.0 0.0 0 0 255\n\
 v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\n\
 f 1 2 3 4\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
 
+    const POINT_GEOJSON: &str = r#"{"type":"FeatureCollection","features":[
+{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[10,20]}}]}"#;
+
     /// Multipart upload of `contents` under `filename`, with any extra text
     /// fields the upload takes beside the file.
     async fn upload_with_fields(
@@ -3419,10 +3422,11 @@ f 1 2 3 4\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
         assert_eq!(&tile[..4], b"glTF", "tile content is not a glb");
     }
 
-    /// With no jar configured the job fails naming the variable, rather than
-    /// leaving the asset at Uploading forever.
+    /// A vector upload has no native tiler behind it, so with no jar configured
+    /// the job fails naming the variable rather than leaving the asset at
+    /// Uploading forever.
     #[tokio::test]
-    async fn a_model_upload_without_the_jar_fails_naming_the_variable() {
+    async fn a_vector_upload_without_the_jar_fails_naming_the_variable() {
         use tiletopia_server::AssetStatus;
         use tiletopia_server::db::JobStatus;
 
@@ -3432,8 +3436,8 @@ f 1 2 3 4\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
         let (status, body) = upload_with_fields(
             &state,
             &token,
-            "cube.obj",
-            CUBE_OBJ,
+            "places.geojson",
+            POINT_GEOJSON,
             &[("longitude", "10"), ("latitude", "20"), ("crs", "3857")],
         )
         .await;
@@ -3454,7 +3458,7 @@ f 1 2 3 4\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
         );
     }
 
-    // -- the native IFC tiler --
+    // -- the native mesh tiler --
 
     /// One extruded wall, no site coordinates.
     const WALL_IFC: &str = "\
@@ -3644,6 +3648,81 @@ END-ISO-10303-21;
                 12.5,
             ),
         );
+    }
+
+    /// With no jar configured an OBJ falls back to the native mesh tiler and
+    /// lands where the upload's longitude and latitude say.
+    #[tokio::test]
+    async fn obj_upload_without_the_jar_is_tiled_natively() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "native-obj-editor@example.com").await;
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "cube.obj",
+            CUBE_OBJ,
+            &[("longitude", "10"), ("latitude", "20")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(
+            settled.status,
+            JobStatus::Done,
+            "error: {:?}",
+            settled.error
+        );
+        assert!(settled.tiles_written > 0, "no tiles were counted");
+
+        let (status, body) = get_with_token(
+            &state,
+            &format!("/api/v1/assets/{asset_id}/tileset.json"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tileset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_within_a_metre(
+            root_translation(&tileset),
+            tiletopia_core::spatial::geodetic_to_ecef(20f64.to_radians(), 10f64.to_radians(), 0.0),
+        );
+
+        let (status, tile) = get_with_token(
+            &state,
+            &format!("/api/v1/assets/{asset_id}/tiles/root.glb"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&tile[..4], b"glTF", "tile content is not a glb");
+    }
+
+    /// An OBJ carries no coordinates of its own, so with neither an upload
+    /// placement nor a jar the job fails naming both ways out.
+    #[tokio::test]
+    async fn an_obj_with_no_placement_and_no_jar_fails_naming_both_options() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "native-obj-nocoords@example.com").await;
+
+        let (status, body) = upload_with_fields(&state, &token, "cube.obj", CUBE_OBJ, &[]).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(settled.status, JobStatus::Failed);
+        let error = settled.error.expect("a failed job says why");
+        assert!(error.contains("longitude and latitude"), "{error}");
+        assert!(error.contains(MAGO_JAR_VAR), "{error}");
     }
 
     /// DAE has no reader here and no mago input type, so it still fails naming
