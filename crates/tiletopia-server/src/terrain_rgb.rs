@@ -9,7 +9,7 @@ use axum::{
     Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::get,
 };
 use std::sync::Arc;
@@ -17,6 +17,7 @@ use tiletopia_terrain::global_dem::{DemTile, sample_dem_tiles};
 use tiletopia_terrain::mercator::MercatorTileCoord;
 
 use crate::AppState;
+use crate::terrain_api::Refusal;
 
 /// Tile edge in pixels, the raster-DEM standard.
 const TILE_PX: u32 = 256;
@@ -33,7 +34,7 @@ pub fn terrain_rgb_routes() -> Router<Arc<AppState>> {
 async fn serve_terrain_rgb(
     State(state): State<Arc<AppState>>,
     Path((z, x, y)): Path<(u32, u32, String)>,
-) -> Result<impl IntoResponse, Response> {
+) -> Result<impl IntoResponse, Refusal> {
     let coord = parse_rgb_coord(z, x, &y).ok_or_else(|| StatusCode::BAD_REQUEST.into_response())?;
     let dem_tiles = crate::terrain_api::dem_tiles_for_bounds(&state, coord.bounds())
         .await

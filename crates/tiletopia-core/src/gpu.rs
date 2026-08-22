@@ -181,8 +181,10 @@ impl GpuContext {
         rx.recv().unwrap().unwrap();
         let data = slice.get_mapped_range();
         let result: Vec<u32> = data
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect();
         drop(data);
         staging_buffer.unmap();

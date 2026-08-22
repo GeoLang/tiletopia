@@ -56,6 +56,7 @@ use tokio::time::timeout;
 use crate::AppState;
 use crate::analysis;
 use crate::elevation::{self, DemStore};
+use crate::terrain_api::Refusal;
 
 /// Zooms past this are refused: the tile maths shifts by `z`, and no viewer
 /// asks for more than sub-metre pixels anyway.
@@ -578,7 +579,7 @@ async fn analysis_export(
     State(state): State<Arc<AppState>>,
     Path(op): Path<String>,
     Query(params): Query<ExportParams>,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     let op = Op::parse(&op).ok_or_else(|| {
         bad_request(format!(
             "unknown op {op:?}, expected hillshade, slope or ndvi"
@@ -599,7 +600,8 @@ async fn analysis_export(
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "1")],
         )
-            .into_response());
+            .into_response()
+            .into());
     };
 
     let (engine, node) = state

@@ -103,7 +103,7 @@ fn full_availability(max_zoom: u32) -> Vec<Vec<AvailableRange>> {
 async fn serve_terrain_tile(
     State(state): State<Arc<AppState>>,
     Path((z, x, y)): Path<(u32, u32, String)>,
-) -> Result<impl IntoResponse, Response> {
+) -> Result<impl IntoResponse, Refusal> {
     let coord =
         parse_tile_coord(z, x, &y).ok_or_else(|| StatusCode::BAD_REQUEST.into_response())?;
     let dem_tiles = dem_tiles_for_bounds(&state, coord.bounds())
@@ -185,6 +185,21 @@ pub(crate) async fn dem_tiles_for_bounds(
 }
 
 /// Refuse a terrain tile whose DEM could not be read.
+/// a handler's early exit, boxed so the err arm stays small enough for clippy
+pub(crate) struct Refusal(Box<Response>);
+
+impl From<Response> for Refusal {
+    fn from(response: Response) -> Self {
+        Refusal(Box::new(response))
+    }
+}
+
+impl IntoResponse for Refusal {
+    fn into_response(self) -> Response {
+        *self.0
+    }
+}
+
 pub(crate) fn dem_unavailable(reason: String) -> Response {
     tracing::warn!("terrain tile refused: {reason}");
     (StatusCode::SERVICE_UNAVAILABLE, reason).into_response()
@@ -259,8 +274,10 @@ fn load_dem_tile_from_file(path: &std::path::Path, lat: i32, lon: i32) -> std::i
     let samples = ((data.len() / 4) as f64).sqrt() as u32;
 
     let elevations: Vec<f32> = data
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect();
 
     DemTile::from_south_up(lat, lon, elevations, samples, -9999.0).ok_or_else(|| {

@@ -184,7 +184,7 @@ fn build_recursive(
     let mut left_idx = Vec::new();
     let mut right_idx = Vec::new();
 
-    for tri in indices.chunks_exact(3) {
+    for tri in indices.as_chunks::<3>().0 {
         let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
         let centroid = (positions[i0][axis] + positions[i1][axis] + positions[i2][axis]) / 3.0;
         if (centroid as f64) < split {

@@ -215,7 +215,9 @@ pub fn encode_frames_to_video(
     for (i, rgba_data) in frames.iter().enumerate() {
         // Convert RGBA to RGB
         let rgb_data: Vec<u8> = rgba_data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|pixel| &pixel[..3])
             .copied()
             .collect();
