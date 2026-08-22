@@ -3454,21 +3454,145 @@ f 1 2 3 4\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
         );
     }
 
-    /// IFC is a Model extension the external tiler has no input type for. The
-    /// format check runs before the jar lookup, so this fails the same way with
-    /// or without a jar.
+    // -- the native IFC tiler --
+
+    /// One extruded wall, no site coordinates.
+    const WALL_IFC: &str = "\
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('ViewDefinition [CoordinationView]'),'2;1');
+FILE_NAME('extrusion.ifc','2024-01-01',(''),(''),'','','');
+FILE_SCHEMA(('IFC2X3'));
+ENDSEC;
+DATA;
+#1=IFCPROJECT('0001',$,'TestProject',$,$,$,$,$,$);
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCLOCALPLACEMENT($,#11);
+#20=IFCRECTANGLEPROFILEDEF(.AREA.,$,#11,2.0,1.0);
+#21=IFCDIRECTION((0.,0.,1.));
+#22=IFCEXTRUDEDAREASOLID(#20,#11,#21,3.0);
+#30=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#22));
+#31=IFCPRODUCTDEFINITIONSHAPE($,$,(#30));
+#40=IFCWALL('0002',$,'TestWall',$,$,#12,#31,$);
+ENDSEC;
+END-ISO-10303-21;
+";
+
+    /// The same wall under a site at 51°30'N, 0°7'40\"W, 12.5 m up.
+    const WALL_ON_A_SITE_IFC: &str = "\
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('ViewDefinition [CoordinationView]'),'2;1');
+FILE_NAME('site.ifc','2024-01-01',(''),(''),'','','');
+FILE_SCHEMA(('IFC2X3'));
+ENDSEC;
+DATA;
+#1=IFCPROJECT('0001',$,'TestProject',$,$,$,$,$,$);
+#2=IFCSITE('0003',$,'TestSite',$,$,$,$,$,.ELEMENT.,(51,30,0),(-0,-7,-40),12.5,$,$);
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCLOCALPLACEMENT($,#11);
+#20=IFCRECTANGLEPROFILEDEF(.AREA.,$,#11,2.0,1.0);
+#21=IFCDIRECTION((0.,0.,1.));
+#22=IFCEXTRUDEDAREASOLID(#20,#11,#21,3.0);
+#30=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#22));
+#31=IFCPRODUCTDEFINITIONSHAPE($,$,(#30));
+#40=IFCWALL('0002',$,'TestWall',$,$,#12,#31,$);
+ENDSEC;
+END-ISO-10303-21;
+";
+
+    /// How far the tileset's root transform may sit from the expected origin.
+    const ORIGIN_TOLERANCE_METRES: f64 = 1.0;
+
+    /// The root tile's translation, read out of a served tileset.json.
+    fn root_translation(tileset: &serde_json::Value) -> [f64; 3] {
+        let transform = tileset["root"]["transform"]
+            .as_array()
+            .expect("the root tile carries a transform");
+        assert_eq!(transform.len(), 16, "{transform:?}");
+        [
+            transform[12].as_f64().unwrap(),
+            transform[13].as_f64().unwrap(),
+            transform[14].as_f64().unwrap(),
+        ]
+    }
+
+    fn assert_within_a_metre(written: [f64; 3], expected: [f64; 3]) {
+        for axis in 0..3 {
+            assert!(
+                (written[axis] - expected[axis]).abs() < ORIGIN_TOLERANCE_METRES,
+                "axis {axis}: {written:?} is not {expected:?}"
+            );
+        }
+    }
+
+    /// An IFC upload is read and tiled by this repository, with no jar in
+    /// sight, and lands where the upload's longitude and latitude say.
     #[tokio::test]
-    async fn an_ifc_upload_fails_as_a_format_the_external_tiler_refuses() {
+    async fn ifc_upload_is_tiled_natively_and_placed_from_the_upload() {
         use tiletopia_server::db::JobStatus;
 
-        let jar = std::env::var(MAGO_JAR_VAR)
-            .ok()
-            .map(std::path::PathBuf::from);
-        let state = state_with_external_tiler(jar).await;
-        let token = bootstrap_editor(&state, "mago-ifc-editor@example.com").await;
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "native-ifc-editor@example.com").await;
 
-        let (status, body) =
-            upload_with_fields(&state, &token, "thing.ifc", "not really ifc", &[]).await;
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "wall.ifc",
+            WALL_IFC,
+            &[("longitude", "10"), ("latitude", "20")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(
+            settled.status,
+            JobStatus::Done,
+            "error: {:?}",
+            settled.error
+        );
+        assert!(settled.tiles_written > 0, "no tiles were counted");
+
+        let (status, body) = get_with_token(
+            &state,
+            &format!("/api/v1/assets/{asset_id}/tileset.json"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tileset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(tileset["asset"]["version"], "1.1");
+
+        assert_within_a_metre(
+            root_translation(&tileset),
+            tiletopia_core::spatial::geodetic_to_ecef(20f64.to_radians(), 10f64.to_radians(), 0.0),
+        );
+
+        let (status, tile) = get_with_token(
+            &state,
+            &format!("/api/v1/assets/{asset_id}/tiles/root.glb"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&tile[..4], b"glTF", "tile content is not a glb");
+    }
+
+    /// A model at the ECEF origin is not a success, so an IFC with neither an
+    /// upload placement nor site coordinates fails saying what to send.
+    #[tokio::test]
+    async fn an_ifc_with_no_coordinates_anywhere_fails() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "native-ifc-nocoords@example.com").await;
+
+        let (status, body) = upload_with_fields(&state, &token, "wall.ifc", WALL_IFC, &[]).await;
         assert_eq!(status, StatusCode::CREATED);
         let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
@@ -3476,8 +3600,76 @@ f 1 2 3 4\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
         let settled = settle_only_job(&state, asset_id).await;
         assert_eq!(settled.status, JobStatus::Failed);
         let error = settled.error.expect("a failed job says why");
-        assert!(error.contains("ifc"), "{error}");
-        assert!(error.contains("external tiler"), "{error}");
+        assert!(error.contains("no site coordinates"), "{error}");
+        assert!(error.contains("longitude and latitude"), "{error}");
+    }
+
+    /// With nothing on the upload the IfcSite's reference coordinates place it.
+    #[tokio::test]
+    async fn an_ifc_without_an_upload_placement_falls_back_to_its_site() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "native-ifc-site@example.com").await;
+
+        let (status, body) =
+            upload_with_fields(&state, &token, "site.ifc", WALL_ON_A_SITE_IFC, &[]).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(
+            settled.status,
+            JobStatus::Done,
+            "error: {:?}",
+            settled.error
+        );
+
+        let (status, body) = get_with_token(
+            &state,
+            &format!("/api/v1/assets/{asset_id}/tileset.json"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tileset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let longitude: f64 = -(7.0 / 60.0 + 40.0 / 3600.0);
+        assert_within_a_metre(
+            root_translation(&tileset),
+            tiletopia_core::spatial::geodetic_to_ecef(
+                51.5f64.to_radians(),
+                longitude.to_radians(),
+                12.5,
+            ),
+        );
+    }
+
+    /// DAE has no reader here and no mago input type, so it still fails naming
+    /// the format. The check runs before the jar lookup.
+    #[tokio::test]
+    async fn a_dae_upload_fails_naming_the_format() {
+        use tiletopia_server::db::JobStatus;
+
+        let jar = std::env::var(MAGO_JAR_VAR)
+            .ok()
+            .map(std::path::PathBuf::from);
+        let state = state_with_external_tiler(jar).await;
+        let token = bootstrap_editor(&state, "dae-editor@example.com").await;
+
+        let (status, body) =
+            upload_with_fields(&state, &token, "model.dae", "not really collada", &[]).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(settled.status, JobStatus::Failed);
+        let error = settled.error.expect("a failed job says why");
+        assert!(error.contains("dae"), "{error}");
+        assert!(error.contains("native tiler"), "{error}");
+        assert!(error.contains("external one"), "{error}");
     }
 
     /// The catch-all that used to call every unknown extension a point cloud is

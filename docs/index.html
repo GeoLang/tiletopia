@@ -91,7 +91,8 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <li>Parallel tiling (Rayon)</li>
 <li>Optional GPU via wgpu</li>
 <li>Draco/meshopt compression</li>
-<li>Meshes and vector files tiled by mago-3d-tiler (MPL-2.0), bundled in the image. IFC and DAE fail with an error naming the format</li>
+<li>Meshes and vector files tiled by mago-3d-tiler (MPL-2.0), bundled in the image</li>
+<li>IFC read and tiled natively, placed from the upload's longitude and latitude or the IfcSite coordinates. DAE fails with an error naming the format</li>
 </ul>
 </div>
 <div class="card">
@@ -99,7 +100,8 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <ul>
 <li>LAS, LAZ, E57, PLY: the native tiler</li>
 <li>glTF, GLB, OBJ, FBX, GeoJSON, GeoPackage, KML, CityGML: mago-3d-tiler, with optional longitude, latitude and crs upload fields</li>
-<li>IFC and DAE upload but fail: no external tiler input type. Any other extension answers 400</li>
+<li>IFC: the native mesh tiler, placed by the upload's longitude and latitude or the IfcSite coordinates. crs is ignored</li>
+<li>DAE uploads but fails: neither tiler takes it. Any other extension answers 400</li>
 </ul>
 </div>
 <div class="card">

@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- IFC uploads are tiled to 3D Tiles by this repository's own IFC reader and
+  mesh tiler, with no external tiler involved. The job places the tileset with
+  a root `transform` built from the upload's `longitude` and `latitude`, or
+  from the `IfcSite` reference latitude, longitude and elevation when the
+  upload leaves them out. An IFC with neither fails rather than landing at the
+  centre of the earth, and one that yields no geometry fails saying so. `crs`
+  is ignored on this path.
+- `MeshTilingConfig::root_transform` writes a `transform` on the tileset's root
+  tile. Absent by default, so existing mesh callers are unchanged.
+
+### Changed
+
+- The IFC reader asks ifc-lite whether an entity class carries geometry instead
+  of matching a hardcoded type list, so `IfcProduct` subtypes the list never
+  named, such as `IfcSanitaryTerminal`, now reach the tileset.
+- `MeshTilingConfig::content_y_up` rotates z-up input into the y-up glTF tile
+  content 3D Tiles expects, which the runtime rotates back by π/2 about x.
+  Only the written glTF turns: the bounding volumes stay in the z-up frame the
+  tile transform names. The native IFC path sets it, other callers do not.
+- A Model or Vector upload whose extension has no tiler behind it, DAE being
+  the only one left, fails saying that neither the native tiler nor the
+  external one takes the format.
+
+## [Unreleased] - 2026-08-22
+
+### Added
+
 - Mesh and vector uploads are tiled to 3D Tiles by mago-3d-tiler, called from
   the tiling job queue. glTF, glb, OBJ, FBX, GeoJSON, GeoPackage, KML and
   CityGML all queue a job on upload, beside point clouds, which keep the native

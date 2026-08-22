@@ -1,30 +1,50 @@
 //! IFC geometry reader.
 
 use crate::{IngestError, MeshData};
-use ifc_lite_core::{EntityDecoder, EntityScanner, IfcSchema, build_entity_index};
+use ifc_lite_core::{
+    AttributeValue, EntityDecoder, EntityScanner, build_entity_index, has_geometry_by_name,
+};
 use ifc_lite_geometry::GeometryRouter;
 use std::path::Path;
+
+/// 0-based attribute positions on IFCSITE.
+const REF_LATITUDE_INDEX: usize = 9;
+const REF_LONGITUDE_INDEX: usize = 10;
+const REF_ELEVATION_INDEX: usize = 11;
+
+const MINUTES_PER_DEGREE: f64 = 60.0;
+const SECONDS_PER_DEGREE: f64 = 3600.0;
+const MILLIONTHS_PER_SECOND: f64 = 1_000_000.0;
+
+/// Where an IfcSite says the model sits, in degrees and metres.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SitePlacement {
+    pub longitude: f64,
+    pub latitude: f64,
+    pub elevation: f64,
+}
 
 /// Read meshes from an IFC file.
 pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
     let content = std::fs::read_to_string(path)?;
     let index = build_entity_index(&content);
     let mut decoder = EntityDecoder::with_index(&content, index);
-    let schema = IfcSchema::new();
     let router = GeometryRouter::with_units(&content, &mut decoder);
 
     let mut meshes = Vec::new();
     let mut scanner = EntityScanner::new(&content);
 
-    while let Some((id, _type_name, _start, _end)) = scanner.next_entity() {
+    // has_geometry_by_name follows the EXPRESS inheritance graph, so an
+    // IfcProduct subtype no hardcoded list names still reaches the router
+    while let Some((id, type_name, _start, _end)) = scanner.next_entity() {
+        if !has_geometry_by_name(type_name) {
+            continue;
+        }
+
         let entity = match decoder.decode_by_id(id) {
             Ok(e) => e,
             Err(_) => continue,
         };
-
-        if !schema.has_geometry(&entity.ifc_type) {
-            continue;
-        }
 
         let ifc_mesh = match router.process_element(&entity, &mut decoder) {
             Ok(m) if !m.is_empty() => m,
@@ -73,6 +93,61 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
     Ok(meshes)
 }
 
+/// Read the first IfcSite's reference latitude, longitude and elevation.
+/// None when the file has no site, or the site leaves the coordinates unset.
+pub fn site_placement(path: &Path) -> Result<Option<SitePlacement>, IngestError> {
+    let content = std::fs::read_to_string(path)?;
+    let index = build_entity_index(&content);
+    let mut decoder = EntityDecoder::with_index(&content, index);
+    let mut scanner = EntityScanner::new(&content);
+
+    while let Some((id, type_name, _start, _end)) = scanner.next_entity() {
+        if !type_name.eq_ignore_ascii_case("IFCSITE") {
+            continue;
+        }
+        let Ok(site) = decoder.decode_by_id(id) else {
+            continue;
+        };
+        let latitude = site.get_list(REF_LATITUDE_INDEX).and_then(plane_angle);
+        let longitude = site.get_list(REF_LONGITUDE_INDEX).and_then(plane_angle);
+        let (Some(latitude), Some(longitude)) = (latitude, longitude) else {
+            continue;
+        };
+        return Ok(Some(SitePlacement {
+            longitude,
+            latitude,
+            elevation: site.get_float(REF_ELEVATION_INDEX).unwrap_or(0.0),
+        }));
+    }
+
+    Ok(None)
+}
+
+/// Degrees from an IfcCompoundPlaneAngleMeasure: degrees, minutes, seconds and
+/// optionally millionths of a second. IFC carries one sign across the whole
+/// measure, so the first nonzero component sets it.
+fn plane_angle(components: &[AttributeValue]) -> Option<f64> {
+    let values: Vec<i64> = components
+        .iter()
+        .map(AttributeValue::as_int)
+        .collect::<Option<_>>()?;
+    if values.is_empty() {
+        return None;
+    }
+
+    let negative = values
+        .iter()
+        .find(|value| **value != 0)
+        .is_some_and(|value| *value < 0);
+    let part = |position: usize| values.get(position).copied().unwrap_or(0).abs() as f64;
+    let magnitude = part(0)
+        + part(1) / MINUTES_PER_DEGREE
+        + part(2) / SECONDS_PER_DEGREE
+        + part(3) / (SECONDS_PER_DEGREE * MILLIONTHS_PER_SECOND);
+
+    Some(if negative { -magnitude } else { magnitude })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +189,76 @@ END-ISO-10303-21;
     }
 
     #[test]
+    fn read_mesh_triangulates_a_real_ifc4x3_file() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/bath_csg_solid.ifc");
+
+        let meshes = crate::read_mesh(&path).expect("the fixture should read");
+        let triangles: usize = meshes.iter().map(|m| m.indices.len() / 3).sum();
+        assert!(!meshes.is_empty(), "no meshes from the fixture");
+        assert!(triangles > 0, "no triangles from the fixture");
+    }
+
+    #[test]
+    fn site_placement_reads_reference_coordinates() {
+        let dir = std::env::temp_dir().join("tiletopia_ifc_site_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("site.ifc");
+
+        let ifc_content = "\
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('ViewDefinition [CoordinationView]'),'2;1');
+FILE_NAME('site.ifc','2024-01-01',(''),(''),'','','');
+FILE_SCHEMA(('IFC2X3'));
+ENDSEC;
+DATA;
+#1=IFCPROJECT('0001',$,'TestProject',$,$,$,$,$,$);
+#2=IFCSITE('0002',$,'TestSite',$,$,$,$,$,.ELEMENT.,(51,30,0),(-0,-7,-40),12.5,$,$);
+ENDSEC;
+END-ISO-10303-21;
+";
+        std::fs::write(&path, ifc_content).unwrap();
+
+        let placement = site_placement(&path).unwrap().expect("a site placement");
+        assert!((placement.latitude - 51.5).abs() < 1e-6, "{placement:?}");
+        let expected_longitude = -(7.0 / 60.0 + 40.0 / 3600.0);
+        assert!(
+            (placement.longitude - expected_longitude).abs() < 1e-6,
+            "{placement:?}"
+        );
+        assert!((placement.elevation - 12.5).abs() < 1e-6, "{placement:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn site_placement_is_none_when_the_site_leaves_them_unset() {
+        let dir = std::env::temp_dir().join("tiletopia_ifc_site_unset_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("minimal.ifc");
+
+        let ifc_content = "\
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('ViewDefinition [CoordinationView]'),'2;1');
+FILE_NAME('minimal.ifc','2024-01-01',(''),(''),'','','');
+FILE_SCHEMA(('IFC2X3'));
+ENDSEC;
+DATA;
+#1=IFCPROJECT('0001',$,'TestProject',$,$,$,$,$,$);
+#2=IFCSITE('0002',$,'TestSite',$,$,$,$,$,.ELEMENT.,$,$,$,$,$);
+ENDSEC;
+END-ISO-10303-21;
+";
+        std::fs::write(&path, ifc_content).unwrap();
+
+        assert_eq!(site_placement(&path).unwrap(), None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn test_read_ifc_with_extrusion() {
         let dir = std::env::temp_dir().join("tiletopia_ifc_extrusion_test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -142,15 +287,10 @@ END-ISO-10303-21;
 ";
         std::fs::write(&path, ifc_content).unwrap();
 
-        let result = read(&path);
-        assert!(result.is_ok());
-        let meshes = result.unwrap();
-        // Should produce at least one mesh from the extruded wall
-        if !meshes.is_empty() {
-            let m = &meshes[0];
-            assert!(!m.positions.is_empty());
-            assert!(!m.indices.is_empty());
-        }
+        let meshes = read(&path).expect("the extrusion should read");
+        let first = meshes.first().expect("a mesh from the extruded wall");
+        assert!(!first.positions.is_empty());
+        assert!(!first.indices.is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -28,6 +28,12 @@ pub struct MeshTilingConfig {
     pub simplification_ratio: f32,
     /// Minimum geometric error (meters) — leaves below this are not subdivided.
     pub min_geometric_error: f64,
+    /// Column-major 4x4 written as the root tile's `transform`, placing the
+    /// model's local coordinates on the globe. Omitted from the tileset when None.
+    pub root_transform: Option<[f64; 16]>,
+    /// Whether the input is z-up and the written glTF has to be rotated to
+    /// y-up. Bounding volumes stay in the z-up frame the tile transform names.
+    pub content_y_up: bool,
 }
 
 impl Default for MeshTilingConfig {
@@ -37,7 +43,17 @@ impl Default for MeshTilingConfig {
             max_depth: 10,
             simplification_ratio: 0.5,
             min_geometric_error: 0.1,
+            root_transform: None,
+            content_y_up: false,
         }
+    }
+}
+
+/// Rotate z-up vectors into the y-up glTF tile content 3D Tiles expects. The
+/// runtime rotates them back about x by π/2, so the two cancel.
+fn z_up_to_y_up(vectors: &mut [[f32; 3]]) {
+    for vector in vectors {
+        *vector = [vector[0], vector[2], -vector[1]];
     }
 }
 
@@ -89,14 +105,18 @@ pub fn build_mesh_tree(meshes: &[MeshData], config: &MeshTilingConfig) -> MeshTi
 }
 
 /// Write mesh tiles (GLB files + tileset.json) to disk.
-pub fn write_mesh_tileset(root: &MeshTileNode, output_dir: &Path) -> io::Result<()> {
+pub fn write_mesh_tileset(
+    root: &MeshTileNode,
+    output_dir: &Path,
+    config: &MeshTilingConfig,
+) -> io::Result<()> {
     std::fs::create_dir_all(output_dir)?;
     let tiles_dir = output_dir.join("tiles");
     std::fs::create_dir_all(&tiles_dir)?;
 
     write_node_glbs(root, &tiles_dir, &mut NodePath::new())?;
 
-    let tileset = generate_mesh_tileset(root);
+    let tileset = generate_mesh_tileset(root, config.root_transform);
     let json = serde_json::to_string_pretty(&tileset).map_err(io::Error::other)?;
     std::fs::write(output_dir.join("tileset.json"), json)?;
 
@@ -110,7 +130,7 @@ pub fn tile_meshes(
     config: &MeshTilingConfig,
 ) -> io::Result<MeshTilingStats> {
     let root = build_mesh_tree(meshes, config);
-    write_mesh_tileset(&root, output_dir)?;
+    write_mesh_tileset(&root, output_dir, config)?;
 
     let mut stats = MeshTilingStats {
         total_triangles: 0,
@@ -162,7 +182,7 @@ fn build_recursive(
     if tri_count <= config.max_triangles_per_tile || depth >= config.max_depth {
         return MeshTileNode::Leaf {
             bounds,
-            mesh: make_glb_mesh(positions, normals, indices),
+            mesh: make_glb_mesh(positions, normals, indices, config.content_y_up),
             depth,
         };
     }
@@ -198,7 +218,7 @@ fn build_recursive(
     if left_idx.is_empty() || right_idx.is_empty() {
         return MeshTileNode::Leaf {
             bounds,
-            mesh: make_glb_mesh(positions, normals, indices),
+            mesh: make_glb_mesh(positions, normals, indices, config.content_y_up),
             depth,
         };
     }
@@ -225,7 +245,7 @@ fn build_recursive(
 
     // LOD mesh for this internal node — simplified version of the full mesh at this level.
     let lod_indices = simplify_mesh(positions, indices, config.simplification_ratio);
-    let lod_mesh = make_glb_mesh(positions, normals, &lod_indices);
+    let lod_mesh = make_glb_mesh(positions, normals, &lod_indices, config.content_y_up);
 
     MeshTileNode::Internal {
         bounds,
@@ -244,14 +264,26 @@ fn aabb_from_indices(positions: &[[f32; 3]], indices: &[u32]) -> Aabb {
     aabb
 }
 
-fn make_glb_mesh(positions: &[[f32; 3]], normals: &[[f32; 3]], indices: &[u32]) -> GlbMesh {
-    let normals_opt = if normals.is_empty() {
+fn make_glb_mesh(
+    positions: &[[f32; 3]],
+    normals: &[[f32; 3]],
+    indices: &[u32],
+    content_y_up: bool,
+) -> GlbMesh {
+    let mut positions = positions.to_vec();
+    let mut normals_opt = if normals.is_empty() {
         None
     } else {
         Some(normals.to_vec())
     };
+    if content_y_up {
+        z_up_to_y_up(&mut positions);
+        if let Some(normals) = &mut normals_opt {
+            z_up_to_y_up(normals);
+        }
+    }
     GlbMesh {
-        positions: positions.to_vec(),
+        positions,
         normals: normals_opt,
         indices: Some(indices.to_vec()),
         colors: None,
@@ -322,8 +354,9 @@ fn geometric_error_for(bounds: &Aabb) -> f64 {
     (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]).sqrt()
 }
 
-fn generate_mesh_tileset(root: &MeshTileNode) -> Tileset {
-    let root_tile = generate_tile(root, "tiles/", &mut NodePath::new());
+fn generate_mesh_tileset(root: &MeshTileNode, root_transform: Option<[f64; 16]>) -> Tileset {
+    let mut root_tile = generate_tile(root, "tiles/", &mut NodePath::new());
+    root_tile.transform = root_transform;
     let geometric_error = root_tile.geometric_error;
     Tileset {
         asset: TilesetAsset {
@@ -574,7 +607,7 @@ mod tests {
 
         let config = MeshTilingConfig::default();
         let tree = build_mesh_tree(&[cube_mesh()], &config);
-        write_mesh_tileset(&tree, &dir).expect("write_mesh_tileset failed");
+        write_mesh_tileset(&tree, &dir, &config).expect("write_mesh_tileset failed");
 
         assert!(dir.join("tileset.json").exists());
         assert!(dir.join("tiles/root.glb").exists());
@@ -618,6 +651,83 @@ mod tests {
         assert_eq!(stats.tile_count, 1);
         assert_eq!(stats.total_triangles, 12);
         assert!(dir.join("tileset.json").exists());
+    }
+
+    #[test]
+    fn z_up_to_y_up_rotates_a_triangle_and_its_normal() {
+        let mut triangle = vec![[1.0, 2.0, 3.0], [0.0, 0.0, 0.0], [-4.0, 5.0, -6.0]];
+        z_up_to_y_up(&mut triangle);
+        assert_eq!(
+            triangle,
+            vec![[1.0, 3.0, -2.0], [0.0, 0.0, 0.0], [-4.0, -6.0, -5.0]]
+        );
+
+        // the runtime rotates the other way by pi/2 about x, so the two cancel
+        let mut up = vec![[0.0, 0.0, 1.0]];
+        z_up_to_y_up(&mut up);
+        assert_eq!(up, vec![[0.0, 1.0, 0.0]]);
+    }
+
+    #[test]
+    fn y_up_content_leaves_the_bounding_volume_in_the_z_up_frame() {
+        let dir = std::env::temp_dir().join("tiletopia_mesh_y_up_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // a slab 4 wide, 2 deep and 6 tall in z
+        let mesh = MeshData {
+            positions: vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 2.0, 6.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            indices: vec![0, 1, 2],
+            name: "slab".into(),
+        };
+        let config = MeshTilingConfig {
+            content_y_up: true,
+            ..Default::default()
+        };
+        tile_meshes(&[mesh], &dir, &config).expect("tile_meshes failed");
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("tileset.json")).unwrap())
+                .unwrap();
+        let half_extents = &json["root"]["boundingVolume"]["box"].as_array().unwrap()[3..];
+        assert_eq!(half_extents[0].as_f64().unwrap(), 2.0);
+        assert_eq!(half_extents[4].as_f64().unwrap(), 1.0);
+        assert_eq!(half_extents[8].as_f64().unwrap(), 3.0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn root_transform_reaches_the_tileset_root() {
+        let dir = std::env::temp_dir().join("tiletopia_mesh_root_transform_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let transform = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 100.0, 200.0, 300.0, 1.0,
+        ];
+        let config = MeshTilingConfig {
+            root_transform: Some(transform),
+            ..Default::default()
+        };
+        let tree = build_mesh_tree(&[cube_mesh()], &config);
+        write_mesh_tileset(&tree, &dir, &config).expect("write_mesh_tileset failed");
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("tileset.json")).unwrap())
+                .unwrap();
+        let written = json["root"]["transform"].as_array().expect("a transform");
+        assert_eq!(written.len(), 16);
+        assert_eq!(written[12].as_f64().unwrap(), 100.0);
+        assert_eq!(written[14].as_f64().unwrap(), 300.0);
+
+        let plain = MeshTilingConfig::default();
+        write_mesh_tileset(&tree, &dir, &plain).expect("write_mesh_tileset failed");
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("tileset.json")).unwrap())
+                .unwrap();
+        assert!(json["root"].get("transform").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn make_test_texture(w: u32, h: u32) -> glb_writer::TextureData {

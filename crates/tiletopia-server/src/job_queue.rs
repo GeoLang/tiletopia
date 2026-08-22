@@ -183,7 +183,17 @@ fn tile(
     match asset_type {
         AssetType::PointCloud => tile_point_cloud(input_path, asset_dir),
         AssetType::Model | AssetType::Vector => {
-            run_external_tiler(input_path, asset_dir, placement, external_tiler_jar)
+            let extension = input_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default()
+                .to_lowercase();
+            match tiler_for(&extension)? {
+                Tiler::Native => tile_ifc(input_path, asset_dir, placement),
+                Tiler::External(input_type) => {
+                    run_external_tiler(asset_dir, input_type, placement, external_tiler_jar)
+                }
+            }
         }
         AssetType::Terrain | AssetType::Imagery => {
             Err("terrain and imagery assets are not tiled to 3D Tiles".to_string())
@@ -209,23 +219,85 @@ fn tile_point_cloud(input_path: &Path, asset_dir: &Path) -> Result<u64, String> 
     Ok(stats.total_nodes as u64)
 }
 
-/// The `-it` value mago-3d-tiler takes for this file extension. Both `gltf` and
-/// `glb` are accepted for either glTF spelling, so the extension goes through
-/// as it is.
-fn mago_input_type(extension: &str) -> Result<&'static str, String> {
+#[derive(Debug)]
+enum Tiler {
+    /// This repository's own readers and mesh tiler.
+    Native,
+    /// mago-3d-tiler, carrying the `-it` value for the format.
+    External(&'static str),
+}
+
+/// Which tiler takes this file extension. Both `gltf` and `glb` are accepted
+/// for either glTF spelling, so the extension goes through as it is.
+fn tiler_for(extension: &str) -> Result<Tiler, String> {
     match extension {
-        "gltf" => Ok("gltf"),
-        "glb" => Ok("glb"),
-        "obj" => Ok("obj"),
-        "fbx" => Ok("fbx"),
-        "geojson" => Ok("geojson"),
-        "gpkg" => Ok("gpkg"),
-        "kml" => Ok("kml"),
-        "gml" => Ok("citygml"),
+        "ifc" => Ok(Tiler::Native),
+        "gltf" => Ok(Tiler::External("gltf")),
+        "glb" => Ok(Tiler::External("glb")),
+        "obj" => Ok(Tiler::External("obj")),
+        "fbx" => Ok(Tiler::External("fbx")),
+        "geojson" => Ok(Tiler::External("geojson")),
+        "gpkg" => Ok(Tiler::External("gpkg")),
+        "kml" => Ok(Tiler::External("kml")),
+        "gml" => Ok(Tiler::External("citygml")),
         other => Err(format!(
-            "{other}: the external tiler does not accept this format"
+            "{other}: neither the native tiler nor the external one takes this format"
         )),
     }
+}
+
+/// Tile an IFC with this repository's own reader and mesh tiler. The upload's
+/// `crs` is ignored here: the IFC's own coordinates are metres, placed by
+/// longitude and latitude alone.
+fn tile_ifc(
+    input_path: &Path,
+    asset_dir: &Path,
+    placement: &ModelPlacement,
+) -> Result<u64, String> {
+    let (longitude, latitude, height) = ifc_origin(input_path, placement)?;
+
+    let read = tiletopia_ingest::read_mesh(input_path).map_err(|e| e.to_string())?;
+    if read.is_empty() {
+        return Err("the IFC holds no geometry".to_string());
+    }
+
+    let meshes: Vec<tiletopia_core::mesh_tiler::MeshData> = read
+        .into_iter()
+        .map(|mesh| tiletopia_core::mesh_tiler::MeshData {
+            positions: mesh.positions,
+            normals: mesh.normals,
+            indices: mesh.indices,
+            name: mesh.name,
+        })
+        .collect();
+
+    // the IFC's own coordinates are z-up, and the tileset's frame is the ENU
+    // one the root transform names, so only the written glTF is rotated
+    let config = tiletopia_core::mesh_tiler::MeshTilingConfig {
+        root_transform: Some(tiletopia_core::spatial::enu_to_ecef_matrix(
+            latitude.to_radians(),
+            longitude.to_radians(),
+            height,
+        )),
+        content_y_up: true,
+        ..Default::default()
+    };
+    let stats = tiletopia_core::mesh_tiler::tile_meshes(&meshes, asset_dir, &config)
+        .map_err(|e| e.to_string())?;
+    Ok(stats.tile_count as u64)
+}
+
+/// Longitude, latitude and height the IFC's local coordinates sit at. The
+/// upload's placement wins, at height 0, and the IfcSite answers otherwise.
+fn ifc_origin(input_path: &Path, placement: &ModelPlacement) -> Result<(f64, f64, f64), String> {
+    if let (Some(longitude), Some(latitude)) = (placement.longitude, placement.latitude) {
+        return Ok((longitude, latitude, 0.0));
+    }
+
+    let site = tiletopia_ingest::ifc_reader::site_placement(input_path)
+        .map_err(|e| e.to_string())?
+        .ok_or("the IFC has no site coordinates, upload it with longitude and latitude")?;
+    Ok((site.longitude, site.latitude, site.elevation))
 }
 
 /// The command that turns `input_dir` into 3D Tiles under `output_dir`.
@@ -263,18 +335,11 @@ pub fn mago_command(
 }
 
 fn run_external_tiler(
-    input_path: &Path,
     asset_dir: &Path,
+    input_type: &str,
     placement: &ModelPlacement,
     external_tiler_jar: Option<&Path>,
 ) -> Result<u64, String> {
-    let extension = input_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default()
-        .to_lowercase();
-    let input_type = mago_input_type(&extension)?;
-
     let jar = external_tiler_jar.ok_or_else(|| {
         "TILETOPIA_MAGO_JAR is not set, so there is no external tiler to run".to_string()
     })?;
@@ -402,11 +467,14 @@ mod tests {
     }
 
     #[test]
-    fn ifc_and_dae_have_no_external_tiler_input_type() {
-        for extension in ["ifc", "dae"] {
-            let error = mago_input_type(extension).unwrap_err();
-            assert!(error.contains(extension), "{error}");
-            assert!(error.contains("external tiler"), "{error}");
-        }
+    fn ifc_goes_to_the_native_tiler_and_dae_to_neither() {
+        assert!(matches!(tiler_for("ifc"), Ok(Tiler::Native)));
+        assert!(matches!(tiler_for("obj"), Ok(Tiler::External("obj"))));
+        assert!(matches!(tiler_for("gml"), Ok(Tiler::External("citygml"))));
+
+        let error = tiler_for("dae").unwrap_err();
+        assert!(error.contains("dae"), "{error}");
+        assert!(error.contains("native tiler"), "{error}");
+        assert!(error.contains("external one"), "{error}");
     }
 }

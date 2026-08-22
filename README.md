@@ -5,7 +5,7 @@
 
 **Fast open-source 3D Tiles server — self-hosted Cesium Ion replacement.**
 
-Ingest point clouds, tile them into OGC 3D Tiles 1.1, and serve them with view-dependent streaming. Quantized-mesh terrain from a DEM or a prebuilt bundle. Compatible with CesiumJS, Cesium for Unreal, Cesium for Unity, and any 3D Tiles client. Mesh, vector and BIM readers exist. The tiling job queue does not call them.
+Ingest point clouds, tile them into OGC 3D Tiles 1.1, and serve them with view-dependent streaming. Quantized-mesh terrain from a DEM or a prebuilt bundle. Compatible with CesiumJS, Cesium for Unreal, Cesium for Unity, and any 3D Tiles client. Meshes and vector files tile through mago-3d-tiler, IFC through this repository's own reader and mesh tiler.
 
 **Website:** https://geolang.github.io/tiletopia
 
@@ -20,9 +20,9 @@ Ingest point clouds, tile them into OGC 3D Tiles 1.1, and serve them with view-d
 - Optional GPU point-cloud decimation via wgpu (`--features gpu`)
 - Draco/meshopt compression for tile delivery
 
-The job queue tiles point clouds with the native tiler. Meshes (glTF, glb, OBJ, FBX) and vector files (GeoJSON, GeoPackage, KML, CityGML) go to [mago-3d-tiler](https://github.com/Gaia3D/mago-3d-tiler) (MPL-2.0), which the Docker image bundles with a JRE 21. `TILETOPIA_MAGO_JAR` points at the jar, and without it a mesh or vector job fails naming the variable. The jar ships natives for Linux and Windows x64 only, so on macOS those jobs fail inside mago. IFC and DAE uploads fail with an error naming the format: the external tiler has no input type for either. An upload whose extension is not on the list answers 400.
+The job queue tiles point clouds with the native tiler. Meshes (glTF, glb, OBJ, FBX) and vector files (GeoJSON, GeoPackage, KML, CityGML) go to [mago-3d-tiler](https://github.com/Gaia3D/mago-3d-tiler) (MPL-2.0), which the Docker image bundles with a JRE 21. `TILETOPIA_MAGO_JAR` points at the jar, and without it a mesh or vector job fails naming the variable. The jar ships natives for Linux and Windows x64 only, so on macOS those jobs fail inside mago. IFC goes to the native mesh tiler instead, reached by this repository's own IFC reader, and needs no jar. It is placed by the upload's `longitude` and `latitude`, or by the `IfcSite` reference coordinates when the upload leaves them out, and an IFC with neither fails rather than landing at the centre of the earth. `crs` is ignored on that path. DAE uploads still fail with an error naming the format: neither tiler takes it. An upload whose extension is not on the list answers 400.
 
-A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields beside the file. Longitude and latitude place a model that has local coordinates, and one without the other is refused. The tiles land at `/api/v1/assets/{id}/tileset.json`, with content under `/api/v1/assets/{id}/data/{file}`.
+A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields beside the file. Longitude and latitude place a model that has local coordinates, and one without the other is refused. The tiles land at `/api/v1/assets/{id}/tileset.json`, with content under `/api/v1/assets/{id}/data/{file}` from mago and `/api/v1/assets/{id}/tiles/{file}` from the native tiler.
 
 ### Tile Server
 - REST API for assets, tiling jobs, access control
@@ -73,7 +73,7 @@ Not implemented, whatever the code in the repository suggests:
 
 | Subsystem | State |
 |-----------|-------|
-| IFC and DAE tiling | mago-3d-tiler has no input type for either, so those jobs fail. Meshes and vector files do tile |
+| DAE tiling | Neither the native tiler nor mago-3d-tiler takes DAE, so those jobs fail. Point clouds, meshes, vector files and IFC do tile |
 | Scheduler | `spawn()` has no callers. `create_job` ignores cron. `Scheduler::new()` seeds three fabricated jobs. No job has ever run |
 | Webhooks | HMAC delivery is written in `process_pending`, which nothing calls. Subscribe is read-only. Seeded with demo secrets |
 | STAC search | Ignores bbox, datetime, collections and limit. Returns one hardcoded item |
