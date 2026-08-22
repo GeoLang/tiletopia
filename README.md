@@ -5,7 +5,7 @@
 
 **Fast open-source 3D Tiles server — self-hosted Cesium Ion replacement.**
 
-Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Tiles 1.1, and serve it with view-dependent streaming. Compatible with CesiumJS, Cesium for Unreal, Cesium for Unity, and any 3D Tiles client.
+Ingest point clouds, tile them into OGC 3D Tiles 1.1, and serve them with view-dependent streaming. Quantized-mesh terrain from a DEM or a prebuilt bundle. Compatible with CesiumJS, Cesium for Unreal, Cesium for Unity, and any 3D Tiles client. Mesh, vector and BIM readers exist. The tiling job queue does not call them.
 
 **Website:** https://geolang.github.io/tiletopia
 
@@ -14,143 +14,77 @@ Ingest raw geospatial data (point clouds, terrain, BIM), tile it into OGC 3D Til
 ## Features
 
 ### Tiling Engine
-- **OGC 3D Tiles 1.1** output (batched 3D models, point clouds, implicit tiling)
-- **Octree spatial partitioning** with geometric error-based LOD
-- **Parallel tiling** across all CPU cores (Rayon work-stealing)
-- **GPU-accelerated** point cloud decimation (optional, via wgpu — Metal/Vulkan/DX12)
-- **Diff-based incremental tiling** — only re-tile changed regions
-- **Draco/meshopt compression** for compact tile delivery
+- OGC 3D Tiles 1.1 point-cloud tiles (`.pnts`)
+- Octree spatial partitioning with geometric error-based LOD
+- Parallel tiling across CPU cores (Rayon)
+- Optional GPU point-cloud decimation via wgpu (`--features gpu`)
+- Draco/meshopt compression for tile delivery
 
-### Input Formats
-- **Point clouds:** LAS, LAZ, E57, PLY
-- **3D models:** glTF, GLB, OBJ, FBX, IFC, CityGML, CityJSON
-- **Terrain:** GeoTIFF, DTED, HGT, USGS DEM
-- **Vector:** Shapefile, GeoJSON, KML, GeoPackage
+The job queue only tiles point clouds. It always calls `read_point_cloud`. Readers exist for glTF, OBJ, FBX, IFC, GeoTIFF, Shapefile, GeoJSON, KML, GeoPackage, CityGML and CityJSON. None of them is on the tiling path. Uploading `.tif`, `.glb`, `.obj` or `.ifc` queues a job that fails. Several other extensions are classed as PointCloud by a catch-all arm.
 
 ### Tile Server
-- **REST API** for asset management, tiling jobs, access control
-- **Multipart upload** — stream large files directly
-- **Tile streaming** with geometric error-based LOD (client-side frustum culling via CesiumJS)
-- **CORS support** for cross-origin CesiumJS access
-- **WebSocket real-time layer** for presence, cursors, chat and view sync
-- **JWT authentication** (`TILETOPIA_JWT_SECRET`, 32+ bytes, required to serve; `TILETOPIA_AUTH_DISABLED=true` to opt out)
+- REST API for assets, tiling jobs, access control
+- Multipart upload
+- Tile streaming for CesiumJS
+- CORS
+- WebSocket at `/api/v1/realtime/{room}` for presence, cursors, chat and view sync. Six message types. Anything else is logged and dropped.
+- JWT authentication (`TILETOPIA_JWT_SECRET`, 32+ bytes, required to serve. `TILETOPIA_AUTH_DISABLED=true` to opt out)
+- 3D annotation layers, persisted, writes are owner-or-admin
 
 ### Terrain
-- **Quantized mesh terrain** from DEM/DTM heightmaps
-- **Multi-LOD terrain** with quadtree tiling
-- **Bilinear interpolation** for smooth subsampling
-- **Delta + zigzag encoding** per Cesium terrain spec
-- **Prebuilt terrain bundles** — serve a `ctb-tile` directory as a Cesium terrain source, no Ion token
-
-### Digital Twin Support
-- **Temporal versioning** — serve different model states over time
-- **3D annotation layers** — persist user-drawn annotations server-side
-- **Update API** — push model changes without full re-tile
-- **Change detection & time slider** — compare point clouds across epochs, generate heatmaps
-- **CRDT collaborative editing** — conflict-free concurrent annotations via hybrid logical clocks
-
-### Advanced Analytics
-- **Spatial queries** — radius search, k-nearest neighbor, bounding box, polygon clip, volume calculation
-- **AI point cloud classification** — automatic ground/vegetation/building/water classification (ASPRS LAS standard)
-- **Colorization from imagery** — project ortho photos or camera images onto point clouds
-- **glTF structural metadata** — queryable per-feature properties (EXT_structural_metadata)
-
-### Interoperability
-- **3D Tiles Next implicit tiling** — Morton-coded subtrees with availability bitstreams
-- **Federated mesh networking** — peer-to-peer tile routing across distributed instances
-- **CI/CD pipeline validation** — tileset schema checks, GitHub Actions workflow generation
-- **Photogrammetry (SfM)** — feature detection, matching, triangulation from photos
-- **Global DEM terrain** — SRTM/Copernicus/ASTER with TMS tiling and bilinear sampling
-- **Edge deployment** — cross-compile for ARM/embedded with offline bundles
-- **Martin integration** — PMTiles and PostGIS vector tile sources via `martin-tile-utils`, MBTiles metadata parsing (`--features martin`)
+- Quantized mesh terrain from DEM/DTM heightmaps
+- Multi-LOD terrain with quadtree tiling
+- Bilinear interpolation
+- Delta + zigzag encoding per Cesium terrain spec
+- Prebuilt terrain bundles: serve a `ctb-tile` directory as a Cesium terrain source, no Ion token
+- `/api/v1/terrain/` reads DEM files under `<data-dir>/dem` first, then SRTM tiles. A failed download answers 503 rather than a flat mesh
+- `/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` hillshade, slope or ndvi tiles. Defaults to the loaded DEM store and a synthetic field. See Quick Start for the bbox variables that put them on real elevation
 
 ### Storage
-- **Local filesystem** — zero-config default
-- **Amazon S3** — full CRUD via aws-sdk-s3
-- **Google Cloud Storage** — full CRUD via cloud-storage (feature-gated)
-- **Azure Blob** — full CRUD via azure-storage-blobs (feature-gated)
-- **Hybrid** — hot tiles local, cold tiles in cloud
+- Local filesystem (default)
+- Amazon S3
+- Google Cloud Storage (feature-gated)
+- Azure Blob (feature-gated)
+- Hybrid: hot tiles local, cold tiles in cloud
 
 ### Deployment
-- **Single binary** — no runtime dependencies
-- **Docker image** — `docker run -p 3000:3000 tiletopia`
-- **Air-gapped / offline** — works without internet
-- **Multi-tenant** — per-org/project isolation
-- **Web dashboard** — upload, monitor jobs, preview in CesiumJS
-- **Prometheus metrics** — `/metrics` endpoint
-
-### Premium / Enterprise Features
-- **3D Measurement Tools** — distance, area, volume, cut/fill, slope, bearing calculations
-- **Anomaly Detection** — deformation monitoring, encroachment alerts, construction deviation, statistical outlier removal
-- **Predictive Analytics** — linear regression, exponential smoothing, trend analysis, seasonal decomposition
-- **BIM Clash Detection** — hard/soft clashes, design deviation from point cloud reality capture
-- **Role-based access control** — admin/editor/viewer tiers from the JWT `role` claim plus per-asset ownership, enforced on every write route (no OIDC/SAML federation)
-- **Audit Logging** — immutable event trail with query/export for compliance
-- **Leader Election** — single-process election with Raft-style terms (multi-node HA is not implemented)
-- **Priority Queue + SLA** — tenant-tiered job scheduling with deadline guarantees
-- **Webhook Delivery** — event-driven integrations with HMAC-signed payloads
-- **White-Label Branding** — custom logos, colors, domains per organization
-- **Geospatial Marketplace** — publish/discover/license 3D datasets with metered access
-- **Data Residency Geofencing** — enforce storage regions for GDPR/sovereignty compliance
-- **Retention Lifecycle** — automated tiering, archival, GDPR right-to-erasure policies
-- **Field-Level Encryption** — AES-256/ChaCha20 at rest with key rotation
-- **Custom Dashboards** — drag-and-drop widget layouts for KPIs and monitoring
-- **Narrated Presentations (Stories)** — guided slide-based tours with camera animations
-- **AR/VR Foveated Rendering** — eye-tracked LOD for XR headsets (Quest/Vision Pro/HoloLens)
-- **Cinematic Flythrough** — keyframed camera paths with easing, H.264 MP4/WebM export via `--features video`
-- **Automated Site Reports** — scheduled HTML/PDF report generation from templates
-- **API Key Management** — create/revoke keys, per-key rate limiting, usage tracking
-- **Usage Metering & Billing** — track API calls, storage, compute per tenant (free/pro/enterprise tiers)
-- **Task Scheduler** — cron-like recurring jobs with stats, recent runs, failure handling
-- **Plugin System** — custom format adapters, processing pipelines, type-safe registry
-- **Mobile SDK** — adaptive quality based on device GPU/memory/network, offline packages
-- **Multi-Format Export** — GeoJSON, Shapefile, KML, DXF, OBJ, LAS, GeoTIFF, 3D PDF, FBX
+- Single binary
+- Docker image: `docker run -p 3000:3000 tiletopia`
+- JWT roles `admin` / `editor` / `viewer` plus per-asset ownership on writes
+- Web dashboard: upload, monitor jobs, preview in CesiumJS
+- Prometheus metrics at `/metrics`
 
 ### 2D Map Tiles
-- **XYZ Raster Tiles** — proxy + cache OSM, Stamen, or any slippy map source
-- **Vector Tiles (MVT/PBF)** — generate Mapbox Vector Tiles from GeoJSON/PostGIS
-- **MapLibre GL Styles** — serve style JSON with sources + layers for web map clients
-- **TileJSON 3.0.0** — auto-discovery metadata for tile consumers
-- **Tile Caching** — LRU cache with TTL, hit rate tracking, invalidation
-- **Custom Overlays** — render asset footprints and BIM zones as vector tile layers
-
-### OSM Buildings
-- **OSM Building Extrusion** — parse OpenStreetMap building footprints into 3D meshes
-- **Tiered building profiles** — multi-level setbacks (Empire State Building-style)
-- **Roof shapes** — flat, gabled, hipped, pyramidal, skillion, dome
-- **Overpass API parsing** — directly ingest Overpass JSON responses
-- **Batch extrusion** — extrude entire city regions at once
+- XYZ raster tiles: proxy and cache OSM or another slippy-map source
+- MapLibre GL style JSON
+- TileJSON 3.0.0
+- Tile cache with TTL
 
 ### Cesium Ion Compatibility
-- **Ion REST API compatibility layer** — drop-in replacement for Cesium Ion REST endpoints
-- **Asset catalog** — searchable/filterable asset catalog with pagination
-- **CRS auto-detection & reprojection** — automatic coordinate reference system detection via projicio
-- **DEM tile caching** — LRU cache for terrain DEM tiles
+- Ion REST compatibility for asset id and endpoint resolution
+- A terrain asset in that layer resolves to a prebuilt bundle named after the asset id
 
-### Geospatial Services
-- **Photogrammetry (SfM/MVS)** — Structure from Motion + Multi-View Stereo pipeline with quality presets
-- **Point Cloud Classification** — ASPRS-standard classes (ground/vegetation/building/water), ensemble decision tree classifier with height/density/planarity features, optional in-process ONNX inference (`--features onnx`, ort 2.0) or an external ML service (`--features ml`)
-- **AI Agent (GeoLang)** — natural language control of the 3D viewer via LLM-powered agent. Chat with the agent to fly to locations, classify point clouds, overlay GeoJSON layers, run spatial analysis, and generate reports — no GIS expertise required. Backed by the [sibyl](https://github.com/GeoLang/sibyl) agent loop and 36 geospatial tools.
-- **Real-Time Collaboration** — multi-user sessions with 3D cursors, viewports, annotations, and replies
-- **Asset Versioning** — full version history, diffs, change regions between versions
-- **BIM 4D Scheduling** — construction timeline, phases, Gantt keyframes, progress tracking
-- **Geocoding** — forward/reverse/batch address lookup with confidence scores
-- **STAC Catalog** — OGC SpatioTemporal Asset Catalog (v1.0.0) with collections + item search
-- **Indoor Mapping** — floor plans, room navigation, BLE beacon positioning, accessibility routing
-- **Cloud Optimized GeoTIFF (COG)** — range-request tile serving with overviews and band statistics
-- **Routing & Navigation** — Dijkstra/A* shortest path, multi-profile (driving/walking/cycling), turn-by-turn directions
-- **Isochrone / Travel-Time Analysis** — compute reachable areas by time (5/10/15 min), multi-profile polygons
-- **Geoprocessing** — buffer, convex hull, centroid, simplify, union, intersection, difference, Voronoi
-- **Feature Service (WFS)** — vector feature CRUD, spatial queries, field schemas, layer management
-- **Elevation Service** — point elevation lookup, elevation profiles along paths, batch queries
-- **Map Matching** — snap GPS traces to road network with confidence scoring
-- **Static Map Rendering** — server-side PNG/JPEG/WebP/SVG/PDF map images with markers and overlays
-- **Drone Flight Planning** — grid/orbit mission generation, GSD calculation, waypoint export
-- **Scan Registration (ICP)** — multi-scan point cloud alignment (Point-to-Point/Point-to-Plane/NDT)
-- **Issue / Defect Tracking** — location-pinned construction issues with status workflows and attachments
-- **Terrain Analysis** — slope, aspect, hillshade, viewshed, watershed, contour lines from DEMs
-- **Geostatistics** — IDW, kriging (ordinary/universal/simple), variograms, Moran's I autocorrelation
-- **Multispectral Imagery** — NDVI, EVI, SAVI, thermal anomaly detection, band math, spectral indices
+### OSM Buildings (viewer)
+The `gui/` globe can extrude OpenStreetMap building footprints in the browser via Overpass. That path does not go through the tiling job queue.
+
+Not implemented, whatever the code in the repository suggests:
+
+| Subsystem | State |
+|-----------|-------|
+| Mesh / vector / BIM tiling | Readers and a mesh tiler exist. The job queue never calls them |
+| Scheduler | `spawn()` has no callers. `create_job` ignores cron. `Scheduler::new()` seeds three fabricated jobs. No job has ever run |
+| Webhooks | HMAC delivery is written in `process_pending`, which nothing calls. Subscribe is read-only. Seeded with demo secrets |
+| STAC search | Ignores bbox, datetime, collections and limit. Returns one hardcoded item |
+| COG tiles | Offsets are fabricated. There is no HTTP client |
+| Static maps | Fills a flat grey buffer. Encodes WebP as JPEG, PDF and SVG as PNG |
+| Elevation | Always a synthetic sine field, reported as `source: Srtm30m` |
+| API keys | Seeds three fake keys. `get_by_hash` has no callers, so a key cannot authenticate |
+| Kriging | Inverse-variogram weighting, no solve. Ordinary / Simple / Universal run the same code |
+| Geoprocessing buffer / union | Buffer scales vertices radially. Union is a convex hull |
+| Terrain analysis | No aspect, watershed, flow accumulation, or viewshed ray casting |
+| Temporal versioning, CRDT, federation, CI/CD validation, multi-tenant isolation, leader election, priority queue / SLA, white-label, marketplace, geofencing, encryption, custom dashboards, AR/VR foveated rendering, cinematic flythrough, scripting, offline viewer export | `pub mod` lines with unit tests. No route, CLI or render loop calls them |
+
+The modules stay. Wiring or deleting them is a product call, recorded in `viewtopia/DESIGN_TODO.md`. Do not start from the scheduler or webhook facades.
 
 ---
 
@@ -371,29 +305,10 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `WS` | `/api/v1/realtime/{room}` | WebSocket for live data and collaboration |
 | `GET` | `/api/v1/tiles/sources` | List 2D tile sources (OSM, etc.) |
 | `GET` | `/api/v1/tiles/styles` | MapLibre GL style JSON |
-| `GET` | `/api/v1/stac` | STAC catalog root |
-| `GET` | `/api/v1/stac/collections` | STAC collections |
-| `GET` | `/api/v1/stac/search` | STAC item search |
-| `GET` | `/api/v1/geocoding/search` | Forward geocode |
-| `GET` | `/api/v1/geocoding/reverse` | Reverse geocode |
-| `GET` | `/api/v1/routing/route` | Compute route |
-| `GET` | `/api/v1/cog/datasets` | Cloud Optimized GeoTIFF datasets |
-| `GET` | `/api/v1/indoor/buildings` | Indoor floor plans |
-| `GET` | `/api/v1/isochrone/compute` | Compute isochrone polygons |
-| `GET` | `/api/v1/geoprocessing/operations` | List geoprocessing ops |
-| `GET` | `/api/v1/features/layers` | List feature service layers |
-| `GET` | `/api/v1/elevation/point` | Point elevation lookup |
-| `GET` | `/api/v1/elevation/profile` | Elevation profile along path |
-| `GET` | `/api/v1/map-matching/match` | Snap GPS trace to road |
-| `GET` | `/api/v1/static-map/render` | Render static map image |
-| `GET` | `/api/v1/flight-planning/generate` | Generate drone flight plan |
-| `GET` | `/api/v1/scan-registration/demo` | ICP scan alignment |
-| `GET` | `/api/v1/issues` | List location-pinned issues |
-| `GET` | `/api/v1/terrain-analysis/operations` | Terrain analysis ops |
 | `GET` | `/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` | Hillshade, slope or ndvi tiles, rendered on demand |
-| `GET` | `/api/v1/geostatistics/methods` | List interpolation methods |
-| `GET` | `/api/v1/multispectral/indices` | Spectral indices (NDVI, etc.) |
 | `GET` | `/metrics` | Prometheus metrics |
+
+Other `/api/v1/*` geospatial and premium routes are mounted. They are the facades in the table above: STAC search returns one hardcoded item, COG offsets are fabricated, static maps fill a grey buffer, elevation reports `Srtm30m` while serving a sine field, API keys cannot authenticate, scheduler and webhook workers have no callers. They are listed in OpenAPI because the router mounts them, not because they work.
 
 Tile data reads are anonymous: `tileset.json`, `tiles/{path}`, everything under
 `/api/v1/terrain/` (the generated quantized-mesh routes, the prebuilt bundles
@@ -459,51 +374,25 @@ Without `--features gpu`, all computation uses CPU (Rayon parallel).
 
 ## GeoLang vs Cesium Ion
 
-| Feature | GeoLang | Cesium Ion |
-|---------|-----------|------------|
-| OGC 3D Tiles 1.1 | ✅ | ✅ |
-| Point cloud tiling (LAS/LAZ) | ✅ | ✅ |
-| Terrain generation (GeoTIFF) | ✅ | ✅ |
-| 3D model tiling (glTF) | ✅ | ✅ |
-| CesiumJS compatible | ✅ | ✅ |
-| REST API | ✅ | ✅ |
-| Web dashboard | ✅ | ✅ |
-| **Self-hosted / on-premises** | ✅ | ❌ |
-| **GPU-accelerated tiling (Metal/Vulkan)** | ✅ | ❌ |
-| **WebSocket real-time layer (presence, cursors, chat)** | ✅ | ❌ |
-| **Digital twin support** | ✅ | ❌ |
-| **Temporal versioning (time-series)** | ✅ | ❌ |
-| **Air-gapped / offline deployment** | ✅ | ❌ |
-| **Custom CRS / reprojection** | ✅ | ❌ |
-| **Diff-based incremental tiling** | ✅ | ❌ |
-| **Native BIM/IFC with metadata** | ✅ | ❌ |
-| **Multi-tenant isolation** | ✅ | ❌ |
-| **3D annotation layers** | ✅ | ❌ |
-| **Offline viewer export (USB delivery)** | ✅ | ❌ |
-| **Plugin system (custom formats)** | ✅ | ❌ |
-| **Local filesystem storage** | ✅ | ❌ |
-| **Open source** | ✅ AGPL-3.0 | ❌ Proprietary |
-| **2D map tiles (XYZ/MVT)** | ✅ | ❌ |
-| **STAC catalog (OGC)** | ✅ | ❌ |
-| **Geocoding (forward/reverse)** | ✅ | ❌ |
-| **Routing & navigation** | ✅ | ❌ |
-| **Indoor mapping** | ✅ | ❌ |
-| **Real-time collaboration** | ✅ | ❌ |
-| **Isochrone / travel-time** | ✅ | ❌ |
-| **Geoprocessing engine** | ✅ | ❌ |
-| **Feature service (WFS)** | ✅ | ❌ |
-| **Elevation service** | ✅ | ❌ |
-| **Map matching** | ✅ | ❌ |
-| **Static map rendering** | ✅ | ❌ |
-| **Drone flight planning** | ✅ | ❌ |
-| **Scan registration (ICP)** | ✅ | ❌ |
-| **Issue / defect tracking** | ✅ | ❌ |
-| **Terrain analysis** | ✅ | ❌ |
-| **Geostatistics (kriging/IDW)** | ✅ | ❌ |
-| **Multispectral indices** | ✅ | ❌ |
-| **Price** | **Free forever** | $150–$3,750/month |
+What this server actually does, against Cesium Ion as a hosted 3D Tiles host.
 
-**34 exclusive features** that Cesium Ion cannot match.
+| Feature | TileTopia | Cesium Ion |
+|---------|-----------|------------|
+| OGC 3D Tiles 1.1 point clouds | yes | yes |
+| Terrain generation and prebuilt bundles | yes | yes |
+| CesiumJS compatible | yes | yes |
+| REST API | yes | yes |
+| Web dashboard | yes | yes |
+| Self-hosted / on-premises | yes | no |
+| GPU-accelerated tiling (optional wgpu) | yes | no |
+| WebSocket presence, cursors, chat | yes | no |
+| 3D annotation layers | yes | no |
+| Local filesystem storage | yes | no |
+| Open source | AGPL-3.0 | proprietary |
+| 3D model / BIM / vector tiling | no (readers exist, the queue does not call them) | yes |
+| Temporal versioning, webhooks, scheduler | no | mixed |
+
+Price is not a capability. Ion is a hosted product. This is a binary you run.
 
 ---
 

@@ -57,7 +57,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <header>
 <div class="container">
 <h1>🌍 GeoLang</h1>
-<p class="tagline">Fast open-source 3D Tiles server — self-hosted Cesium Ion replacement for point clouds, terrain, BIM, and digital twins.</p>
+<p class="tagline">Fast open-source 3D Tiles server. Self-hosted Cesium Ion replacement for point clouds and quantized-mesh terrain.</p>
 <div class="badges">
 <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/3D_Tiles-1.1-green" alt="3D Tiles">
@@ -84,155 +84,72 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <h2>Features</h2>
 <div class="grid">
 <div class="card">
-<h3>🧊 Tiling Engine</h3>
+<h3>Tiling Engine</h3>
 <ul>
-<li>OGC 3D Tiles 1.1 output</li>
+<li>OGC 3D Tiles 1.1 point-cloud tiles</li>
 <li>Octree spatial partitioning with LOD</li>
-<li>Parallel tiling (Rayon work-stealing)</li>
-<li>GPU-accelerated via wgpu (Metal/Vulkan)</li>
-<li>Incremental/diff-based tiling</li>
+<li>Parallel tiling (Rayon)</li>
+<li>Optional GPU via wgpu</li>
 <li>Draco/meshopt compression</li>
 </ul>
 </div>
 <div class="card">
-<h3>📂 Input Formats</h3>
+<h3>Input Formats</h3>
 <ul>
-<li>LAS, LAZ, E57, PLY (point clouds)</li>
-<li>glTF, GLB, OBJ, FBX, IFC (3D models)</li>
-<li>GeoTIFF, DTED, HGT (terrain DEMs)</li>
-<li>GeoJSON, Shapefile, KML (vector)</li>
-<li>CityGML, CityJSON (urban models)</li>
+<li>LAS, LAZ, E57, PLY. The job queue tiles these</li>
+<li>glTF, OBJ, IFC, GeoTIFF, vectors: readers exist, the queue does not call them</li>
+<li>Uploading .tif / .glb / .obj / .ifc queues a job that fails</li>
 </ul>
 </div>
 <div class="card">
-<h3>🌐 Tile Server</h3>
+<h3>Tile Server</h3>
 <ul>
 <li>REST API for asset management</li>
 <li>View-dependent tile streaming</li>
-<li>WebSocket real-time data layer</li>
+<li>WebSocket presence, cursors, chat, view sync</li>
 <li>JWT authentication (on by default)</li>
-<li>CORS support for CesiumJS</li>
-<li>Multipart upload for large files</li>
+<li>CORS for CesiumJS</li>
+<li>Multipart upload</li>
+<li>3D annotation layers, writes owner-or-admin</li>
 </ul>
 </div>
 <div class="card">
-<h3>🏗️ Digital Twin</h3>
+<h3>Terrain</h3>
 <ul>
-<li>WebSocket presence, cursors, chat and view sync</li>
-<li>Temporal versioning (time-series)</li>
-<li>3D annotation layers persisted server-side</li>
-<li>Live model update API</li>
-<li>3D annotation layers</li>
+<li>Quantized-mesh from DEM files</li>
+<li>Prebuilt ctb-tile bundles</li>
+<li>SRTM fallback, 503 on failed download</li>
+<li>Hillshade / slope / ndvi analysis tiles</li>
 </ul>
 </div>
 <div class="card">
-<h3>🗺️ 2D Map Tiles</h3>
+<h3>2D Map Tiles</h3>
 <ul>
 <li>XYZ raster tiles (proxy + cache OSM)</li>
-<li>Vector tiles (MVT/PBF) from GeoJSON</li>
-<li>MapLibre GL style management</li>
-<li>TileJSON 3.0.0 auto-discovery</li>
-<li>Tile caching with TTL & hit tracking</li>
-<li>Custom overlay layers</li>
+<li>MapLibre GL style JSON</li>
+<li>TileJSON 3.0.0</li>
+<li>Tile cache with TTL</li>
 </ul>
 </div>
 <div class="card">
-<h3>🌐 Geospatial Services</h3>
+<h3>Storage and deploy</h3>
 <ul>
-<li>Photogrammetry (SfM/MVS pipeline)</li>
-<li>Point classification (ASPRS + ONNX)</li>
-<li>Geocoding (forward/reverse/batch)</li>
-<li>STAC catalog (OGC v1.0.0)</li>
-<li>Indoor mapping & navigation</li>
-<li>Routing (Dijkstra, turn-by-turn)</li>
-<li>Isochrone / travel-time analysis</li>
-<li>Geoprocessing (buffer, hull, simplify)</li>
-<li>Feature service (WFS-like CRUD)</li>
-<li>Elevation service & profiles</li>
-<li>Map matching (GPS snap-to-road)</li>
-<li>Static map rendering (PNG/SVG/PDF)</li>
-<li>Drone flight planning (grid/orbit)</li>
-<li>Scan registration (ICP alignment)</li>
-<li>Issue / defect tracking</li>
-<li>Terrain analysis (slope/viewshed)</li>
-<li>Geostatistics (kriging, IDW)</li>
-<li>Multispectral (NDVI, thermal)</li>
-</ul>
-</div>
-<div class="card">
-<h3>🤖 AI Agent (GeoLang)</h3>
-<ul>
-<li>Natural language viewer control</li>
-<li>Fly to, classify, overlay via chat</li>
-<li>36 chainable geospatial tools</li>
-<li>sibyl agent loop (Rust) over an OpenAI-compatible LLM</li>
-<li>Geocoding → analysis → visualization</li>
-<li>Works with CesiumJS/deck.gl/MapLibre</li>
-<li>No GIS expertise required</li>
-</ul>
-</div>
-<div class="card">
-<h3>🤝 Collaboration</h3>
-<ul>
-<li>Real-time multi-user sessions</li>
-<li>3D cursors & viewport sharing</li>
-<li>Annotation threads with replies</li>
-<li>Asset versioning & diffs</li>
-<li>BIM 4D construction scheduling</li>
-<li>Cloud Optimized GeoTIFF (COG)</li>
-</ul>
-</div>
-<div class="card">
-<h3>🗄️ Storage</h3>
-<ul>
-<li>Local filesystem (zero-config)</li>
-<li>Amazon S3</li>
-<li>Google Cloud Storage</li>
-<li>Azure Blob Storage</li>
-<li>Hybrid hot/cold tiering</li>
-</ul>
-</div>
-<div class="card">
-<h3>🚀 Deployment</h3>
-<ul>
-<li>Single binary (no runtime deps)</li>
-<li>Docker image</li>
-<li>Air-gapped/offline support</li>
-<li>Multi-tenant isolation</li>
-<li>Prometheus metrics</li>
+<li>Local filesystem, S3, GCS, Azure</li>
+<li>Single binary, Docker</li>
+<li>JWT roles admin / editor / viewer + per-asset ownership</li>
+<li>Prometheus /metrics</li>
 <li>Web dashboard with CesiumJS</li>
 </ul>
 </div>
 <div class="card">
-<h3>📐 Analytics & Measurement</h3>
+<h3>Mounted routes that do not work</h3>
 <ul>
-<li>3D distance, area, volume, cut/fill</li>
-<li>Anomaly & deformation detection</li>
-<li>Predictive analytics & trend analysis</li>
-<li>BIM clash detection (hard/soft)</li>
-<li>Automated site report generation</li>
-</ul>
-</div>
-<div class="card">
-<h3>🏢 Enterprise</h3>
-<ul>
-<li>Role-based access control (admin/editor/viewer + per-asset ownership)</li>
-<li>Audit logging & compliance</li>
-<li>Single-process leader election</li>
-<li>Data residency geofencing (GDPR)</li>
-<li>Field-level encryption + key rotation</li>
-<li>Retention lifecycle policies</li>
-</ul>
-</div>
-<div class="card">
-<h3>🎬 Presentation</h3>
-<ul>
-<li>Narrated presentations (Stories)</li>
-<li>Cinematic flythrough with easing</li>
-<li>AR/VR foveated rendering</li>
-<li>Custom dashboards & widgets</li>
-<li>White-label branding</li>
-<li>Geospatial marketplace</li>
+<li>Scheduler never runs a job</li>
+<li>Webhooks never deliver</li>
+<li>STAC search returns one hardcoded item</li>
+<li>COG offsets are fabricated</li>
+<li>Elevation reports Srtm30m and serves a sine field</li>
+<li>Temporal versioning, CRDT, federation, marketplace, AR/VR: modules with no callers</li>
 </ul>
 </div>
 </div>
@@ -242,136 +159,43 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <section id="comparison">
 <div class="container">
 <h2>GeoLang vs The Industry</h2>
-<p style="color:var(--muted);margin-bottom:20px">How we compare across the entire 3D geospatial platform landscape.</p>
+<p style="color:var(--muted);margin-bottom:20px">What this server actually does. BIM tiling, STAC, webhooks, scheduling, kriging and indoor mapping have mounted routes. They do not work, so they are not in the table.</p>
 <div style="overflow-x:auto">
 <table>
 <thead>
 <tr><th>Capability</th><th>GeoLang</th><th>Cesium Ion</th><th>Mapbox</th><th>Google Maps</th><th>Bentley iTwin</th><th>Trimble Clarity</th><th>Potree</th></tr>
 </thead>
 <tbody>
-<tr><td>OGC 3D Tiles 1.1</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Point cloud tiling</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅ (viewer)</td></tr>
-<tr><td>Terrain generation</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Vector tiles</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Self-hosted / on-prem</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td></tr>
-<tr><td>Open source</td><td class="check">✅ AGPL-3.0</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td></tr>
-<tr><td>REST API</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr><td>WebSocket real-time</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Digital twin / IoT</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>BIM/IFC support</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>GPU-accelerated tiling</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Multi-renderer (Cesium/deck.gl/MapLibre)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Anomaly detection</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Clash detection (BIM)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>3D measurement tools</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr><td>Plugin/extension system</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Scheduled processing (cron)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Webhook integrations</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Team workspaces / RBAC</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr><td>Mobile SDK</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Offline / air-gapped</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td></tr>
-<tr><td>Export packages (LAS/GeoJSON/GLB)</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr><td>Usage metering / billing API</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Data residency / GDPR</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td></tr>
-<tr><td>Temporal versioning</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>2D Map Tiles (XYZ/MVT)</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>STAC Catalog (OGC)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Geocoding</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Routing / Navigation</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Indoor mapping</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Real-time collaboration</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Cloud Optimized GeoTIFF</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Photogrammetry pipeline</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>BIM 4D scheduling</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Isochrone / travel-time</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Geoprocessing engine</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Feature service (WFS)</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Elevation service</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Map matching</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Static map rendering</td><td class="check">✅</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Drone flight planning</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Scan registration (ICP)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr><td>Issue / defect tracking</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Terrain analysis (slope/viewshed)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Geostatistics (kriging/IDW)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td>Multispectral imagery (NDVI)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="check">✅</td><td class="cross">❌</td></tr>
-<tr><td>AI Agent (NL viewer control)</td><td class="check">✅</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td><td class="cross">❌</td></tr>
-<tr><td><strong>Price (monthly)</strong></td><td class="check"><strong>$0</strong></td><td class="cross">$150–$3,750</td><td class="cross">$0–$1,500+</td><td class="cross">Pay-per-use</td><td class="cross">$10K+ enterprise</td><td class="cross">$500–$2,000</td><td class="check">$0</td></tr>
+<tr><td>OGC 3D Tiles 1.1 point clouds</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">viewer</td></tr>
+<tr><td>Terrain generation / bundles</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td></tr>
+<tr><td>Self-hosted / on-prem</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td></tr>
+<tr><td>Open source</td><td class="check">AGPL-3.0</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td></tr>
+<tr><td>REST API</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td></tr>
+<tr><td>WebSocket presence / chat</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
+<tr><td>3D annotations</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
+<tr><td>XYZ raster tiles</td><td class="check">yes</td><td class="cross">no</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td></tr>
+<tr><td>BIM / mesh / vector tiling</td><td class="cross">readers only</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
 </tbody>
 </table>
 </div>
-<p style="margin-top:16px;color:var(--muted);font-size:.85rem">GeoLang scores <strong>47/47</strong> on the capability rows above, the widest coverage here across tiling, real-time, analytics, enterprise, and deployment flexibility.</p>
+<p style="margin-top:16px;color:var(--muted);font-size:.85rem">Ion is a hosted product. This is a binary you run. Scheduler, webhooks, STAC, COG, elevation, kriging, geoprocessing, indoor mapping and the rest of the premium routes are mounted and do not work. They are not scored.</p>
 
 <div class="grid" style="margin-top:28px">
 <div class="card">
 <h3>vs Cesium Ion</h3>
 <ul>
-<li>Cesium Ion = cloud-only 3D Tiles hosting</li>
-<li>No self-hosting, no offline deployment</li>
-<li>No real-time layer, no digital twin, no analytics</li>
-<li>No BIM clash detection, no collaboration</li>
-<li>No geoprocessing, kriging, flight planning</li>
-<li>$150–$3,750/month — GeoLang has <strong>39 exclusive features</strong> at $0</li>
-</ul>
-</div>
-<div class="card">
-<h3>vs Mapbox</h3>
-<ul>
-<li>Mapbox = 2D vector tiles + limited terrain</li>
-<li>No 3D Tiles, no point clouds, no BIM</li>
-<li>No self-hosting — locked to Mapbox Cloud</li>
-<li>Pricing scales aggressively past free tier</li>
-<li>No real-time / WebSocket / digital twin</li>
-</ul>
-</div>
-<div class="card">
-<h3>vs Google Maps Platform</h3>
-<ul>
-<li>Photorealistic 3D Tiles (read-only, no upload)</li>
-<li>Cannot bring your own data</li>
-<li>No point cloud or BIM tiling</li>
-<li>Pay-per-tile-request pricing adds up fast</li>
-<li>No offline, no self-host, vendor lock-in</li>
-</ul>
-</div>
-<div class="card">
-<h3>vs Bentley iTwin</h3>
-<ul>
-<li>Excellent BIM/infrastructure — but $10K+/yr</li>
-<li>No open source, no self-hosting</li>
-<li>No point cloud tiling pipeline</li>
-<li>No terrain generation from DEMs</li>
-<li>Enterprise sales cycle (months)</li>
-</ul>
-</div>
-<div class="card">
-<h3>vs Trimble Clarity</h3>
-<ul>
-<li>Good point cloud hosting — narrow scope</li>
-<li>No 3D Tiles output, no terrain, no BIM</li>
-<li>No API-first design</li>
-<li>No scheduling, plugins, or webhooks</li>
-<li>$500+/month for meaningful storage</li>
+<li>Ion is cloud-only 3D Tiles hosting</li>
+<li>This binary runs on your machine, AGPL-3.0</li>
+<li>Point-cloud tiles and quantized-mesh terrain</li>
+<li>Mesh and BIM tiling are not on the job queue</li>
 </ul>
 </div>
 <div class="card">
 <h3>vs Potree</h3>
 <ul>
-<li>Excellent open-source point cloud viewer</li>
-<li>Viewer only — no tiling engine, no API</li>
-<li>No 3D Tiles format, no CesiumJS compat</li>
-<li>No terrain, no BIM, no analytics</li>
-<li>No managed deployment or enterprise features</li>
-</ul>
-</div>
-<div class="card">
-<h3>Why GeoLang wins</h3>
-<ul>
-<li>Only platform that is open-source AND full-featured</li>
-<li>Self-hosted = zero vendor lock-in, full data control</li>
-<li>Covers point clouds + terrain + BIM + vector</li>
-<li>Real-time digital twin + analytics + automation</li>
-<li>GPU-accelerated performance at zero cost</li>
+<li>Potree is an open-source point-cloud viewer</li>
+<li>This repo is a tiling server plus a CesiumJS dashboard</li>
+<li>Output is OGC 3D Tiles 1.1, not Potree octrees</li>
 </ul>
 </div>
 </div>
@@ -384,31 +208,11 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <div class="grid" style="grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px">
 <div>
 <img class="showcase-img" src="screenshots/3d-viewer.png" alt="3D Globe Viewer with CesiumJS" style="width:100%;border-radius:8px;border:1px solid var(--border)">
-<p style="color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center">3D Globe Viewer — CesiumJS integration with real-time tile streaming</p>
+<p style="color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center">CesiumJS dashboard streaming 3D Tiles from this server</p>
 </div>
 <div>
-<img class="showcase-img" src="screenshots/measurement-tools.png" alt="3D Measurement Tools" style="width:100%;border-radius:8px;border:1px solid var(--border)">
-<p style="color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center">Measurement Tools — distance, area, volume, cut/fill, slope & bearing</p>
-</div>
-</div>
-<div class="grid" style="grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px">
-<div>
-<img class="showcase-img" src="screenshots/anomaly-detection.png" alt="Anomaly Detection Alerts" style="width:100%;border-radius:8px;border:1px solid var(--border)">
-<p style="color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center">Anomaly Detection — deformation, encroachment, construction deviation alerts</p>
-</div>
-<div>
-<img class="showcase-img" src="screenshots/enterprise-admin.png" alt="Enterprise Admin Panel" style="width:100%;border-radius:8px;border:1px solid var(--border)">
-<p style="color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center">Enterprise Admin — RBAC, audit log, data residency, job queue + SLA</p>
-</div>
-</div>
-<div class="grid" style="grid-template-columns:1fr 1fr;gap:24px">
-<div>
-<img class="showcase-img" src="screenshots/clash-analytics.png" alt="BIM Clash Detection & Analytics" style="width:100%;border-radius:8px;border:1px solid var(--border)">
-<p style="color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center">BIM Clash Detection — hard/soft clashes, trend prediction, encryption</p>
-</div>
-<div>
-<img class="showcase-img" src="screenshots/stories-presentation.png" alt="Narrated Presentations" style="width:100%;border-radius:8px;border:1px solid var(--border)">
-<p style="color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center">Narrated Presentations — guided tours with camera waypoints & sharing</p>
+<img class="showcase-img" src="screenshots/catalog-overview.png" alt="Asset catalog" style="width:100%;border-radius:8px;border:1px solid var(--border)">
+<p style="color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center">Asset catalog in the dashboard</p>
 </div>
 </div>
 </div>
@@ -444,64 +248,16 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td><code>POST</code></td><td><code>/api/v1/assets/{id}/tile</code></td><td>Start tiling job</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/assets/{id}/tileset.json</code></td><td>Serve tileset</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/assets/{id}/tiles/{path}</code></td><td>Serve tile</td></tr>
-<tr><td><code>WS</code></td><td><code>/api/v1/realtime/{room}</code></td><td>WebSocket live data and collaboration</td></tr>
-<tr><td><code>GET</code></td><td><code>/metrics</code></td><td>Prometheus metrics</td></tr>
-<tr><td colspan="3" style="color:var(--accent);font-weight:600;padding-top:12px">Premium APIs</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/api-keys</code></td><td>List API keys (masked)</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/api-keys/usage</code></td><td>Key usage stats</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/metering/summary</code></td><td>Usage metering summary</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/metering/pricing</code></td><td>Pricing tiers</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/webhooks</code></td><td>Webhook subscriptions</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/webhooks/events</code></td><td>Available event types</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/workspaces</code></td><td>List organizations</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/workspaces/teams</code></td><td>List teams</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/workspaces/projects</code></td><td>List projects</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/exports</code></td><td>Export jobs</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/exports/formats</code></td><td>Available export formats</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/scheduler/jobs</code></td><td>Scheduled jobs</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/scheduler/stats</code></td><td>Scheduler statistics</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/scheduler/runs</code></td><td>Recent job runs</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/plugins</code></td><td>Plugin marketplace</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/plugins/pipelines</code></td><td>Processing pipelines</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/mobile/config</code></td><td>Mobile SDK config</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/mobile/offline</code></td><td>Offline tile packages</td></tr>
-<tr><td colspan="3" style="color:var(--accent);font-weight:600;padding-top:12px">2D Tiles & Geospatial Services</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/tiles/sources</code></td><td>List tile sources (OSM, vector)</td></tr>
+<tr><td><code>WS</code></td><td><code>/api/v1/realtime/{room}</code></td><td>WebSocket presence, cursors, chat, view sync</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/terrain/layer.json</code></td><td>Quantized-mesh layer metadata</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/terrain/{z}/{x}/{y}.terrain</code></td><td>Quantized-mesh tile</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/terrain/bundles</code></td><td>Prebuilt terrain bundles</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/tiles/sources</code></td><td>XYZ tile sources (OSM proxy)</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/tiles/styles</code></td><td>MapLibre GL style JSON</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/tiles/cache/stats</code></td><td>Tile cache hit rate & size</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/stac</code></td><td>STAC catalog root</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/stac/collections</code></td><td>STAC collections</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/stac/search</code></td><td>STAC item search</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/geocoding/search</code></td><td>Forward geocode</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/geocoding/reverse</code></td><td>Reverse geocode</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/routing/route</code></td><td>Compute route (driving/walking/cycling)</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/routing/stats</code></td><td>Routing graph statistics</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/cog/datasets</code></td><td>Cloud Optimized GeoTIFF datasets</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/indoor/buildings</code></td><td>Indoor floor plans</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/photogrammetry/projects</code></td><td>Photogrammetry projects</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/classification/models</code></td><td>ML classification models</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/collaboration/sessions</code></td><td>Active collaboration sessions</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/versioning/assets</code></td><td>Versioned assets</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/bim4d/projects</code></td><td>BIM 4D schedules</td></tr>
-<tr><td colspan="3" style="color:var(--accent);font-weight:600;padding-top:12px">Advanced Geospatial Analytics</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/isochrone/compute</code></td><td>Isochrone polygons (travel-time)</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/geoprocessing/operations</code></td><td>Geoprocessing operations</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/features/layers</code></td><td>Feature service layers (WFS)</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/elevation/point</code></td><td>Point elevation lookup</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/elevation/profile</code></td><td>Elevation profile along path</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/map-matching/match</code></td><td>Snap GPS trace to road network</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/static-map/render</code></td><td>Render static map image (PNG/JPEG/SVG)</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/flight-planning/generate</code></td><td>Generate drone flight plan</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/scan-registration/demo</code></td><td>ICP scan alignment</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/issues</code></td><td>Location-pinned issues/defects</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/terrain-analysis/operations</code></td><td>Terrain analysis (slope/viewshed)</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/geostatistics/methods</code></td><td>Interpolation methods (kriging/IDW)</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/multispectral/indices</code></td><td>Spectral indices (NDVI/EVI/SAVI)</td></tr>
-<tr><td colspan="3" style="color:var(--accent);font-weight:600;padding-top:12px">AI Agent (served by the GeoLang API, not tiletopia)</td></tr>
-<tr><td><code>POST</code></td><td><code>/chat/agui</code></td><td>Agent run over AG-UI (SSE)</td></tr>
-<tr><td><code>GET</code></td><td><code>/tools</code></td><td>Tool manifest</td></tr>
-<tr><td><code>GET</code></td><td><code>/sessions</code></td><td>Chat sessions, proxied to sibyl</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png</code></td><td>Hillshade, slope or ndvi tiles</td></tr>
+<tr><td><code>GET</code></td><td><code>/metrics</code></td><td>Prometheus metrics</td></tr>
 </table>
+<p style="margin-top:12px;color:var(--muted);font-size:.85rem">Other <code>/api/v1/*</code> routes are mounted (STAC, COG, scheduler, webhooks, elevation, geoprocessing, API keys). They return demo data or ignore input. See the README "Not implemented" table.</p>
 </div>
 </section>
 

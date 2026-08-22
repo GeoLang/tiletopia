@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-21
+
+### Changed
+
+- README and `docs/index.html` now describe the product that runs: point-cloud
+  3D Tiles, quantized-mesh terrain, JWT, annotations, presence websocket.
+  Input-format, digital-twin, premium, geospatial-service and 47/47 comparison
+  claims are gone. A "Not implemented" table names the mounted routes that
+  ignore input or have no callers. The modules stay. Wiring or deleting them
+  is still a product call in viewtopia's DESIGN_TODO.
+
 ## [Unreleased] - 2026-08-14
 
 ### Changed
