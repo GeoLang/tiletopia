@@ -655,6 +655,8 @@ mod tests {
         assert_eq!(layer_name("...csv", ".csv"), "layer");
     }
 
+    // windows absolute() adds a drive prefix, and tippecanoe never runs there
+    #[cfg(unix)]
     #[test]
     fn the_argv_names_the_output_the_layer_the_work_directory_and_the_input() {
         let argv = tippecanoe_argv(
