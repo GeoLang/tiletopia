@@ -260,9 +260,32 @@ async fn a_geojson_upload_builds_an_archive_that_serves_tiles_until_it_is_delete
         );
     }
 
-    let (status, tile) = request(&state, "GET", &format!("/martin/{id}/0/0/0"), &editor).await;
-    assert_eq!(status, StatusCode::OK);
+    // tippecanoe writes gzipped mvt, so the response must say so or no
+    // browser client can decode the body
+    let response = router(Arc::clone(&state))
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/martin/{id}/0/0/0"))
+                .header("authorization", format!("Bearer {editor}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_ENCODING)
+            .map(|value| value.to_str().unwrap().to_string()),
+        Some("gzip".to_string())
+    );
+    let tile = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     assert!(!tile.is_empty());
+    assert_eq!(&tile[..2], [0x1f, 0x8b], "not a gzip body");
 
     // a coordinate outside the zoom's grid is the client's mistake
     let (status, _) = request(

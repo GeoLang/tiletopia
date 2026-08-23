@@ -1101,16 +1101,26 @@ pub mod martin_backend {
                 Ok(data) if data.is_empty() => StatusCode::NO_CONTENT.into_response(),
                 Ok(data) => {
                     let sources = b.sources.read().await;
-                    let content_type = sources
-                        .get(&source_id)
-                        .map(|s| s.get_tile_info().format.content_type().to_string())
+                    let info = sources.get(&source_id).map(|s| s.get_tile_info());
+                    let content_type = info
+                        .map(|i| i.format.content_type().to_string())
                         .unwrap_or_else(|| "application/octet-stream".to_string());
-                    (
+                    let mut response = (
                         StatusCode::OK,
                         [(axum::http::header::CONTENT_TYPE, content_type)],
                         data,
                     )
-                        .into_response()
+                        .into_response();
+                    // tippecanoe archives store gzipped mvt, the browser needs told
+                    if let Some(value) = info
+                        .and_then(|i| i.encoding.compression())
+                        .and_then(|compression| axum::http::HeaderValue::from_str(compression).ok())
+                    {
+                        response
+                            .headers_mut()
+                            .insert(axum::http::header::CONTENT_ENCODING, value);
+                    }
+                    response
                 }
                 Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
             }

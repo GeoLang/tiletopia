@@ -273,7 +273,11 @@ fn set_limits(limits: &BuildLimits) -> std::io::Result<()> {
         }
         Ok(())
     };
+    // macos rejects RLIMIT_AS with EINVAL, and builds only run in linux images
+    #[cfg(target_os = "linux")]
     apply(libc::RLIMIT_AS, limits.memory_bytes)?;
+    #[cfg(not(target_os = "linux"))]
+    let _ = limits.memory_bytes;
     apply(libc::RLIMIT_FSIZE, limits.file_bytes)?;
     // a build aborted by the address-space cap would otherwise dump a core file
     // as large as the cap

@@ -48,6 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Martin tile responses carry `Content-Encoding` when the archive stores
+  compressed tiles. tippecanoe writes gzipped MVT, and without the header no
+  browser client could decode the body.
+- The build's address-space cap applies only on Linux. macOS rejects
+  `RLIMIT_AS` with `EINVAL`, which surfaced as a failed spawn once setrlimit
+  errors stopped being ignored, and builds only run in Linux images.
+
 - A build the server was restarted in the middle of finishes when it is queued
   again. tippecanoe exits rather than write over an archive, so the half-built
   one and its journal are removed before the run.
