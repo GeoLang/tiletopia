@@ -1,6 +1,19 @@
 # Multi-stage build for TileTopia server
 ARG MAGO_VERSION=1.16.2
 ARG MAGO_SHA256=d37e58b634e91d7ce7ca046168b1db2cf950cd9b2ffacb826fd3b10a8d31f7e2
+ARG TIPPECANOE_VERSION=2.79.0
+
+# tippecanoe builds vector tilesets. bookworm carries no package for it, and the
+# backport is far behind, so it is built from the pinned tag
+FROM debian:bookworm-slim AS tippecanoe
+ARG TIPPECANOE_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git g++ make libsqlite3-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 -b "${TIPPECANOE_VERSION}" \
+      https://github.com/felt/tippecanoe.git /usr/src/tippecanoe && \
+    make -C /usr/src/tippecanoe -j"$(nproc)" && \
+    make -C /usr/src/tippecanoe install PREFIX=/opt/tippecanoe
 
 FROM rust:bookworm AS builder
 
@@ -20,8 +33,10 @@ RUN cargo build --release --bin tiletopia --features martin
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl \
+    ca-certificates curl libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=tippecanoe /opt/tippecanoe/bin/tippecanoe /usr/local/bin/tippecanoe
 
 # Non-root user for security
 RUN useradd -r -s /bin/false tiletopia && \
@@ -46,6 +61,7 @@ USER tiletopia
 
 ENV TILETOPIA_MAGO_JAR=/opt/mago/mago-3d-tiler.jar
 ENV TILETOPIA_DATA_DIR=/data
+ENV TILETOPIA_TILESET_DIR=/data/tilesets
 ENV TILETOPIA_PORT=3000
 ENV TILETOPIA_GUI_DIR=/opt/tiletopia/gui
 ENV RUST_LOG=info,tiletopia=debug
