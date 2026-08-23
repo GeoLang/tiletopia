@@ -47,6 +47,46 @@ pub enum JobStatus {
     Failed,
 }
 
+/// Registry row for one vector tileset: the PMTiles archive tippecanoe built,
+/// the martin source serving it, and the run that produced it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TilesetRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub status: TilesetStatus,
+    /// The `/martin/{source}` id the archive is registered under.
+    pub source_id: String,
+    /// The archive's key inside the tileset directory.
+    pub object_key: String,
+    pub original_filename: String,
+    /// The layer name inside the archive, passed to tippecanoe as `-l`.
+    pub layer_name: String,
+    /// The tippecanoe argv this archive was built with.
+    pub argv: Vec<String>,
+    /// The built archive's size. 0 until the build succeeds.
+    pub size_bytes: u64,
+    pub created_at: DateTime<Utc>,
+    pub built_at: Option<DateTime<Utc>>,
+    /// The tail of tippecanoe's stderr when the build failed.
+    pub error: Option<String>,
+    /// JWT `sub` of the uploader. Never serialized: it is an authz field and
+    /// would leak user ids to every reader of the tileset list.
+    #[serde(skip_serializing)]
+    pub owner_id: String,
+    /// When the builder claimed this row. Set means a build already started,
+    /// which is what keeps the worker from picking one row up twice.
+    #[serde(skip_serializing)]
+    pub started_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum TilesetStatus {
+    Building,
+    Ready,
+    Failed,
+}
+
 /// Persistent record for an API key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyRecord {
@@ -80,6 +120,8 @@ const ASSET_COLUMNS: &str =
     "id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id";
 
 const JOB_COLUMNS: &str = "id, asset_id, status, progress, input_path, output_format, created_at, started_at, completed_at, error, points_processed, tiles_written, longitude, latitude, crs";
+
+const TILESET_COLUMNS: &str = "id, name, status, source_id, object_key, original_filename, layer_name, argv, size_bytes, created_at, started_at, built_at, error, owner_id";
 
 fn enum_to_str<T: Serialize>(val: &T) -> String {
     serde_json::to_string(val)
@@ -217,6 +259,27 @@ impl Database {
                     .await?;
             }
         }
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tilesets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_id TEXT NOT NULL UNIQUE,
+                object_key TEXT NOT NULL,
+                original_filename TEXT NOT NULL,
+                layer_name TEXT NOT NULL,
+                argv TEXT NOT NULL DEFAULT '[]',
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                built_at TEXT,
+                error TEXT,
+                owner_id TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS api_keys (
@@ -574,6 +637,125 @@ impl Database {
         .await?;
 
         Ok(row.map(|r| row_to_job(&r)))
+    }
+
+    // -- Tileset registry --
+
+    pub async fn create_tileset(&self, tileset: &TilesetRecord) -> Result<(), sqlx::Error> {
+        sqlx::query(&format!(
+            "INSERT INTO tilesets ({TILESET_COLUMNS})
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ))
+        .bind(tileset.id.to_string())
+        .bind(&tileset.name)
+        .bind(enum_to_str(&tileset.status))
+        .bind(&tileset.source_id)
+        .bind(&tileset.object_key)
+        .bind(&tileset.original_filename)
+        .bind(&tileset.layer_name)
+        .bind(serde_json::to_string(&tileset.argv).unwrap_or_else(|_| "[]".into()))
+        .bind(tileset.size_bytes as i64)
+        .bind(tileset.created_at.to_rfc3339())
+        .bind(tileset.started_at.map(|dt| dt.to_rfc3339()))
+        .bind(tileset.built_at.map(|dt| dt.to_rfc3339()))
+        .bind(&tileset.error)
+        .bind(&tileset.owner_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn get_tileset(&self, id: Uuid) -> Result<Option<TilesetRecord>, sqlx::Error> {
+        let row = sqlx::query(&format!(
+            "SELECT {TILESET_COLUMNS} FROM tilesets WHERE id = ?"
+        ))
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| row_to_tileset(&r)))
+    }
+
+    pub async fn list_tilesets(&self) -> Result<Vec<TilesetRecord>, sqlx::Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {TILESET_COLUMNS} FROM tilesets ORDER BY created_at DESC"
+        ))
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.iter().map(row_to_tileset).collect())
+    }
+
+    /// Every archive that finished building, which is what a restart
+    /// re-registers with the martin backend.
+    pub async fn list_ready_tilesets(&self) -> Result<Vec<TilesetRecord>, sqlx::Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {TILESET_COLUMNS} FROM tilesets WHERE status = 'ready' ORDER BY created_at"
+        ))
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.iter().map(row_to_tileset).collect())
+    }
+
+    /// Mark the oldest unclaimed build as started and hand it back. The claim
+    /// and the read are one statement, so two workers cannot take one row.
+    pub async fn claim_tileset_build(&self) -> Result<Option<TilesetRecord>, sqlx::Error> {
+        let row = sqlx::query(&format!(
+            "UPDATE tilesets SET started_at = ?
+             WHERE id = (
+                 SELECT id FROM tilesets
+                 WHERE status = 'building' AND started_at IS NULL
+                 ORDER BY created_at LIMIT 1
+             )
+             RETURNING {TILESET_COLUMNS}"
+        ))
+        .bind(Utc::now().to_rfc3339())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| row_to_tileset(&r)))
+    }
+
+    /// Put every build that was running when the server stopped back in the
+    /// queue. The uploaded input is still on disk until a build reaches a
+    /// terminal state, so the retry has something to read.
+    pub async fn requeue_claimed_tileset_builds(&self) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE tilesets SET started_at = NULL WHERE status = 'building' AND started_at IS NOT NULL",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Write back the build's outcome. Identity and build parameters are set
+    /// once at creation and left out here, so they cannot drift from the
+    /// archive the row names.
+    pub async fn finish_tileset(&self, tileset: &TilesetRecord) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE tilesets SET status = ?, size_bytes = ?, built_at = ?, error = ? WHERE id = ?",
+        )
+        .bind(enum_to_str(&tileset.status))
+        .bind(tileset.size_bytes as i64)
+        .bind(tileset.built_at.map(|dt| dt.to_rfc3339()))
+        .bind(&tileset.error)
+        .bind(tileset.id.to_string())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn delete_tileset(&self, id: Uuid) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM tilesets WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected())
     }
 
     // -- API Key management --
@@ -1235,6 +1417,30 @@ fn row_to_user(row: &sqlx::sqlite::SqliteRow) -> User {
         org_id: org_id.and_then(|s| Uuid::parse_str(&s).ok()),
         created_at: parse_datetime(&created_at_str),
         last_login: parse_optional_datetime(last_login),
+    }
+}
+
+fn row_to_tileset(row: &sqlx::sqlite::SqliteRow) -> TilesetRecord {
+    let id_str: String = row.get("id");
+    let status_str: String = row.get("status");
+    let argv_str: String = row.get("argv");
+    let created_at_str: String = row.get("created_at");
+
+    TilesetRecord {
+        id: Uuid::parse_str(&id_str).unwrap_or_default(),
+        name: row.get("name"),
+        status: serde_json::from_str(&format!("\"{status_str}\"")).unwrap_or(TilesetStatus::Failed),
+        source_id: row.get("source_id"),
+        object_key: row.get("object_key"),
+        original_filename: row.get("original_filename"),
+        layer_name: row.get("layer_name"),
+        argv: serde_json::from_str(&argv_str).unwrap_or_default(),
+        size_bytes: row.get::<i64, _>("size_bytes") as u64,
+        created_at: parse_datetime(&created_at_str),
+        started_at: parse_optional_datetime(row.get("started_at")),
+        built_at: parse_optional_datetime(row.get("built_at")),
+        error: row.get("error"),
+        owner_id: row.get("owner_id"),
     }
 }
 

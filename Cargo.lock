@@ -9378,6 +9378,7 @@ dependencies = [
  "itinera-match",
  "jsonwebtoken 9.3.1",
  "las",
+ "libc",
  "martin-core",
  "martin-tile-utils",
  "metrics",

@@ -191,6 +191,30 @@ async fn main() -> anyhow::Result<()> {
             ));
             Arc::clone(&job_queue).start().await;
 
+            #[cfg(feature = "martin")]
+            let tileset_dir = {
+                use tiletopia_server::tilesets;
+                let tileset_dir = tilesets::tileset_dir(&data_dir);
+                std::fs::create_dir_all(&tileset_dir)?;
+                tilesets::register_ready_tilesets(&db, &martin_backend, &tileset_dir)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+                // a build that was running when the server stopped never
+                // finished, and its input is still on disk, so run it again
+                let requeued = db.requeue_claimed_tileset_builds().await?;
+                if requeued > 0 {
+                    tracing::info!("requeued {requeued} unfinished tileset builds");
+                }
+                Arc::new(tilesets::TilesetBuilder::new(
+                    Arc::clone(&db),
+                    data_dir.clone(),
+                    tileset_dir.clone(),
+                    martin_backend.clone(),
+                ))
+                .start();
+                tileset_dir
+            };
+
             let state = Arc::new(tiletopia_server::AppState {
                 db,
                 store,
@@ -227,6 +251,8 @@ async fn main() -> anyhow::Result<()> {
                 entity_link_store: tiletopia_server::entity_linking::EntityLinkStore::new(),
                 #[cfg(feature = "martin")]
                 martin_backend,
+                #[cfg(feature = "martin")]
+                tileset_dir,
             });
 
             let app = tiletopia_server::router(state);

@@ -31,6 +31,13 @@ pub async fn build_state(
     let store: Arc<dyn tiletopia_store::TileStore> =
         Arc::new(tiletopia_store::LocalStore::new(dir.clone()));
 
+    // per-test, so a case that builds an archive cannot see another's, and so
+    // TILETOPIA_TILESET_DIR is left out of it
+    #[cfg(feature = "martin")]
+    let tileset_dir = dir.join("tilesets");
+    #[cfg(feature = "martin")]
+    std::fs::create_dir_all(&tileset_dir).ok();
+
     let job_queue = Arc::new(tiletopia_server::job_queue::JobQueue::new(
         Arc::clone(&db),
         dir.clone(),
@@ -71,5 +78,7 @@ pub async fn build_state(
         entity_link_store: tiletopia_server::entity_linking::EntityLinkStore::new(),
         #[cfg(feature = "martin")]
         martin_backend: tiletopia_server::map_tiles::martin_backend::MartinTileBackend::new(),
+        #[cfg(feature = "martin")]
+        tileset_dir: tileset_dir.clone(),
     })
 }

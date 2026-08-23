@@ -61,6 +61,11 @@ martin-tile-utils = { workspace = true, optional = true }
 tilejson = { workspace = true, optional = true }
 object_store = { workspace = true, optional = true }
 
+# the tileset builder caps what tippecanoe may map and write, between fork
+# and exec
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [features]
 default = []
 wasm-plugins = ["wasmtime"]

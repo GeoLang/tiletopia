@@ -50,6 +50,7 @@ cloud-storage = { version = "0.11", default-features = false, features = ["rustl
 azure_storage = { version = "0.21", default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"] }
 azure_storage_blobs = { version = "0.21", default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"] }
 futures = "0.3"
+libc = "0.2"
 jsonwebtoken = "9"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"

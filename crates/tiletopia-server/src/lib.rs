@@ -75,6 +75,8 @@ pub mod terrain_analysis;
 pub mod terrain_api;
 pub mod terrain_bundle;
 pub mod terrain_rgb;
+#[cfg(feature = "martin")]
+pub mod tilesets;
 pub mod upload;
 pub mod users;
 pub mod versioning;
@@ -136,6 +138,9 @@ pub struct AppState {
     /// because registering an archive is async and `router` is not.
     #[cfg(feature = "martin")]
     pub martin_backend: map_tiles::martin_backend::MartinTileBackend,
+    /// Where the built PMTiles archives sit, see [`tilesets::tileset_dir`].
+    #[cfg(feature = "martin")]
+    pub tileset_dir: std::path::PathBuf,
 }
 
 /// A managed geospatial asset.
@@ -345,11 +350,28 @@ pub fn router(state: Arc<AppState>) -> Router {
     // of the API. no source is public: there is nothing to mark one public with,
     // and an archive can hold anything that was dropped in the pmtiles directory.
     #[cfg(feature = "martin")]
-    let app = app.merge(
-        // martin_routes already carries its own state; with_state only retypes
-        // the empty state so it can merge into an Arc<AppState> router
-        map_tiles::martin_backend::martin_routes(state.martin_backend.clone()).with_state(()),
-    );
+    let app = app
+        .merge(
+            // martin_routes already carries its own state; with_state only retypes
+            // the empty state so it can merge into an Arc<AppState> router
+            map_tiles::martin_backend::martin_routes(state.martin_backend.clone()).with_state(()),
+        )
+        .route("/api/v1/tilesets", get(tilesets::list_tilesets))
+        .route("/api/v1/tilesets/{id}", get(tilesets::get_tileset))
+        .merge(
+            // building an archive and deleting one are both asset-scale writes,
+            // so they take the same Edit tier as an asset upload
+            Router::new()
+                .route(
+                    "/api/v1/tilesets",
+                    axum::routing::post(tilesets::upload_tileset),
+                )
+                .route(
+                    "/api/v1/tilesets/{id}",
+                    axum::routing::delete(tilesets::delete_tileset),
+                )
+                .layer(middleware::from_fn(users::require_editor)),
+        );
 
     app.layer(middleware::from_fn(auth::auth_middleware))
         .merge(auth_routes)
