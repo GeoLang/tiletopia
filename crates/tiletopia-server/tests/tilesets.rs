@@ -305,6 +305,45 @@ async fn an_extension_tippecanoe_cannot_read_is_refused_before_any_build() {
 }
 
 #[tokio::test]
+async fn an_upload_past_the_default_body_limit_is_taken() {
+    let editor = token("tileset-editor", "editor");
+    let state = common::build_state(
+        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+        None,
+    )
+    .await;
+
+    // axum refuses a body over 2 MB unless the route raises the limit, and no
+    // file worth tiling is smaller than that
+    let mut big = String::from(r#"{"type":"FeatureCollection","features":["#);
+    let mut count = 0;
+    while big.len() < 3 * 1024 * 1024 {
+        let longitude = count as f64 % 180.0 - 90.0;
+        if count > 0 {
+            big.push(',');
+        }
+        big.push_str(&format!(
+            r#"{{"type":"Feature","properties":{{"name":"feature {count}"}},"geometry":{{"type":"Point","coordinates":[{longitude},0]}}}}"#
+        ));
+        count += 1;
+    }
+    big.push_str("]}");
+    assert!(big.len() > 2 * 1024 * 1024);
+
+    let (status, accepted) = upload(&state, &editor, "big.geojson", &big).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+
+    // the bytes reached disk rather than being held for the record
+    let id = accepted["tileset"]["id"].as_str().unwrap();
+    let input = state
+        .data_dir
+        .join("tileset_builds")
+        .join(id)
+        .join("source.geojson");
+    assert_eq!(std::fs::metadata(&input).unwrap().len() as usize, big.len());
+}
+
+#[tokio::test]
 async fn a_viewer_may_read_the_list_but_not_upload_or_delete() {
     let viewer = token("tileset-viewer", "viewer");
     let state = common::build_state(

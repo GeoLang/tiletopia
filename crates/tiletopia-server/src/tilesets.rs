@@ -51,6 +51,10 @@ const ACCEPTED_EXTENSIONS: [&str; 4] = [".geojson.gz", ".geojson", ".fgb", ".csv
 /// How often the worker looks for a queued build.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Largest upload the route takes. Axum's own default is 2 MB, which is smaller
+/// than any file worth building a tileset from.
+pub const MAX_UPLOAD_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
 /// The 202 answer to an upload: the job that will build the archive, and the
 /// registry row it is building. One build per archive, so the job id is the
 /// tileset id and `GET /api/v1/tilesets/{id}` is what a client polls.
@@ -418,6 +422,36 @@ pub async fn register_ready_tilesets(
     Ok(())
 }
 
+/// Stream one multipart field to `path`. The whole point of this route is a
+/// file too big to hold in memory, so the bytes go straight to disk.
+async fn write_field(
+    field: &mut axum::extract::multipart::Field<'_>,
+    path: &Path,
+) -> Result<(), RouteError> {
+    use tokio::io::AsyncWriteExt;
+
+    tokio::fs::create_dir_all(path.parent().unwrap_or(path))
+        .await
+        .map_err(|_| server_error("could not create the build directory"))?;
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .map_err(|_| server_error("could not create the uploaded file"))?;
+
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|_| bad_request("could not read the uploaded file"))?
+    {
+        file.write_all(&chunk)
+            .await
+            .map_err(|_| server_error("could not write the uploaded file"))?;
+    }
+    file.flush()
+        .await
+        .map_err(|_| server_error("could not write the uploaded file"))?;
+    Ok(())
+}
+
 /// Whether these claims may modify this tileset. Every row has an owner, so
 /// there is no legacy case to wave through.
 fn may_modify(claims: &auth::Claims, tileset: &TilesetRecord) -> bool {
@@ -436,11 +470,12 @@ pub async fn upload_tileset(
         .map_err(|status| (status, String::new()))?
         .sub;
 
+    let id = Uuid::new_v4();
+    let scratch = build_dir(&state.data_dir, id);
     let mut name = None;
-    let mut filename = None;
-    let mut data = None;
+    let mut source = None;
 
-    while let Some(field) = multipart
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|_| bad_request("malformed multipart body"))?
@@ -455,39 +490,30 @@ pub async fn upload_tileset(
                 );
             }
             "file" => {
-                filename = Some(field.file_name().unwrap_or("upload").to_string());
-                data = Some(
-                    field
-                        .bytes()
-                        .await
-                        .map_err(|_| bad_request("could not read the uploaded file"))?,
-                );
+                let original_filename = field.file_name().unwrap_or("upload").to_string();
+                let extension = accepted_extension(&original_filename).ok_or_else(|| {
+                    bad_request(format!(
+                        "{original_filename}: a tileset is built from {}",
+                        ACCEPTED_EXTENSIONS.join(", ")
+                    ))
+                })?;
+
+                // the uploader's filename never becomes a path here, only the
+                // extension tippecanoe reads the format from
+                let input = scratch.join(format!("source{extension}"));
+                if let Err(error) = write_field(&mut field, &input).await {
+                    let _ = tokio::fs::remove_dir_all(&scratch).await;
+                    return Err(error);
+                }
+                source = Some((original_filename, extension, input));
             }
             _ => {}
         }
     }
 
-    let file_data = data.ok_or_else(|| bad_request("no file field in the upload"))?;
-    let original_filename = filename.unwrap_or_else(|| "upload".to_string());
-    let extension = accepted_extension(&original_filename).ok_or_else(|| {
-        bad_request(format!(
-            "{original_filename}: a tileset is built from {}",
-            ACCEPTED_EXTENSIONS.join(", ")
-        ))
-    })?;
-
-    let id = Uuid::new_v4();
-    let scratch = build_dir(&state.data_dir, id);
-    tokio::fs::create_dir_all(&scratch)
-        .await
-        .map_err(|_| server_error("could not create the build directory"))?;
-
-    // the uploader's filename never becomes a path here, only the extension
-    // tippecanoe reads the format from
-    let input = scratch.join(format!("source{extension}"));
-    tokio::fs::write(&input, &file_data)
-        .await
-        .map_err(|_| server_error("could not write the uploaded file"))?;
+    let Some((original_filename, extension, input)) = source else {
+        return Err(bad_request("no file field in the upload"));
+    };
 
     let layer_name = layer_name(&original_filename, extension);
     let object_key = format!("{id}.pmtiles");

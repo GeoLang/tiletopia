@@ -205,7 +205,9 @@ re-uploading makes a new archive.
 
 The build runs `tippecanoe -o {id}.pmtiles -l {stem} -zg
 --drop-densest-as-needed`, with the layer name taken from the uploaded
-filename. The row records the argv it ran.
+filename. The row records the argv it ran. The upload streams to disk and takes
+a body up to 4 GiB, so a reverse proxy in front needs its own limit raised to
+match.
 
 Install tippecanoe to build outside the Docker image, which carries it already.
 There is no Debian bookworm or Fedora package, so build the pinned tag from

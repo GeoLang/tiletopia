@@ -370,6 +370,9 @@ pub fn router(state: Arc<AppState>) -> Router {
                     "/api/v1/tilesets/{id}",
                     axum::routing::delete(tilesets::delete_tileset),
                 )
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    tilesets::MAX_UPLOAD_BYTES,
+                ))
                 .layer(middleware::from_fn(users::require_editor)),
         );
 
