@@ -191,6 +191,44 @@ tiletopia serve --data-dir ./data --port 3000
   behind the same JWT as the rest of the API, so a tile client has to send a
   token.
 
+### Vector tilesets
+
+`POST /api/v1/tilesets` takes a `.geojson`, `.geojson.gz`, `.fgb` or `.csv`
+file, answers 202, and builds it into one PMTiles archive with tippecanoe. The
+archive is served as a martin source named after the tileset id, so a ready
+tileset answers at `/martin/{id}/{z}/{x}/{y}` with its TileJSON at
+`/martin/{id}`. One build per archive: the `job_id` in the 202 is the tileset
+id, and a client polls `GET /api/v1/tilesets/{id}` until `status` leaves
+`building`. A failed build reports the tail of tippecanoe's stderr in `error`,
+which is the only place it explains a refusal. Nothing rebuilds on its own, so
+re-uploading makes a new archive.
+
+The build runs `tippecanoe -o {id}.pmtiles -l {stem} -zg
+--drop-densest-as-needed`, with the layer name taken from the uploaded
+filename. The row records the argv it ran.
+
+Install tippecanoe to build outside the Docker image, which carries it already.
+There is no Debian bookworm or Fedora package, so build the pinned tag from
+source:
+
+```bash
+sudo apt-get install gcc g++ make libsqlite3-dev zlib1g-dev  # Fedora: gcc-c++ make sqlite-devel zlib-ng-compat-devel
+git clone --depth 1 -b 2.79.0 https://github.com/felt/tippecanoe.git
+make -C tippecanoe -j"$(nproc)"
+make -C tippecanoe install PREFIX=/usr/local
+```
+
+- `TILETOPIA_TILESET_DIR` — where the built archives sit, `<data-dir>/tilesets`
+  when unset. Kept apart from `TILETOPIA_PMTILES_DIR`: these archives
+  re-register from the registry at startup rather than from a directory scan,
+  so a row and its file cannot drift apart.
+- `TILETOPIA_TILESET_TIMEOUT_SECS` — how long one build may run before it is
+  killed, 3600 by default.
+- `TILETOPIA_TILESET_MEMORY_MB` — address space the build may map, 4096 by
+  default. tippecanoe is OOM-prone on a large input.
+- `TILETOPIA_TILESET_DISK_MB` — largest single file the build may write, the
+  archive included, 20480 by default.
+
 Analysis tiles (`/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png`) render from the
 loaded DEM store and a synthetic field by default. Two variables put them on
 real elevation instead:
@@ -312,6 +350,12 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `GET` | `/api/v1/assets/{id}/jobs` | The asset's tiling jobs, newest first |
 | `GET` | `/api/v1/assets/{id}/tileset.json` | Serve tileset |
 | `GET` | `/api/v1/assets/{id}/tiles/{path}` | Serve individual tile |
+| `GET` | `/api/v1/tilesets` | List built vector tilesets |
+| `POST` | `/api/v1/tilesets` | Upload a vector file and queue its build (multipart) |
+| `GET` | `/api/v1/tilesets/{id}` | One tileset, including build status and the stderr tail on failure |
+| `DELETE` | `/api/v1/tilesets/{id}` | Delete the archive, its row and its martin source |
+| `GET` | `/martin/{source}` | TileJSON for a PMTiles source |
+| `GET` | `/martin/{source}/{z}/{x}/{y}` | Vector tile from a PMTiles source |
 | `GET` | `/api/v1/terrain/layer.json` | Quantized-mesh layer metadata, generated from DEM |
 | `GET` | `/api/v1/terrain/{z}/{x}/{y}.terrain` | Quantized-mesh tile, generated from DEM |
 | `GET` | `/api/v1/terrain/bundles` | Prebuilt terrain bundles this server hosts |
@@ -344,11 +388,15 @@ On top of the role tier:
 | `DELETE /api/v1/assets/{id}`, `POST /api/v1/assets/{id}/tile` | editor + owner of the asset, or admin |
 | `POST`/`DELETE /api/v1/assets/{id}/annotations` | editor + owner of the asset, or admin. Deletes are scoped to the asset in the path |
 | `GET /api/v1/assets` | token required; lists your own assets plus ownerless legacy rows, admins see all |
+| `POST /api/v1/tilesets` | editor or admin |
+| `GET`/`DELETE /api/v1/tilesets/{id}`, `GET /api/v1/tilesets` | owner of the tileset, or admin. Every row has an owner |
 | `POST`/`PUT`/`DELETE /api/v1/plugins/registry/...` | admin, because a plugin runs server-wide |
 
 Assets created before ownership existed have no owner and stay writable by any
 editor. Hiding an asset from the list does not hide its tiles: tile URLs are
-public by design.
+public by design. A tileset's own tiles are the same story one tier up: the
+`/martin` routes need a token but not ownership, so any signed-in caller who
+knows a source id can read it.
 
 The realtime websocket needs any valid JWT. Browsers cannot set the
 Authorization header on a websocket handshake, so the token is offered as a

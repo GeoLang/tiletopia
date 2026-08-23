@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Vector tilesets. `POST /api/v1/tilesets` takes a `.geojson`, `.geojson.gz`,
+  `.fgb` or `.csv` multipart upload, answers 202 with the job id and the
+  registry row, and a worker builds it into one PMTiles archive with
+  tippecanoe. A ready archive registers as a martin source named after the
+  tileset id, so it serves at `/martin/{id}/{z}/{x}/{y}` with TileJSON at
+  `/martin/{id}`. `GET /api/v1/tilesets` lists the caller's rows with status,
+  source id, built_at, size and the stderr tail on failure, `GET
+  /api/v1/tilesets/{id}` is one row, and `DELETE /api/v1/tilesets/{id}` removes
+  the archive, the row and the source together. Uploads and deletes take the
+  Edit tier plus ownership, admins see everything.
+- The tileset registry lives in the SQLite database beside assets and jobs, and
+  every ready row re-registers at startup, so a restart serves what the last
+  run built. A build that was running when the server stopped is queued again.
+- The build runs tippecanoe as a subprocess with `-zg`,
+  `--drop-densest-as-needed`, a layer name from the uploaded filename and its
+  own work directory, and records the argv it ran. The child gets a timeout, a
+  capped address space and a capped file size, set between fork and exec.
+  `TILETOPIA_TILESET_DIR`, `TILETOPIA_TILESET_TIMEOUT_SECS`,
+  `TILETOPIA_TILESET_MEMORY_MB` and `TILETOPIA_TILESET_DISK_MB` configure them.
+  The Docker image builds tippecanoe 2.79.0 from source in its own stage, and
+  the Linux CI row installs the same tag so the build tests run there.
 - `TILETOPIA_PMTILES_DIR` serves PMTiles archives under `/martin`. Every
   `*.pmtiles` file directly in the directory is registered under its filename
   stem, so `basemap.pmtiles` answers at `/martin/basemap/{z}/{x}/{y}` and
