@@ -361,8 +361,16 @@ impl TilesetBuilder {
                 tileset.error = Some(error);
             }
         }
-        if let Err(e) = self.db.finish_tileset(&tileset).await {
-            tracing::error!("could not record tileset {}: {e}", tileset.id);
+        match self.db.finish_tileset(&tileset).await {
+            // a delete that landed mid-build took the row, so the archive this
+            // run just wrote and registered has nothing naming it
+            Ok(0) => {
+                self.backend.remove_source(&tileset.source_id).await;
+                let _ = tokio::fs::remove_file(&archive).await;
+                tracing::info!("tileset {} was deleted while it was building", tileset.id);
+            }
+            Ok(_) => {}
+            Err(e) => tracing::error!("could not record tileset {}: {e}", tileset.id),
         }
     }
 

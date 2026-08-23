@@ -731,11 +731,11 @@ impl Database {
         Ok(result.rows_affected())
     }
 
-    /// Write back the build's outcome. Identity and build parameters are set
-    /// once at creation and left out here, so they cannot drift from the
-    /// archive the row names.
-    pub async fn finish_tileset(&self, tileset: &TilesetRecord) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    /// Write back the build's outcome, reporting whether the row was still
+    /// there. Identity and build parameters are set once at creation and left
+    /// out here, so they cannot drift from the archive the row names.
+    pub async fn finish_tileset(&self, tileset: &TilesetRecord) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
             "UPDATE tilesets SET status = ?, size_bytes = ?, built_at = ?, error = ? WHERE id = ?",
         )
         .bind(enum_to_str(&tileset.status))
@@ -746,7 +746,7 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
-        Ok(())
+        Ok(result.rows_affected())
     }
 
     pub async fn delete_tileset(&self, id: Uuid) -> Result<u64, sqlx::Error> {

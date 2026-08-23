@@ -289,6 +289,38 @@ async fn a_ready_archive_re_registers_after_a_restart() {
 }
 
 #[tokio::test]
+async fn a_build_whose_row_was_deleted_leaves_no_archive_or_source() {
+    if !tippecanoe_installed() {
+        return;
+    }
+    let editor = token("tileset-editor", "editor");
+    let state = common::build_state(
+        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+        None,
+    )
+    .await;
+
+    // no worker runs, so the build is driven by hand after the row is gone,
+    // which is the delete-during-build race without having to win it
+    let (_, accepted) = upload(&state, &editor, "roads.geojson", FIXTURE_GEOJSON).await;
+    let id: uuid::Uuid = accepted["tileset"]["id"].as_str().unwrap().parse().unwrap();
+    let record = state.db.claim_tileset_build().await.unwrap().unwrap();
+    assert_eq!(state.db.delete_tileset(id).await.unwrap(), 1);
+
+    let builder = TilesetBuilder::new(
+        Arc::clone(&state.db),
+        state.data_dir.clone(),
+        state.tileset_dir.clone(),
+        state.martin_backend.clone(),
+    );
+    builder.build(record).await;
+
+    assert!(!state.martin_backend.contains(&id.to_string()).await);
+    assert!(!state.tileset_dir.join(format!("{id}.pmtiles")).exists());
+    assert!(state.db.get_tileset(id).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn an_extension_tippecanoe_cannot_read_is_refused_before_any_build() {
     let editor = token("tileset-editor", "editor");
     let state = common::build_state(

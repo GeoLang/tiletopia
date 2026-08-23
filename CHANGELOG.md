@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   /api/v1/tilesets/{id}` is one row, and `DELETE /api/v1/tilesets/{id}` removes
   the archive, the row and the source together. Uploads and deletes take the
   Edit tier plus ownership, admins see everything.
+- A delete that lands while a build is running leaves nothing behind: the
+  worker finds its row gone and drops the archive it just wrote along with the
+  source it registered.
 - The tileset upload streams the file straight to disk and raises the route's
   body limit to 4 GiB, since axum's own default of 2 MB is smaller than any
   file worth building a tileset from.
