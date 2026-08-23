@@ -1022,6 +1022,53 @@ pub mod martin_backend {
             .with_state(backend)
     }
 
+    /// Directory holding the PMTiles archives to serve.
+    pub const PMTILES_DIR_ENV: &str = "TILETOPIA_PMTILES_DIR";
+
+    const PMTILES_EXTENSION: &str = "pmtiles";
+
+    /// Register every `*.pmtiles` file sitting directly in `TILETOPIA_PMTILES_DIR`,
+    /// each under its filename stem. Unset registers nothing and is not an error.
+    /// A directory that cannot be read is, so a typo in the path stops the server
+    /// rather than serving an empty catalog. One archive that fails to open is
+    /// logged and skipped.
+    pub async fn register_pmtiles_dir(backend: &MartinTileBackend) -> Result<(), String> {
+        let Some(dir) = std::env::var(PMTILES_DIR_ENV)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(());
+        };
+
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|e| format!("{PMTILES_DIR_ENV}={dir} cannot be read: {e}"))?;
+
+        for entry in entries {
+            let path = entry
+                .map_err(|e| format!("{PMTILES_DIR_ENV}={dir} cannot be read: {e}"))?
+                .path();
+            let is_archive = path.is_file()
+                && path.extension().and_then(|e| e.to_str()) == Some(PMTILES_EXTENSION);
+            if !is_archive {
+                continue;
+            }
+            let Some(source_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                tracing::warn!("skipping PMTiles archive with a non-UTF-8 name: {path:?}");
+                continue;
+            };
+            match backend.add_pmtiles(source_id, &path).await {
+                Ok(()) => tracing::info!(
+                    "serving PMTiles source '{source_id}' from {}",
+                    path.display()
+                ),
+                Err(e) => tracing::warn!("skipping PMTiles source '{source_id}': {e}"),
+            }
+        }
+
+        Ok(())
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;

@@ -74,6 +74,9 @@ tokio-tungstenite = "0.29"
 futures = { workspace = true }
 tempfile = "3"
 flate2 = "1"
+# martin-core enables pmtiles with tilejson and object-store only, so the
+# writer that builds the test fixtures is not reachable without this
+pmtiles = { version = "0.23", default-features = false, features = ["write"] }
 tiletopia-store = { path = "../tiletopia-store" }
 quick-xml = { workspace = true }
 uuid = { workspace = true }

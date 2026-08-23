@@ -153,6 +153,16 @@ async fn main() -> anyhow::Result<()> {
             // a bbox typo would otherwise only show up as failing analysis tiles
             tiletopia_server::analysis_tiles::startup_check().map_err(anyhow::Error::msg)?;
 
+            #[cfg(feature = "martin")]
+            let martin_backend = {
+                use tiletopia_server::map_tiles::martin_backend;
+                let backend = martin_backend::MartinTileBackend::new();
+                martin_backend::register_pmtiles_dir(&backend)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+                backend
+            };
+
             std::fs::create_dir_all(&data_dir)?;
 
             let db_url = format!(
@@ -215,6 +225,8 @@ async fn main() -> anyhow::Result<()> {
                 elevation_store: std::sync::Arc::new(tiletopia_server::elevation::DemStore::new()),
                 analysis_engines: tiletopia_server::analysis_tiles::AnalysisEngines::new(),
                 entity_link_store: tiletopia_server::entity_linking::EntityLinkStore::new(),
+                #[cfg(feature = "martin")]
+                martin_backend,
             });
 
             let app = tiletopia_server::router(state);

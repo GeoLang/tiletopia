@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-23
+
+### Added
+
+- `TILETOPIA_PMTILES_DIR` serves PMTiles archives under `/martin`. Every
+  `*.pmtiles` file directly in the directory is registered under its filename
+  stem, so `basemap.pmtiles` answers at `/martin/basemap/{z}/{x}/{y}` and
+  appears in `/martin/catalog`. Unset serves nothing, a directory that cannot
+  be read refuses startup, and one archive that fails to open is logged and
+  skipped. The routes sit behind the same JWT as the rest of the API. Needs
+  the `martin` cargo feature, which the Docker image and the ubuntu CI row now
+  build with.
+
 ## [Unreleased] - 2026-08-22
 
 ### Removed

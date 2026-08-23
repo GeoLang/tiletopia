@@ -181,6 +181,15 @@ tiletopia serve --data-dir ./data --port 3000
   vector files. The Docker image sets it. Outside the image, download
   `mago-3d-tiler-1.16.2.jar` from the Gaia3D releases and point this at it, with
   a JDK 21 on `PATH`. Unset means mesh and vector jobs fail naming the variable.
+- `TILETOPIA_PMTILES_DIR` — directory of PMTiles archives to serve under
+  `/martin`. Every `*.pmtiles` file directly in it, subdirectories excluded, is
+  registered under its filename stem: `basemap.pmtiles` answers at
+  `/martin/basemap/{z}/{x}/{y}`, and `/martin/catalog` lists what was
+  registered. Unset serves nothing. A directory that cannot be read refuses
+  startup; a single archive that fails to open is logged and skipped. Needs the
+  `martin` cargo feature, which the Docker image builds with. These routes sit
+  behind the same JWT as the rest of the API, so a tile client has to send a
+  token.
 
 Analysis tiles (`/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png`) render from the
 loaded DEM store and a synthetic field by default. Two variables put them on

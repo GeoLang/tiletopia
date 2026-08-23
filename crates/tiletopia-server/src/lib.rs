@@ -132,6 +132,10 @@ pub struct AppState {
     pub elevation_store: Arc<elevation::DemStore>,
     pub analysis_engines: analysis_tiles::AnalysisEngines,
     pub entity_link_store: entity_linking::EntityLinkStore,
+    /// Sources served under `/martin`. Filled in before [`router`] is called,
+    /// because registering an archive is async and `router` is not.
+    #[cfg(feature = "martin")]
+    pub martin_backend: map_tiles::martin_backend::MartinTileBackend,
 }
 
 /// A managed geospatial asset.
@@ -263,7 +267,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/realtime/{room}", get(realtime::ws_handler))
         .layer(middleware::from_fn(realtime::require_room_join));
 
-    Router::new()
+    let app = Router::new()
         .route("/api/v1/assets", get(list_assets))
         .route("/api/v1/assets/{id}", get(get_asset))
         .route("/api/v1/assets/{id}/tileset.json", get(get_tileset))
@@ -335,8 +339,19 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(catalog::add_dataset_routes())
         .merge(plugin_registry::plugin_registry_routes())
         .merge(ion_compat::ion_compat_read_routes())
-        .merge(ion_compat::ion_compat_write_routes())
-        .layer(middleware::from_fn(auth::auth_middleware))
+        .merge(ion_compat::ion_compat_write_routes());
+
+    // merged before the auth layer below, so /martin needs a token like the rest
+    // of the API. no source is public: there is nothing to mark one public with,
+    // and an archive can hold anything that was dropped in the pmtiles directory.
+    #[cfg(feature = "martin")]
+    let app = app.merge(
+        // martin_routes already carries its own state; with_state only retypes
+        // the empty state so it can merge into an Arc<AppState> router
+        map_tiles::martin_backend::martin_routes(state.martin_backend.clone()).with_state(()),
+    );
+
+    app.layer(middleware::from_fn(auth::auth_middleware))
         .merge(auth_routes)
         .layer(CorsLayer::permissive())
         .with_state(state)

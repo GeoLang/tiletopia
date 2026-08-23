@@ -14,7 +14,7 @@ COPY crates/ crates/
 COPY patches/ patches/
 
 # Build release binary
-RUN cargo build --release --bin tiletopia
+RUN cargo build --release --bin tiletopia --features martin
 
 # Minimal runtime image
 FROM debian:bookworm-slim

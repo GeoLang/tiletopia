@@ -1978,6 +1978,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "countio"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9702aee5d1d744c01d82f6915644f950f898e014903385464c773b96fefdecb"
+
+[[package]]
 name = "cpp_demangle"
 version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6686,13 +6692,16 @@ checksum = "579153334aed2e066da3e2509b03c686b9d6e737ee2c3635f5baa90a57a762e1"
 dependencies = [
  "async-compression",
  "bytes",
+ "countio",
  "fast_hilbert",
+ "flate2",
  "object_store",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tilejson",
  "tokio",
+ "twox-hash",
  "varint-rs",
 ]
 
@@ -9376,6 +9385,7 @@ dependencies = [
  "nubis-core 0.1.0 (git+https://github.com/GeoLang/nubis.git?tag=v0.1.0)",
  "object_store",
  "petgraph",
+ "pmtiles",
  "printpdf",
  "quick-xml 0.39.4",
  "rand 0.9.4",
@@ -9938,6 +9948,12 @@ dependencies = [
  "sha1 0.10.6",
  "thiserror 2.0.18",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8464ec13c3691491391d9fce00f6416c9a48e46972f72d7865688be2080192c9"
 
 [[package]]
 name = "typed-path"
