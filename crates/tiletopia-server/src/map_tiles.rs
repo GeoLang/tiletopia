@@ -996,8 +996,7 @@ pub mod martin_backend {
             State(b): State<MartinTileBackend>,
             Path((source_id, z, x, y)): Path<(String, u8, u32, u32)>,
         ) -> impl IntoResponse {
-            // a source nobody registered is a 404, not a server fault: get_tile
-            // reports it as an ordinary error string like a failed read
+            // get_tile reports an unregistered source as an ordinary error string
             if !b.contains(&source_id).await {
                 return StatusCode::NOT_FOUND.into_response();
             }

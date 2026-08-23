@@ -86,8 +86,10 @@ mod tests {
     // -- terrain reads --
     //
     // the exemption rule itself is unit-tested in auth::tests (the middleware
-    // only enforces when TILETOPIA_JWT_SECRET is set, which a test cannot do
-    // without racing every other test in the process). these two cover that the
+    // only enforces when TILETOPIA_JWT_SECRET is set, which a test in this
+    // binary cannot do without racing every other test in the process: a test
+    // that needs it set gets its own binary, see
+    // martin_routes_refuse_a_tokenless_request). these two cover that the
     // routes exist and answer a tokenless GET.
 
     #[tokio::test]
