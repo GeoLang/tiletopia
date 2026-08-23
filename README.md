@@ -184,8 +184,8 @@ tiletopia serve --data-dir ./data --port 3000
 - `TILETOPIA_PMTILES_DIR` — directory of PMTiles archives to serve under
   `/martin`. Every `*.pmtiles` file directly in it, subdirectories excluded, is
   registered under its filename stem: `basemap.pmtiles` answers at
-  `/martin/basemap/{z}/{x}/{y}`, and `/martin/catalog` lists what was
-  registered. Unset serves nothing. A directory that cannot be read refuses
+  `/martin/basemap/{z}/{x}/{y}`, and `/martin/catalog` lists these archives to
+  every signed-in caller. Unset serves nothing. A directory that cannot be read refuses
   startup; a single archive that fails to open is logged and skipped. Needs the
   `martin` cargo feature, which the Docker image builds with. These routes sit
   behind the same JWT as the rest of the API, so a tile client has to send a
@@ -356,6 +356,7 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `POST` | `/api/v1/tilesets` | Upload a vector file and queue its build (multipart) |
 | `GET` | `/api/v1/tilesets/{id}` | One tileset, including build status and the stderr tail on failure |
 | `DELETE` | `/api/v1/tilesets/{id}` | Delete the archive, its row and its martin source |
+| `GET` | `/martin/catalog` | Sources the caller may see: operator archives, plus their own tilesets |
 | `GET` | `/martin/{source}` | TileJSON for a PMTiles source |
 | `GET` | `/martin/{source}/{z}/{x}/{y}` | Vector tile from a PMTiles source |
 | `GET` | `/api/v1/terrain/layer.json` | Quantized-mesh layer metadata, generated from DEM |
@@ -398,7 +399,9 @@ Assets created before ownership existed have no owner and stay writable by any
 editor. Hiding an asset from the list does not hide its tiles: tile URLs are
 public by design. A tileset's own tiles are the same story one tier up: the
 `/martin` routes need a token but not ownership, so any signed-in caller who
-knows a source id can read it.
+knows a source id can read it. `/martin/catalog` is where that stops: it lists
+the archives from `TILETOPIA_PMTILES_DIR` plus the caller's own tilesets, so
+nobody can enumerate another owner's source ids. Admins see every source.
 
 The realtime websocket needs any valid JWT. Browsers cannot set the
 Authorization header on a websocket handshake, so the token is offered as a

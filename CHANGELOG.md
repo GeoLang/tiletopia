@@ -46,6 +46,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `martin` cargo feature, which the Docker image and every CI row now build
   with.
 
+### Fixed
+
+- A build the server was restarted in the middle of finishes when it is queued
+  again. tippecanoe exits rather than write over an archive, so the half-built
+  one and its journal are removed before the run.
+- `{id}.pmtiles-journal` no longer piles up in the tileset directory: a failed
+  build and a delete both take the journal along with the archive.
+- The `name` field of a tileset upload is capped at 200 characters and counted
+  as it arrives, so an oversized one is a 400 rather than a row in the registry.
+- `TILETOPIA_TILESET_MEMORY_MB` and `TILETOPIA_TILESET_DISK_MB` are converted to
+  bytes with checked arithmetic, and a value too large to convert refuses
+  startup instead of panicking or wrapping to a tiny limit.
+- A `setrlimit` that fails now fails the spawn, rather than running the build
+  with no limit at all. The build also runs with `RLIMIT_CORE` at 0, so one
+  aborted by the memory cap cannot dump a core file that large.
+- `GET /martin/{id}` answers with TileJSON a client can use: the `tiles` array
+  carries the `/martin/{source}/{z}/{x}/{y}` template instead of being empty,
+  `name` is the tileset's stored name, and the fields tippecanoe fills with the
+  build's absolute paths are gone. `vector_layers` is kept.
+- A tile coordinate outside the zoom's grid is a 404 rather than a 500.
+- `GET /martin/catalog` lists the archives from `TILETOPIA_PMTILES_DIR` to every
+  signed-in caller, but a built tileset only to its owner, so the catalog cannot
+  be used to enumerate another owner's source ids. Admins see everything. Tile
+  and TileJSON reads are unchanged: any valid token may read a source it knows
+  the id of.
+
 ## [Unreleased] - 2026-08-22
 
 ### Removed

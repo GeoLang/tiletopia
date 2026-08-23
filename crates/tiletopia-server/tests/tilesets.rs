@@ -9,8 +9,11 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use tiletopia_server::db::{TilesetRecord, TilesetStatus};
 use tiletopia_server::map_tiles::martin_backend::MartinTileBackend;
-use tiletopia_server::tilesets::{TilesetBuilder, register_ready_tilesets, tippecanoe_version};
+use tiletopia_server::tilesets::{
+    MAX_NAME_CHARS, TilesetBuilder, register_ready_tilesets, tippecanoe_version,
+};
 use tiletopia_server::{AppState, router};
 use tower::ServiceExt;
 
@@ -76,14 +79,20 @@ async fn state_with_builder() -> (Arc<AppState>, tokio::task::JoinHandle<()>) {
         None,
     )
     .await;
-    let builder = Arc::new(TilesetBuilder::new(
-        Arc::clone(&state.db),
-        state.data_dir.clone(),
-        state.tileset_dir.clone(),
-        state.martin_backend.clone(),
-    ));
-    let worker = builder.start();
+    let worker = builder_for(&state).start();
     (state, worker)
+}
+
+fn builder_for(state: &Arc<AppState>) -> Arc<TilesetBuilder> {
+    Arc::new(
+        TilesetBuilder::new(
+            Arc::clone(&state.db),
+            state.data_dir.clone(),
+            state.tileset_dir.clone(),
+            state.martin_backend.clone(),
+        )
+        .unwrap(),
+    )
 }
 
 async fn upload(
@@ -92,9 +101,26 @@ async fn upload(
     filename: &str,
     contents: &str,
 ) -> (StatusCode, serde_json::Value) {
+    upload_named(state, token, filename, contents, None).await
+}
+
+async fn upload_named(
+    state: &Arc<AppState>,
+    token: &str,
+    filename: &str,
+    contents: &str,
+    name: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
     let boundary = "tiletopiatilesetboundary";
+    let named = name
+        .map(|name| {
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\n{name}\r\n"
+            )
+        })
+        .unwrap_or_default();
     let body = format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
+        "{named}--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
          filename=\"{filename}\"\r\n\r\n{contents}\r\n--{boundary}--\r\n"
     );
     let response = router(Arc::clone(state))
@@ -147,6 +173,17 @@ async fn json(state: &Arc<AppState>, uri: &str, token: &str) -> serde_json::Valu
     let (status, body) = request(state, "GET", uri, token).await;
     assert_eq!(status, StatusCode::OK, "{uri}");
     serde_json::from_slice(&body).unwrap()
+}
+
+/// Every string anywhere in the value, so a path can be looked for wherever it
+/// might sit.
+fn strings_in(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::String(text) => vec![text.clone()],
+        serde_json::Value::Array(items) => items.iter().flat_map(strings_in).collect(),
+        serde_json::Value::Object(fields) => fields.values().flat_map(strings_in).collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Poll the record until the build leaves `building`, and hand back the record.
@@ -203,12 +240,39 @@ async fn a_geojson_upload_builds_an_archive_that_serves_tiles_until_it_is_delete
     assert_eq!(listed.as_array().unwrap().len(), 1);
     assert_eq!(listed[0]["id"], serde_json::Value::String(id.clone()));
 
+    // the TileJSON a client can actually use: this server's tile URL, the layer
+    // list, the uploaded name, and none of the build's paths
     let tilejson = json(&state, &format!("/martin/{id}"), &editor).await;
-    assert!(tilejson["tiles"].is_array(), "{tilejson}");
+    assert_eq!(
+        tilejson["tiles"],
+        serde_json::json!([format!("/martin/{id}/{{z}}/{{x}}/{{y}}")]),
+        "{tilejson}"
+    );
+    assert_eq!(tilejson["name"], "city roads.geojson", "{tilejson}");
+    assert_eq!(
+        tilejson["vector_layers"][0]["id"], "city_roads",
+        "{tilejson}"
+    );
+    for text in strings_in(&tilejson) {
+        assert!(
+            !text.starts_with('/') || text == format!("/martin/{id}/{{z}}/{{x}}/{{y}}"),
+            "an absolute path reached the client: {text}"
+        );
+    }
 
     let (status, tile) = request(&state, "GET", &format!("/martin/{id}/0/0/0"), &editor).await;
     assert_eq!(status, StatusCode::OK);
     assert!(!tile.is_empty());
+
+    // a coordinate outside the zoom's grid is the client's mistake
+    let (status, _) = request(
+        &state,
+        "GET",
+        &format!("/martin/{id}/0/99999/99999"),
+        &editor,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     let (status, _) = request(&state, "DELETE", &format!("/api/v1/tilesets/{id}"), &editor).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -307,13 +371,7 @@ async fn a_build_whose_row_was_deleted_leaves_no_archive_or_source() {
     let record = state.db.claim_tileset_build().await.unwrap().unwrap();
     assert_eq!(state.db.delete_tileset(id).await.unwrap(), 1);
 
-    let builder = TilesetBuilder::new(
-        Arc::clone(&state.db),
-        state.data_dir.clone(),
-        state.tileset_dir.clone(),
-        state.martin_backend.clone(),
-    );
-    builder.build(record).await;
+    builder_for(&state).build(record).await;
 
     assert!(!state.martin_backend.contains(&id.to_string()).await);
     assert!(!state.tileset_dir.join(format!("{id}.pmtiles")).exists());
@@ -447,4 +505,271 @@ async fn the_tileset_routes_refuse_a_tokenless_request() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// The journal tippecanoe keeps beside an archive while it writes.
+fn journal_of(archive: &std::path::Path) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{}-journal", archive.display()))
+}
+
+/// A one-tile PMTiles archive, so a source can be registered without a build.
+fn write_archive(path: &std::path::Path) {
+    use pmtiles::{PmTilesWriter, TileCoord, TileType};
+    let file = std::fs::File::create(path).unwrap();
+    let mut writer = PmTilesWriter::new(TileType::Mvt).create(file).unwrap();
+    writer
+        .add_tile(TileCoord::new(0, 0, 0).unwrap(), b"tile bytes")
+        .unwrap();
+    writer.finalize().unwrap();
+}
+
+/// A ready registry row with its archive registered, without running a build.
+async fn register_tileset(state: &Arc<AppState>, owner: &str, name: &str) -> String {
+    let id = uuid::Uuid::new_v4();
+    let object_key = format!("{id}.pmtiles");
+    let archive = state.tileset_dir.join(&object_key);
+    write_archive(&archive);
+    let record = TilesetRecord {
+        id,
+        name: name.to_string(),
+        status: TilesetStatus::Ready,
+        source_id: id.to_string(),
+        object_key,
+        original_filename: format!("{name}.geojson"),
+        layer_name: "roads".to_string(),
+        argv: Vec::new(),
+        size_bytes: archive.metadata().unwrap().len(),
+        created_at: chrono::Utc::now(),
+        built_at: Some(chrono::Utc::now()),
+        error: None,
+        owner_id: owner.to_string(),
+        started_at: None,
+    };
+    state.db.create_tileset(&record).await.unwrap();
+    state
+        .martin_backend
+        .add_pmtiles(&record.source_id, &archive)
+        .await
+        .unwrap();
+    id.to_string()
+}
+
+/// The source ids the catalog shows this caller, sorted so the order the
+/// backend hands them back in does not matter.
+async fn catalog_ids(state: &Arc<AppState>, token: &str) -> Vec<String> {
+    let catalog = json(state, "/martin/catalog", token).await;
+    let mut ids: Vec<String> = catalog
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn sorted(ids: &[&str]) -> Vec<String> {
+    let mut ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    ids.sort();
+    ids
+}
+
+#[tokio::test]
+async fn a_build_a_restart_interrupted_finishes_when_it_is_queued_again() {
+    if !tippecanoe_installed() {
+        return;
+    }
+    let editor = token("tileset-editor", "editor");
+    let state = common::build_state(
+        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+        None,
+    )
+    .await;
+
+    // no worker runs, so the row is claimed by hand and left the way a restart
+    // finds one: claimed, its input still on disk, a fragment of the archive
+    // and the journal beside it
+    let (_, accepted) = upload(&state, &editor, "roads.geojson", FIXTURE_GEOJSON).await;
+    let id = accepted["tileset"]["id"].as_str().unwrap().to_string();
+    let claimed = state.db.claim_tileset_build().await.unwrap().unwrap();
+    assert_eq!(claimed.id.to_string(), id);
+
+    let archive = state.tileset_dir.join(format!("{id}.pmtiles"));
+    std::fs::write(&archive, b"half an archive").unwrap();
+    std::fs::write(journal_of(&archive), b"half a journal").unwrap();
+    let input = state
+        .data_dir
+        .join("tileset_builds")
+        .join(&id)
+        .join("source.geojson");
+    assert!(input.is_file(), "{}", input.display());
+
+    assert_eq!(state.db.requeue_claimed_tileset_builds().await.unwrap(), 1);
+    let worker = builder_for(&state).start();
+
+    let record = await_build(&state, &id, &editor).await;
+    assert_eq!(record["status"], "ready", "{record}");
+    assert!(!journal_of(&archive).exists());
+    assert!(archive.metadata().unwrap().len() > b"half an archive".len() as u64);
+
+    let (status, tile) = request(&state, "GET", &format!("/martin/{id}/0/0/0"), &editor).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!tile.is_empty());
+
+    worker.abort();
+}
+
+#[tokio::test]
+async fn a_failed_build_takes_the_journal_with_it() {
+    let state = common::build_state(
+        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+        None,
+    )
+    .await;
+
+    // a run that writes the journal and then fails, which is the state a killed
+    // tippecanoe leaves the tileset directory in
+    let id = uuid::Uuid::new_v4();
+    let archive = state.tileset_dir.join(format!("{id}.pmtiles"));
+    let journal = journal_of(&archive);
+    let record = TilesetRecord {
+        id,
+        name: "killed".to_string(),
+        status: TilesetStatus::Building,
+        source_id: id.to_string(),
+        object_key: format!("{id}.pmtiles"),
+        original_filename: "roads.geojson".to_string(),
+        layer_name: "roads".to_string(),
+        argv: vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("touch '{}'; exit 3", journal.display()),
+        ],
+        size_bytes: 0,
+        created_at: chrono::Utc::now(),
+        built_at: None,
+        error: None,
+        owner_id: "tileset-editor".to_string(),
+        started_at: None,
+    };
+    state.db.create_tileset(&record).await.unwrap();
+
+    builder_for(&state).build(record).await;
+
+    let row = state.db.get_tileset(id).await.unwrap().unwrap();
+    assert_eq!(row.status, TilesetStatus::Failed);
+    assert!(!journal.exists(), "the journal outlived the failed build");
+    assert!(!archive.exists());
+}
+
+#[tokio::test]
+async fn deleting_a_tileset_takes_the_journal_with_it() {
+    let editor = token("tileset-editor", "editor");
+    let state = common::build_state(
+        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+        None,
+    )
+    .await;
+
+    let (status, accepted) = upload(&state, &editor, "roads.geojson", FIXTURE_GEOJSON).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let id = accepted["tileset"]["id"].as_str().unwrap().to_string();
+    let archive = state.tileset_dir.join(format!("{id}.pmtiles"));
+    std::fs::write(&archive, b"an archive").unwrap();
+    std::fs::write(journal_of(&archive), b"a journal a killed build left").unwrap();
+
+    let (status, _) = request(&state, "DELETE", &format!("/api/v1/tilesets/{id}"), &editor).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!archive.exists());
+    assert!(
+        !journal_of(&archive).exists(),
+        "the journal outlived the row"
+    );
+}
+
+#[tokio::test]
+async fn a_name_past_the_cap_is_refused_and_never_stored() {
+    let editor = token("tileset-editor", "editor");
+    let state = common::build_state(
+        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+        None,
+    )
+    .await;
+
+    let longest = "n".repeat(MAX_NAME_CHARS);
+    let (status, accepted) = upload_named(
+        &state,
+        &editor,
+        "roads.geojson",
+        FIXTURE_GEOJSON,
+        Some(&longest),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    assert_eq!(accepted["tileset"]["name"], longest);
+
+    for name in [
+        "n".repeat(MAX_NAME_CHARS + 1),
+        // far past the cap: the bytes are counted as they arrive, so this one is
+        // refused rather than buffered and stored
+        "n".repeat(4 * 1024 * 1024),
+    ] {
+        let (status, _) = upload_named(
+            &state,
+            &editor,
+            "roads.geojson",
+            FIXTURE_GEOJSON,
+            Some(&name),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{} characters", name.len());
+    }
+
+    let listed = json(&state, "/api/v1/tilesets", &editor).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+}
+
+#[tokio::test]
+async fn the_catalog_shows_an_operator_archive_to_everyone_and_a_tileset_to_its_owner() {
+    let owner = token("catalog-owner", "editor");
+    let stranger = token("catalog-stranger", "editor");
+    let admin = token("catalog-admin", "admin");
+    let state = common::build_state(
+        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+        None,
+    )
+    .await;
+
+    let owned = register_tileset(&state, "catalog-owner", "owned roads").await;
+    let others = register_tileset(&state, "catalog-stranger", "other roads").await;
+
+    // an archive from TILETOPIA_PMTILES_DIR has no registry row and stays
+    // visible to every signed-in caller
+    let operator = state.tileset_dir.join("basemap.pmtiles");
+    write_archive(&operator);
+    state
+        .martin_backend
+        .add_pmtiles("basemap", &operator)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        catalog_ids(&state, &owner).await,
+        sorted(&["basemap", &owned])
+    );
+    assert_eq!(
+        catalog_ids(&state, &stranger).await,
+        sorted(&["basemap", &others])
+    );
+    assert_eq!(
+        catalog_ids(&state, &admin).await,
+        sorted(&["basemap", &owned, &others])
+    );
+
+    // the tile and TileJSON routes stay open to any signed-in caller: a shared
+    // viewer reads another member's tileset by id
+    let (status, _) = request(&state, "GET", &format!("/martin/{owned}"), &stranger).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = request(&state, "GET", &format!("/martin/{owned}/0/0/0"), &stranger).await;
+    assert_eq!(status, StatusCode::OK);
 }

@@ -354,7 +354,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(
             // martin_routes already carries its own state; with_state only retypes
             // the empty state so it can merge into an Arc<AppState> router
-            map_tiles::martin_backend::martin_routes(state.martin_backend.clone()).with_state(()),
+            map_tiles::martin_backend::martin_routes(
+                state.martin_backend.clone(),
+                Arc::clone(&state.db),
+            )
+            .with_state(()),
         )
         .route("/api/v1/tilesets", get(tilesets::list_tilesets))
         .route("/api/v1/tilesets/{id}", get(tilesets::get_tileset))

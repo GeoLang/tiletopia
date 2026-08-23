@@ -38,6 +38,12 @@ const DEFAULT_TIMEOUT_SECS: u64 = 3600;
 const DEFAULT_MEMORY_MB: u64 = 4096;
 const DEFAULT_DISK_MB: u64 = 20_480;
 
+const BYTES_PER_MEGABYTE: u64 = 1024 * 1024;
+
+/// Longest name an upload may give a tileset. It is a label in a list, and the
+/// registry hands it back on every read.
+pub const MAX_NAME_CHARS: usize = 200;
+
 /// tippecanoe reports progress and refusals on stderr and nowhere else, so a
 /// failed build keeps this much of it.
 const STDERR_TAIL_BYTES: usize = 8 * 1024;
@@ -94,6 +100,21 @@ fn build_dir(data_dir: &Path, id: Uuid) -> PathBuf {
 /// bites rather than the volume filling up.
 fn temporary_dir(build_dir: &Path) -> PathBuf {
     build_dir.join("tmp")
+}
+
+/// The journal tippecanoe keeps beside the archive while it writes, which a
+/// killed build leaves behind.
+fn journal_path(archive: &Path) -> PathBuf {
+    let mut name = archive.as_os_str().to_os_string();
+    name.push("-journal");
+    PathBuf::from(name)
+}
+
+/// Drop an archive and its journal together, so neither half is left to be
+/// found by a later build or a directory listing.
+async fn remove_archive(archive: &Path) {
+    let _ = tokio::fs::remove_file(archive).await;
+    let _ = tokio::fs::remove_file(journal_path(archive)).await;
 }
 
 /// Which of the accepted extensions this filename ends in.
@@ -175,10 +196,19 @@ pub struct BuildLimits {
     pub file_bytes: u64,
 }
 
+/// Bytes in `megabytes`, refusing a value too large to count in bytes rather
+/// than wrapping to a small limit.
+fn megabytes_to_bytes(name: &str, megabytes: u64) -> Result<u64, String> {
+    megabytes.checked_mul(BYTES_PER_MEGABYTE).ok_or_else(|| {
+        let most = u64::MAX / BYTES_PER_MEGABYTE;
+        format!("{name}={megabytes} is more megabytes than fit in a byte count, the most is {most}")
+    })
+}
+
 impl BuildLimits {
     /// The limits the environment asks for, each falling back to its default
-    /// when unset or unreadable.
-    pub fn from_env() -> Self {
+    /// when unset or unreadable. `Err` refuses startup.
+    pub fn from_env() -> Result<Self, String> {
         let number = |name: &str, default: u64| {
             std::env::var(name)
                 .ok()
@@ -186,11 +216,17 @@ impl BuildLimits {
                 .filter(|value| *value > 0)
                 .unwrap_or(default)
         };
-        Self {
+        Ok(Self {
             timeout: Duration::from_secs(number(BUILD_TIMEOUT_ENV, DEFAULT_TIMEOUT_SECS)),
-            memory_bytes: number(MEMORY_LIMIT_ENV, DEFAULT_MEMORY_MB) * 1024 * 1024,
-            file_bytes: number(DISK_LIMIT_ENV, DEFAULT_DISK_MB) * 1024 * 1024,
-        }
+            memory_bytes: megabytes_to_bytes(
+                MEMORY_LIMIT_ENV,
+                number(MEMORY_LIMIT_ENV, DEFAULT_MEMORY_MB),
+            )?,
+            file_bytes: megabytes_to_bytes(
+                DISK_LIMIT_ENV,
+                number(DISK_LIMIT_ENV, DEFAULT_DISK_MB),
+            )?,
+        })
     }
 }
 
@@ -208,13 +244,10 @@ fn build_command(argv: &[String], limits: &BuildLimits) -> tokio::process::Comma
     #[cfg(unix)]
     {
         let limits = *limits;
-        // safety: the hook does nothing but two setrlimit syscalls on stack
-        // values, which is all a forked child may do before exec
+        // safety: the hook does nothing but setrlimit syscalls on stack values,
+        // which is all a forked child may do before exec
         unsafe {
-            command.pre_exec(move || {
-                set_limits(&limits);
-                Ok(())
-            });
+            command.pre_exec(move || set_limits(&limits));
         }
     }
     #[cfg(not(unix))]
@@ -226,20 +259,25 @@ fn build_command(argv: &[String], limits: &BuildLimits) -> tokio::process::Comma
 /// tippecanoe is OOM-prone on a large input, so the address space is capped.
 /// `RLIMIT_FSIZE` is the quota a work directory on a shared volume can be
 /// given: it caps any single file the build writes, the archive included.
+/// `Err` fails the spawn, rather than running the build with no limits at all.
 #[cfg(unix)]
-fn set_limits(limits: &BuildLimits) {
-    let apply = |resource, bytes: u64| {
+fn set_limits(limits: &BuildLimits) -> std::io::Result<()> {
+    let apply = |resource, bytes: u64| -> std::io::Result<()> {
         let limit = libc::rlimit {
             rlim_cur: bytes as libc::rlim_t,
             rlim_max: bytes as libc::rlim_t,
         };
         // safety: a bare syscall on a stack value, in the forked child
-        unsafe {
-            libc::setrlimit(resource, &limit);
+        if unsafe { libc::setrlimit(resource, &limit) } != 0 {
+            return Err(std::io::Error::last_os_error());
         }
+        Ok(())
     };
-    apply(libc::RLIMIT_AS, limits.memory_bytes);
-    apply(libc::RLIMIT_FSIZE, limits.file_bytes);
+    apply(libc::RLIMIT_AS, limits.memory_bytes)?;
+    apply(libc::RLIMIT_FSIZE, limits.file_bytes)?;
+    // a build aborted by the address-space cap would otherwise dump a core file
+    // as large as the cap
+    apply(libc::RLIMIT_CORE, 0)
 }
 
 /// Everything tippecanoe wrote on stderr, cut to its last [`STDERR_TAIL_BYTES`].
@@ -305,19 +343,21 @@ pub struct TilesetBuilder {
 }
 
 impl TilesetBuilder {
+    /// `Err` when the environment asks for a limit that cannot be counted in
+    /// bytes, which refuses startup.
     pub fn new(
         db: Arc<Database>,
         data_dir: PathBuf,
         tileset_dir: PathBuf,
         backend: MartinTileBackend,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        Ok(Self {
             db,
             data_dir,
             tileset_dir,
             backend,
-            limits: BuildLimits::from_env(),
-        }
+            limits: BuildLimits::from_env()?,
+        })
     }
 
     /// Start the background worker loop.
@@ -355,7 +395,7 @@ impl TilesetBuilder {
                 );
             }
             Err(error) => {
-                let _ = tokio::fs::remove_file(&archive).await;
+                remove_archive(&archive).await;
                 tileset.status = TilesetStatus::Failed;
                 tracing::error!("tileset {} failed: {error}", tileset.id);
                 tileset.error = Some(error);
@@ -366,7 +406,7 @@ impl TilesetBuilder {
             // run just wrote and registered has nothing naming it
             Ok(0) => {
                 self.backend.remove_source(&tileset.source_id).await;
-                let _ = tokio::fs::remove_file(&archive).await;
+                remove_archive(&archive).await;
                 tracing::info!("tileset {} was deleted while it was building", tileset.id);
             }
             Ok(_) => {}
@@ -387,6 +427,10 @@ impl TilesetBuilder {
         tokio::fs::create_dir_all(&self.tileset_dir)
             .await
             .map_err(|e| format!("could not make the tileset directory: {e}"))?;
+
+        // tippecanoe exits rather than write over an archive, so a build the
+        // last run was killed in the middle of would never get past this
+        remove_archive(archive).await;
 
         run_tippecanoe(&tileset.argv, &self.limits).await?;
 
@@ -460,6 +504,33 @@ async fn write_field(
     Ok(())
 }
 
+/// The `name` field, counted as it arrives so an oversized one is refused
+/// rather than held and stored.
+async fn read_name(field: &mut axum::extract::multipart::Field<'_>) -> Result<String, RouteError> {
+    // the widest a character encodes to, so the byte count refuses only what the
+    // character count would refuse too
+    const MAX_NAME_BYTES: usize = MAX_NAME_CHARS * 4;
+    let too_long = || bad_request(format!("name is longer than {MAX_NAME_CHARS} characters"));
+
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|_| bad_request("could not read the name"))?
+    {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > MAX_NAME_BYTES {
+            return Err(too_long());
+        }
+    }
+
+    let name = String::from_utf8(bytes).map_err(|_| bad_request("name is not text"))?;
+    if name.chars().count() > MAX_NAME_CHARS {
+        return Err(too_long());
+    }
+    Ok(name)
+}
+
 /// Whether these claims may modify this tileset. Every row has an owner, so
 /// there is no legacy case to wave through.
 fn may_modify(claims: &auth::Claims, tileset: &TilesetRecord) -> bool {
@@ -489,14 +560,13 @@ pub async fn upload_tileset(
         .map_err(|_| bad_request("malformed multipart body"))?
     {
         match field.name().unwrap_or("") {
-            "name" => {
-                name = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|_| bad_request("name is not text"))?,
-                );
-            }
+            "name" => match read_name(&mut field).await {
+                Ok(text) => name = Some(text),
+                Err(error) => {
+                    let _ = tokio::fs::remove_dir_all(&scratch).await;
+                    return Err(error);
+                }
+            },
             "file" => {
                 let original_filename = field.file_name().unwrap_or("upload").to_string();
                 let extension = accepted_extension(&original_filename).ok_or_else(|| {
@@ -613,7 +683,7 @@ pub async fn delete_tileset(
     }
 
     state.martin_backend.remove_source(&tileset.source_id).await;
-    let _ = tokio::fs::remove_file(state.tileset_dir.join(&tileset.object_key)).await;
+    remove_archive(&state.tileset_dir.join(&tileset.object_key)).await;
     let _ = tokio::fs::remove_dir_all(build_dir(&state.data_dir, id)).await;
     state
         .db
@@ -691,6 +761,29 @@ mod tests {
         assert_eq!(
             tileset_dir(Path::new("/data")),
             PathBuf::from("/data/tilesets")
+        );
+    }
+
+    #[test]
+    fn a_megabyte_count_that_does_not_fit_in_a_byte_count_is_refused() {
+        assert_eq!(
+            megabytes_to_bytes(MEMORY_LIMIT_ENV, DEFAULT_MEMORY_MB),
+            Ok(DEFAULT_MEMORY_MB * 1024 * 1024)
+        );
+
+        let biggest = u64::MAX / BYTES_PER_MEGABYTE;
+        assert!(megabytes_to_bytes(MEMORY_LIMIT_ENV, biggest).is_ok());
+
+        let error = megabytes_to_bytes(MEMORY_LIMIT_ENV, biggest + 1).unwrap_err();
+        assert!(error.contains(MEMORY_LIMIT_ENV), "{error}");
+        assert!(megabytes_to_bytes(DISK_LIMIT_ENV, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn the_journal_sits_beside_the_archive() {
+        assert_eq!(
+            journal_path(Path::new("/data/tilesets/abc.pmtiles")),
+            PathBuf::from("/data/tilesets/abc.pmtiles-journal")
         );
     }
 

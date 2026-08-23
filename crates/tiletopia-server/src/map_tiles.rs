@@ -965,39 +965,136 @@ pub mod martin_backend {
 
     // ── Axum route helpers ───────────────────────────────────────────────
 
+    /// The backend and the tileset registry the routes read owners and names
+    /// from.
+    #[derive(Clone)]
+    pub struct MartinRoutesState {
+        backend: MartinTileBackend,
+        db: Arc<crate::db::Database>,
+    }
+
+    /// The tile URL a client is told to fetch, with the placeholders a tile
+    /// library fills in.
+    fn tile_template(source_id: &str) -> String {
+        format!("/martin/{source_id}/{{z}}/{{x}}/{{y}}")
+    }
+
+    /// Fields tippecanoe fills with the absolute paths of the build, which say
+    /// nothing a client needs and everything about the server's filesystem.
+    const PATH_BEARING_TILEJSON_FIELDS: [&str; 2] = ["description", "generator_options"];
+
+    /// The TileJSON a client is given: the archive's own, with this server's
+    /// tile URL put in and the build's paths taken out. `name` becomes the name
+    /// the tileset was uploaded under, or the source id for an archive an
+    /// operator dropped in the PMTiles directory.
+    fn public_tilejson(
+        mut tilejson: serde_json::Value,
+        source_id: &str,
+        name: &str,
+    ) -> serde_json::Value {
+        let Some(object) = tilejson.as_object_mut() else {
+            return tilejson;
+        };
+        object.insert(
+            "tiles".to_string(),
+            serde_json::json!([tile_template(source_id)]),
+        );
+        object.insert("name".to_string(), serde_json::json!(name));
+        for field in PATH_BEARING_TILEJSON_FIELDS {
+            object.remove(field);
+        }
+        tilejson
+    }
+
     /// Build Axum routes for the Martin backend.
     ///
     /// Mounts:
-    /// - `GET  /martin/catalog`                — list all sources
+    /// - `GET  /martin/catalog`                — sources the caller may see
     /// - `GET  /martin/:source_id`             — TileJSON for a source
     /// - `GET  /martin/:source_id/:z/:x/:y`    — fetch a tile
-    pub fn martin_routes(backend: MartinTileBackend) -> axum::Router {
+    pub fn martin_routes(backend: MartinTileBackend, db: Arc<crate::db::Database>) -> axum::Router {
         use axum::extract::{Path, State};
-        use axum::http::StatusCode;
+        use axum::http::{HeaderMap, StatusCode};
         use axum::response::IntoResponse;
         use axum::routing::get;
 
-        async fn catalog_handler(State(b): State<MartinTileBackend>) -> impl IntoResponse {
-            let entries = b.catalog().await;
-            axum::Json(entries).into_response()
+        /// The built tilesets this caller does not own, which the catalog
+        /// leaves out. Empty for an admin and for a run with authentication
+        /// turned off.
+        async fn hidden_source_ids(
+            state: &MartinRoutesState,
+            headers: &HeaderMap,
+        ) -> Result<Vec<String>, StatusCode> {
+            // the auth layer already refused a tokenless request unless this run
+            // has authentication off, and then there is nobody to filter for
+            let Ok(claims) = crate::users::claims_from_headers(headers) else {
+                return Ok(Vec::new());
+            };
+            if claims.can_admin() {
+                return Ok(Vec::new());
+            }
+            let tilesets = state
+                .db
+                .list_tilesets()
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Ok(tilesets
+                .into_iter()
+                .filter(|tileset| tileset.owner_id != claims.sub)
+                .map(|tileset| tileset.source_id)
+                .collect())
+        }
+
+        async fn catalog_handler(
+            State(state): State<MartinRoutesState>,
+            headers: HeaderMap,
+        ) -> Result<axum::Json<Vec<SourceInfo>>, StatusCode> {
+            let hidden = hidden_source_ids(&state, &headers).await?;
+            let entries = state
+                .backend
+                .catalog()
+                .await
+                .into_iter()
+                .filter(|entry| !hidden.contains(&entry.id))
+                .collect();
+            Ok(axum::Json(entries))
         }
 
         async fn tilejson_handler(
-            State(b): State<MartinTileBackend>,
+            State(state): State<MartinRoutesState>,
             Path(source_id): Path<String>,
         ) -> impl IntoResponse {
-            match b.tilejson(&source_id).await {
-                Some(tj) => axum::Json(tj).into_response(),
-                None => StatusCode::NOT_FOUND.into_response(),
-            }
+            let Some(tilejson) = state.backend.tilejson(&source_id).await else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            // a built tileset's source id is its row id, and the row carries the
+            // name the uploader gave it
+            let stored_name = match uuid::Uuid::parse_str(&source_id) {
+                Ok(id) => state
+                    .db
+                    .get_tileset(id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|tileset| tileset.name),
+                Err(_) => None,
+            };
+            let name = stored_name.unwrap_or_else(|| source_id.clone());
+            axum::Json(public_tilejson(tilejson, &source_id, &name)).into_response()
         }
 
         async fn tile_handler(
-            State(b): State<MartinTileBackend>,
+            State(state): State<MartinRoutesState>,
             Path((source_id, z, x, y)): Path<(String, u8, u32, u32)>,
         ) -> impl IntoResponse {
+            let b = &state.backend;
             // get_tile reports an unregistered source as an ordinary error string
             if !b.contains(&source_id).await {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            // a coordinate outside the zoom's grid is a request for a tile that
+            // cannot exist, not a fault of this server
+            if MartinTileCoord::new_checked(z, x, y).is_none() {
                 return StatusCode::NOT_FOUND.into_response();
             }
             match b.get_tile(&source_id, z, x, y).await {
@@ -1023,7 +1120,7 @@ pub mod martin_backend {
             .route("/martin/catalog", get(catalog_handler))
             .route("/martin/{source_id}", get(tilejson_handler))
             .route("/martin/{source_id}/{z}/{x}/{y}", get(tile_handler))
-            .with_state(backend)
+            .with_state(MartinRoutesState { backend, db })
     }
 
     /// Directory holding the PMTiles archives to serve.
@@ -1169,10 +1266,40 @@ pub mod martin_backend {
 
         #[test]
         fn martin_routes_build() {
-            let backend = MartinTileBackend::new();
-            let router = martin_routes(backend);
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let db =
+                rt.block_on(async { crate::db::Database::new("sqlite::memory:").await.unwrap() });
+            let router = martin_routes(MartinTileBackend::new(), Arc::new(db));
             // Just verify we can build the router without panic
             let _ = router;
+        }
+
+        #[test]
+        fn the_public_tilejson_names_this_server_and_drops_the_build_paths() {
+            let archive = serde_json::json!({
+                "tilejson": "3.0.0",
+                "tiles": [],
+                "name": "/data/tilesets/abc.pmtiles",
+                "description": "/data/tilesets/abc.pmtiles",
+                "generator_options": "tippecanoe -o /data/tilesets/abc.pmtiles /scratch/source.geojson",
+                "vector_layers": [{"id": "roads"}],
+            });
+
+            let public = public_tilejson(archive, "abc", "city roads");
+
+            assert_eq!(
+                public["tiles"],
+                serde_json::json!(["/martin/abc/{z}/{x}/{y}"])
+            );
+            assert_eq!(public["name"], "city roads");
+            assert_eq!(public["vector_layers"][0]["id"], "roads");
+            for field in PATH_BEARING_TILEJSON_FIELDS {
+                assert!(public.get(field).is_none(), "{field} survived");
+            }
+            assert!(
+                !public.to_string().contains("/data/"),
+                "a build path survived: {public}"
+            );
         }
     }
 }

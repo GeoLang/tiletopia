@@ -205,12 +205,15 @@ async fn main() -> anyhow::Result<()> {
                 if requeued > 0 {
                     tracing::info!("requeued {requeued} unfinished tileset builds");
                 }
-                Arc::new(tilesets::TilesetBuilder::new(
-                    Arc::clone(&db),
-                    data_dir.clone(),
-                    tileset_dir.clone(),
-                    martin_backend.clone(),
-                ))
+                Arc::new(
+                    tilesets::TilesetBuilder::new(
+                        Arc::clone(&db),
+                        data_dir.clone(),
+                        tileset_dir.clone(),
+                        martin_backend.clone(),
+                    )
+                    .map_err(anyhow::Error::msg)?,
+                )
                 .start();
                 tileset_dir
             };
