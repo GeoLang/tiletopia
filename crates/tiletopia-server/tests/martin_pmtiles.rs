@@ -122,8 +122,14 @@ async fn unknown_source_is_not_found() {
     let fixture = TempDir::new().unwrap();
     let state = state_serving_fixture(&fixture).await;
 
-    // "buried" sits one directory down, and the scan does not recurse
-    for uri in ["/martin/no-such-source", "/martin/buried"] {
+    // "buried" sits one directory down, and the scan does not recurse. the tile
+    // route answers for an unknown source too, rather than reading it as a fault
+    for uri in [
+        "/martin/no-such-source",
+        "/martin/buried",
+        "/martin/no-such-source/0/0/0",
+        "/martin/buried/0/0/0",
+    ] {
         let response = router(state.clone())
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await

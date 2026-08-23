@@ -17,14 +17,12 @@ jobs:
     strategy:
       matrix:
         include:
-          # martin here only: it pulls aws-sdk-s3 and object_store, and the
-          # server only ships in the linux container
           - os: ubuntu-latest
             features: draco,gpu,plugin-dylib,ml,martin
           - os: macos-latest
-            features: draco,gpu,plugin-dylib,ml
+            features: draco,gpu,plugin-dylib,ml,martin
           - os: windows-latest
-            features: gpu,plugin-dylib,ml
+            features: gpu,plugin-dylib,ml,martin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

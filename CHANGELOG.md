@@ -14,9 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stem, so `basemap.pmtiles` answers at `/martin/basemap/{z}/{x}/{y}` and
   appears in `/martin/catalog`. Unset serves nothing, a directory that cannot
   be read refuses startup, and one archive that fails to open is logged and
-  skipped. The routes sit behind the same JWT as the rest of the API. Needs
-  the `martin` cargo feature, which the Docker image and the ubuntu CI row now
-  build with.
+  skipped. An unregistered source is a 404 on both the TileJSON and the tile
+  route. The routes sit behind the same JWT as the rest of the API. Needs the
+  `martin` cargo feature, which the Docker image and every CI row now build
+  with.
 
 ## [Unreleased] - 2026-08-22
 
