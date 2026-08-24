@@ -147,6 +147,17 @@ pub struct AppState {
     pub current_tileset_build: tilesets::CurrentBuild,
 }
 
+impl AppState {
+    /// The DEM stores every elevation query reads, in the order it reads them.
+    pub fn elevation_sources(&self) -> elevation::ElevationSources {
+        elevation::ElevationSources::new(
+            Arc::clone(&self.elevation_store),
+            self.data_dir.clone(),
+            self.srtm_base_url.clone(),
+        )
+    }
+}
+
 /// A managed geospatial asset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {

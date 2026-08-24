@@ -186,6 +186,12 @@ impl DemTile {
 
         Some(val as f32)
     }
+
+    /// Sample spacing in degrees: a one-degree tile of `samples` per axis has
+    /// `samples - 1` steps across it, so SRTM's 3601 samples are 1 arc-second.
+    pub fn resolution_deg(&self) -> f64 {
+        1.0 / (self.samples - 1) as f64
+    }
 }
 
 /// Configuration for global terrain generation.

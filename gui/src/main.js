@@ -486,13 +486,20 @@ async function loadTerrain() {
       fetch(`${API}/elevation/point?lat=37.7749&lon=-122.4194`),
     ]);
     const ops = await terrainRes.json();
-    const elev = await elevRes.json();
+    // 404 when no DEM is staged for the sample point, and the body is text
+    const elev = elevRes.ok ? await elevRes.json() : null;
+    const elevation = elev
+      ? `${elev.elevation_m.toFixed(0)}<span class="unit"> m</span>`
+      : 'none staged';
+    const source = elev
+      ? `${elev.source}, ${elev.resolution_m.toFixed(0)}<span class="unit"> m</span>`
+      : 'N/A';
     panel.innerHTML = `<div class="feature-panel">
       <h2>⛰️ Terrain Viewer</h2>
       <p class="subtitle">Quantized mesh terrain with real-time elevation queries</p>
       <div class="card-grid">
-        <div class="metric-card"><div class="label">Sample Elevation</div><div class="value">${elev.elevation_m}<span class="unit"> m</span></div></div>
-        <div class="metric-card"><div class="label">Resolution</div><div class="value">${elev.resolution || 'N/A'}</div></div>
+        <div class="metric-card"><div class="label">Sample Elevation</div><div class="value">${elevation}</div></div>
+        <div class="metric-card"><div class="label">Source</div><div class="value">${source}</div></div>
         <div class="metric-card"><div class="label">Available Analyses</div><div class="value">${ops.operations ? ops.operations.length : 0}</div></div>
       </div>
       <h3 class="section-title">Available Terrain Analyses</h3>

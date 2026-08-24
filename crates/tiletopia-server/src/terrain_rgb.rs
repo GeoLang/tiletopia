@@ -2,8 +2,8 @@
 //!
 //! Web Mercator XYZ, unlike the geographic quantized-mesh endpoint next door in
 //! [`crate::terrain_api`]. Both read the same DEM through
-//! `terrain_api::dem_tiles_for_bounds` (private, so not linked); only the tile
-//! indexing differs.
+//! [`crate::elevation::ElevationSources::dem_tiles`]; only the tile indexing
+//! differs.
 
 use axum::{
     Router,
@@ -36,9 +36,11 @@ async fn serve_terrain_rgb(
     Path((z, x, y)): Path<(u32, u32, String)>,
 ) -> Result<impl IntoResponse, Refusal> {
     let coord = parse_rgb_coord(z, x, &y).ok_or_else(|| StatusCode::BAD_REQUEST.into_response())?;
-    let dem_tiles = crate::terrain_api::dem_tiles_for_bounds(&state, coord.bounds())
-        .await
-        .map_err(crate::terrain_api::dem_unavailable)?;
+    let dem_tiles = state
+        .elevation_sources()
+        .dem_tiles(coord.bounds())
+        .await?
+        .tiles;
     let png = render_terrain_rgb(&coord, &dem_tiles);
 
     let mut headers = HeaderMap::new();

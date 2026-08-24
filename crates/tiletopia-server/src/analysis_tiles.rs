@@ -5,15 +5,20 @@
 //! DEM source -> reproject to web mercator -> op, pulled per tile by the engine,
 //! which caches chunks and coalesces concurrent pulls of the same chunk.
 //!
-//! Elevation comes from `elevation::get_elevation` by default, so a loaded DEM
-//! serves and the deterministic synthetic field fills in elsewhere, the same
-//! honesty story the one-shot endpoints have. Set `TILETOPIA_ANALYSIS_DEM_BBOX`
-//! and the engines read Copernicus GLO-30 COGs over STAC instead, streaming the
-//! window each tile needs. Colors for those ops come from the one-shot renderer,
-//! so the panel preview and the live layer agree.
+//! Elevation comes from [`crate::elevation`] by default: a loaded grid, a tile
+//! staged under the data directory, then the SRTM cache, the same stores the
+//! one-shot endpoints read. Set `TILETOPIA_ANALYSIS_DEM_BBOX` and the engines
+//! read Copernicus GLO-30 COGs over STAC instead, streaming the window each
+//! tile needs. Colors for those ops come from the one-shot renderer, so the
+//! panel preview and the live layer agree.
 //!
-//! The `ndvi` op has no one-shot or synthetic counterpart: it reads sentinel-2
-//! red and nir over STAC (band math on a median composite of the last month),
+//! Unlike the one-shot endpoints, a window no DEM covers is nodata rather than
+//! a refusal: it renders transparent, which is what a map library wants for
+//! ground it has no data for.
+//!
+//! The `ndvi` op has no one-shot counterpart and no DEM to read: it takes
+//! sentinel-2 red and nir over STAC (band math on a median composite of the
+//! last month),
 //! so it serves only when the bbox variable is set, and fails loud otherwise
 //! rather than inventing vegetation.
 //!
@@ -55,7 +60,7 @@ use tokio::time::timeout;
 
 use crate::AppState;
 use crate::analysis;
-use crate::elevation::{self, DemStore};
+use crate::elevation::{ElevationField, ElevationSources};
 use crate::terrain_api::Refusal;
 
 /// Zooms past this are refused: the tile maths shifts by `z`, and no viewer
@@ -69,17 +74,16 @@ const CHUNK_BUDGET_BYTES: usize = 64 << 20;
 /// time, and each engine holds a cache of its own.
 const MAX_ENGINES: usize = 8;
 
-/// Ladder anchor when no DEM is loaded, roughly 11 m at the equator. Only the
-/// ladder depends on it: the synthetic field is continuous and samples at any
-/// resolution.
-const SYNTHETIC_RESOLUTION_DEG: f64 = 1e-4;
+/// Ladder anchor when no grid is loaded: one arc-second, the spacing of the
+/// SRTM tiles the store falls back to.
+const SRTM_RESOLUTION_DEG: f64 = 1.0 / 3600.0;
 
 /// Angles are keyed in tenths of a degree, so a turn is this many steps.
 const AZIMUTH_STEPS: i64 = 3600;
 
 /// Anchor bbox, `west,south,east,north` in degrees. Setting it puts the engines
-/// on real elevation, unset leaves them on the DEM store and its synthetic
-/// fallback. Coverage is not bound to it: tiles past it search lazily.
+/// on Copernicus GLO-30 over STAC, unset leaves them on the server's own DEM
+/// stores. Coverage is not bound to it: tiles past it search lazily.
 pub const BBOX_VAR: &str = "TILETOPIA_ANALYSIS_DEM_BBOX";
 
 /// STAC API root, for pointing the search at a mirror of the default.
@@ -199,8 +203,9 @@ impl EngineKey {
 /// Where the analysis engines read elevation.
 #[derive(Debug, Clone, PartialEq)]
 enum SourceConfig {
-    /// The elevation store, synthetic where no loaded grid covers the window.
-    Synthetic,
+    /// The server's own DEM: loaded grids, the staged one-degree files, then
+    /// the SRTM cache. Nodata where none of them covers the window.
+    Staged,
     /// Copernicus GLO-30 over STAC, searched lazily per pulled window.
     Stac(StacConfig),
     /// The environment names a source that cannot be honoured. Tiles fail with
@@ -257,7 +262,7 @@ fn source_from_env() -> Result<SourceConfig, String> {
 /// which is what keeps the default build and its tests off the network.
 fn source_config(bbox: Option<&str>, api: Option<&str>) -> Result<SourceConfig, String> {
     let Some(raw) = bbox.map(str::trim).filter(|b| !b.is_empty()) else {
-        return Ok(SourceConfig::Synthetic);
+        return Ok(SourceConfig::Staged);
     };
     let api = api
         .map(str::trim)
@@ -351,7 +356,7 @@ impl AnalysisEngines {
     async fn get_or_build(
         &self,
         key: EngineKey,
-        store: &Arc<DemStore>,
+        elevation: &ElevationSources,
     ) -> geoplumb::Result<(Arc<Engine>, NodeId)> {
         if let Some(hit) = find(&self.lock(), key) {
             return Ok(hit);
@@ -359,11 +364,12 @@ impl AnalysisEngines {
         // off the lock and off the async worker: solving the graph builds two
         // projections and a STAC source searches the api, and holding the map
         // across it would serialize every tile request behind one build
-        let store = Arc::clone(store);
+        let elevation = elevation.clone();
         let source = self.source.clone();
-        let (engine, node) = tokio::task::spawn_blocking(move || build_engine(key, &source, store))
-            .await
-            .expect("engine build task panicked")?;
+        let (engine, node) =
+            tokio::task::spawn_blocking(move || build_engine(key, &source, elevation))
+                .await
+                .expect("engine build task panicked")?;
 
         let mut built = self.lock();
         // another request may have built this key while this one was solving
@@ -397,7 +403,7 @@ fn find(
 fn build_engine(
     key: EngineKey,
     source: &SourceConfig,
-    store: Arc<DemStore>,
+    elevation: ElevationSources,
 ) -> geoplumb::Result<(Arc<Engine>, NodeId)> {
     // opening a STAC source searches the api, which is why this whole function
     // runs on a blocking thread
@@ -418,11 +424,11 @@ fn build_engine(
             graph.add_transform(ndvi, Box::new(Reproject::new(Crs::WEB_MERCATOR)))
         }
         Op::Hillshade | Op::Slope => {
-            let elevation: Box<dyn Source> = match source {
+            let terrain: Box<dyn Source> = match source {
                 SourceConfig::Stac(cfg) => Box::new(StacSrc::open(&cfg.dem_search())?),
-                _ => Box::new(DemSource::new(store)),
+                _ => Box::new(DemSource::new(elevation)),
             };
-            let dem = graph.add_source(elevation);
+            let dem = graph.add_source(terrain);
             let merc = graph.add_transform(dem, Box::new(Reproject::new(Crs::WEB_MERCATOR)));
             let element: Box<dyn Transform> = match key.op {
                 Op::Hillshade => Box::new(Hillshade::new(
@@ -468,7 +474,7 @@ async fn analysis_tile(
 
     let (engine, node) = state
         .analysis_engines
-        .get_or_build(key, &state.elevation_store)
+        .get_or_build(key, &state.elevation_sources())
         .await
         .map_err(|e| {
             tracing::warn!("analysis tile engine build failed: {e}");
@@ -606,7 +612,7 @@ async fn analysis_export(
 
     let (engine, node) = state
         .analysis_engines
-        .get_or_build(key, &state.elevation_store)
+        .get_or_build(key, &state.elevation_sources())
         .await
         .map_err(|e| {
             tracing::warn!("analysis export engine build failed: {e}");
@@ -647,6 +653,9 @@ async fn analysis_export(
             pixel_width: resolution,
             pixel_height: resolution,
             deflate: true,
+            // the bands as the engine pulled them, holes left as NaN
+            format: terrano_core::SampleFormat::F64,
+            nodata: None,
         };
         let mut out = Cursor::new(Vec::new());
         write_cog_bands(&exact.bands, &cog, &mut out).map_err(|e| e.to_string())?;
@@ -701,11 +710,11 @@ fn ndvi_color(v: f64) -> [u8; 4] {
     [r, g, b, 255]
 }
 
-/// geoplumb source over the elevation store: every pixel is an
-/// `elevation::get_elevation` sample, so loaded DEMs and the synthetic fallback
-/// both serve, exactly as they do for the one-shot handlers.
+/// geoplumb source over the server's DEM stores: every pixel is an
+/// [`ElevationField`] sample, so loaded grids, staged tiles and the SRTM cache
+/// all serve, exactly as they do for the one-shot handlers.
 struct DemSource {
-    store: Arc<DemStore>,
+    elevation: ElevationSources,
     origin_x: f64,
     origin_y: f64,
     base_resolution: f64,
@@ -714,25 +723,28 @@ struct DemSource {
 impl DemSource {
     /// The grid anchors the resolution ladder on the finest loaded DEM when
     /// there is one, so its cells land on ladder level 0 instead of between two
-    /// levels. With no DEM loaded it is a whole-world WGS84 grid.
-    fn new(store: Arc<DemStore>) -> DemSource {
-        let (origin_x, origin_y, base_resolution) = match store.finest_grid() {
+    /// levels. With no grid loaded it is a whole-world WGS84 grid at the SRTM
+    /// spacing the store falls back to.
+    fn new(elevation: ElevationSources) -> DemSource {
+        let (origin_x, origin_y, base_resolution) = match elevation.grids().finest_grid() {
             Some(g) => (
                 g.bounds[0],
                 g.bounds[3],
                 g.cell_size_x.min(g.cell_size_y).max(f64::MIN_POSITIVE),
             ),
-            None => (-180.0, 90.0, SYNTHETIC_RESOLUTION_DEG),
+            None => (-180.0, 90.0, SRTM_RESOLUTION_DEG),
         };
         DemSource {
-            store,
+            elevation,
             origin_x,
             origin_y,
             base_resolution,
         }
     }
 
-    fn sample(&self, req: &WindowReq) -> RasterChunk {
+    /// Pixels the field does not cover stay NaN, the chunk's nodata, so an
+    /// uncovered tile renders transparent instead of flat ground.
+    fn sample(&self, req: &WindowReq, field: &ElevationField) -> RasterChunk {
         let res = req.resolution;
         let cols = (req.bbox.width() / res).round().max(1.0) as usize;
         let rows = (req.bbox.height() / res).round().max(1.0) as usize;
@@ -741,7 +753,7 @@ impl DemSource {
             let lat = req.bbox.max_y - (row as f64 + 0.5) * res;
             for col in 0..cols {
                 let lon = req.bbox.min_x + (col as f64 + 0.5) * res;
-                data.push(elevation::get_elevation(lat, lon, &self.store).elevation_m);
+                data.push(field.elevation_at(lat, lon).unwrap_or(f64::NAN));
             }
         }
         let band = Raster::from_vec(cols, rows, data, res, f64::NAN).expect("sample dims");
@@ -775,7 +787,15 @@ impl Source for DemSource {
     }
 
     fn read<'a>(&'a self, req: &'a WindowReq) -> BoxFuture<'a, geoplumb::Result<Chunk>> {
-        Box::pin(async move { Ok(Chunk::Raster(self.sample(req))) })
+        Box::pin(async move {
+            let bbox = req.bbox;
+            let field = self
+                .elevation
+                .field([bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y])
+                .await
+                .map_err(|gap| geoplumb::Error::Source(gap.message().to_string()))?;
+            Ok(Chunk::Raster(self.sample(req, &field)))
+        })
     }
 }
 
@@ -784,37 +804,64 @@ mod tests {
     use super::*;
     use geoplumb::window::Bbox;
 
-    #[test]
-    fn grid_anchors_on_the_finest_loaded_dem() {
+    use crate::elevation::{DemGrid, DemStore};
+
+    /// Sources with nothing staged and no SRTM fallback, so a test never
+    /// reaches the disk or the network.
+    fn empty_sources() -> ElevationSources {
+        ElevationSources::new(
+            Arc::new(DemStore::new()),
+            std::env::temp_dir().join("tiletopia_analysis_tiles_no_dem"),
+            String::new(),
+        )
+    }
+
+    /// Sources holding one grid over the window the read tests pull, climbing
+    /// east so a hillshade has something to shade.
+    fn grid_sources(cell_size_x: f64, cell_size_y: f64) -> ElevationSources {
+        let bounds = [6.0, 42.0, 11.0, 44.0];
+        let width = 1 + ((bounds[2] - bounds[0]) / cell_size_x).round() as usize;
+        let height = 1 + ((bounds[3] - bounds[1]) / cell_size_y).round() as usize;
         let mut store = DemStore::new();
-        store.add_grid(crate::elevation::DemGrid {
-            bounds: [10.0, 40.0, 11.0, 41.0],
-            width: 2,
-            height: 2,
-            cell_size_x: 0.5,
-            cell_size_y: 0.25,
-            elevations: vec![1.0; 4],
+        store.add_grid(DemGrid {
+            bounds,
+            width,
+            height,
+            cell_size_x,
+            cell_size_y,
+            elevations: (0..width * height)
+                .map(|i| (i % width) as f64 * 3.0)
+                .collect(),
             nodata: -9999.0,
         });
-        let grid = DemSource::new(Arc::new(store)).grid();
-        assert_eq!(grid.origin_x, 10.0);
-        assert_eq!(grid.origin_y, 41.0);
+        ElevationSources::new(
+            Arc::new(store),
+            std::env::temp_dir().join("tiletopia_analysis_tiles_grid"),
+            String::new(),
+        )
+    }
+
+    #[test]
+    fn grid_anchors_on_the_finest_loaded_dem() {
+        let grid = DemSource::new(grid_sources(0.5, 0.25)).grid();
+        assert_eq!(grid.origin_x, 6.0);
+        assert_eq!(grid.origin_y, 44.0);
         assert_eq!(grid.base_resolution, 0.25);
     }
 
     #[test]
     fn grid_falls_back_to_the_whole_world() {
-        let grid = DemSource::new(Arc::new(DemStore::new())).grid();
+        let grid = DemSource::new(empty_sources()).grid();
         assert_eq!(grid.origin_x, -180.0);
         assert_eq!(grid.origin_y, 90.0);
-        assert_eq!(grid.base_resolution, SYNTHETIC_RESOLUTION_DEG);
+        assert_eq!(grid.base_resolution, SRTM_RESOLUTION_DEG);
     }
 
     /// A window is answered on exactly the requested grid: the engine chunks the
     /// request itself and a short read would misalign every chunk downstream.
     #[tokio::test]
     async fn read_fills_the_requested_window() {
-        let src = DemSource::new(Arc::new(DemStore::new()));
+        let src = DemSource::new(grid_sources(0.01, 0.01));
         let req = WindowReq {
             bbox: Bbox::new(7.0, 43.0, 7.04, 43.02),
             resolution: 0.001,
@@ -824,6 +871,21 @@ mod tests {
         assert_eq!(chunk.height(), 20);
         let band = chunk.bands.band(0).unwrap();
         assert!(band.data().iter().all(|v| v.is_finite()));
+    }
+
+    /// A tile over ground no DEM covers is transparent, not flat: the pixels
+    /// come back as the chunk's nodata rather than an invented elevation.
+    #[tokio::test]
+    async fn an_uncovered_window_reads_as_nodata() {
+        let src = DemSource::new(empty_sources());
+        let req = WindowReq {
+            bbox: Bbox::new(7.0, 43.0, 7.04, 43.02),
+            resolution: 0.001,
+        };
+        let chunk = src.read(&req).await.unwrap().into_raster().unwrap();
+        let band = chunk.bands.band(0).unwrap();
+        assert_eq!(band.data().len(), 800);
+        assert!(band.data().iter().all(|v| v.is_nan()));
     }
 
     fn hillshade_key(azimuth: f64, altitude: f64) -> Option<EngineKey> {
@@ -876,16 +938,16 @@ mod tests {
         );
     }
 
-    /// Unset means the synthetic source, which is what keeps every other test
+    /// Unset means the server's own DEM, which is what keeps every other test
     /// in this repo off the network.
     #[test]
-    fn no_bbox_leaves_the_engines_synthetic() {
-        assert_eq!(source_config(None, None), Ok(SourceConfig::Synthetic));
-        assert_eq!(source_config(Some("  "), None), Ok(SourceConfig::Synthetic));
+    fn no_bbox_leaves_the_engines_on_the_staged_dem() {
+        assert_eq!(source_config(None, None), Ok(SourceConfig::Staged));
+        assert_eq!(source_config(Some("  "), None), Ok(SourceConfig::Staged));
         // an api on its own configures nothing: the bbox is the switch
         assert_eq!(
             source_config(None, Some("https://example.test/v1")),
-            Ok(SourceConfig::Synthetic)
+            Ok(SourceConfig::Staged)
         );
     }
 
@@ -925,7 +987,7 @@ mod tests {
     #[test]
     fn ndvi_without_a_bbox_fails_naming_the_variable() {
         let key = EngineKey::new(Op::Ndvi, &TileParams::default()).expect("key");
-        let built = build_engine(key, &SourceConfig::Synthetic, Arc::new(DemStore::new()));
+        let built = build_engine(key, &SourceConfig::Staged, empty_sources());
         let Err(err) = built else {
             panic!("ndvi cannot build on the synthetic source");
         };
@@ -1006,14 +1068,14 @@ mod tests {
         let built = build_engine(
             EngineKey::new(Op::Slope, &TileParams::default()).expect("key"),
             &broken,
-            Arc::new(DemStore::new()),
+            empty_sources(),
         );
         let Err(err) = built else {
             panic!("a misconfigured source cannot build an engine");
         };
         assert!(err.to_string().contains("bad bbox"));
         // the default environment is unset, so the served engines stay synthetic
-        assert_eq!(engines.source, SourceConfig::Synthetic);
+        assert_eq!(engines.source, SourceConfig::Staged);
     }
 
     #[test]

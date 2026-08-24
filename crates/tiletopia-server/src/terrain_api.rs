@@ -12,7 +12,7 @@ use axum::{
 };
 use serde::Serialize;
 use std::sync::Arc;
-use tiletopia_terrain::global_dem::{DemTile, TerrainTileCoord, generate_terrain_tile};
+use tiletopia_terrain::global_dem::{TerrainTileCoord, generate_terrain_tile};
 
 use crate::AppState;
 
@@ -97,18 +97,20 @@ fn full_availability(max_zoom: u32) -> Vec<Vec<AvailableRange>> {
 
 /// Serve a terrain tile as quantized-mesh binary.
 ///
-/// If local DEM data is available, generates high-quality terrain from it.
-/// Falls back to downloading a bounded set of SRTM tiles via DemCache if no
-/// local data exists. Areas no DEM covers are flat.
+/// Reads the DEM stores [`crate::elevation`] serves every other elevation
+/// query from: staged tiles first, then a bounded set of SRTM downloads. Areas
+/// no DEM covers are flat.
 async fn serve_terrain_tile(
     State(state): State<Arc<AppState>>,
     Path((z, x, y)): Path<(u32, u32, String)>,
 ) -> Result<impl IntoResponse, Refusal> {
     let coord =
         parse_tile_coord(z, x, &y).ok_or_else(|| StatusCode::BAD_REQUEST.into_response())?;
-    let dem_tiles = dem_tiles_for_bounds(&state, coord.bounds())
-        .await
-        .map_err(dem_unavailable)?;
+    let dem_tiles = state
+        .elevation_sources()
+        .dem_tiles(coord.bounds())
+        .await?
+        .tiles;
 
     // Generate terrain mesh (uses flat elevation if no DEM tiles found)
     let grid_size = match z {
@@ -148,43 +150,7 @@ fn parse_tile_coord(z: u32, x: u32, y: &str) -> Option<TerrainTileCoord> {
     Some(TerrainTileCoord { zoom: z, x, y })
 }
 
-/// DEM tiles covering these bounds: local files first, then a bounded set of
-/// SRTM downloads when there is nothing on disk.
-///
-/// Shared by the quantized-mesh and terrain-RGB endpoints so the fetch bound
-/// and the HGT orientation are decided in one place.
-///
-/// A tile the fetch reaches for but cannot get is an error, not a gap: skadi
-/// covers the whole globe, ocean and poles included, so an unreachable tile
-/// means upstream trouble rather than no data there. Dropping it would render
-/// as sea level, which looks like terrain that is simply flat.
-pub(crate) async fn dem_tiles_for_bounds(
-    state: &AppState,
-    bounds: [f64; 4],
-) -> Result<Vec<DemTile>, String> {
-    let mut dem_tiles = load_dem_tiles_for_bounds(&state.data_dir, bounds);
-    if !dem_tiles.is_empty() {
-        return Ok(dem_tiles);
-    }
-
-    let cache = tiletopia_terrain::dem_cache::DemCache::new(
-        state.data_dir.join("dem_cache"),
-        state.srtm_base_url.clone(),
-    );
-    for (lat, lon) in srtm_tiles_to_fetch(bounds) {
-        let name = tiletopia_terrain::dem_cache::srtm_tile_name(lat, lon);
-        let hgt_path = cache
-            .get_srtm_tile(lat, lon)
-            .await
-            .map_err(|e| format!("SRTM tile {name} could not be fetched: {e}"))?;
-        let tile = dem_tile_from_hgt(&hgt_path, lat, lon)
-            .map_err(|e| format!("SRTM tile {name} is unusable: {e}"))?;
-        dem_tiles.push(tile);
-    }
-    Ok(dem_tiles)
-}
-
-/// Refuse a terrain tile whose DEM could not be read.
+/// Refuse a request whose DEM could not be read.
 /// a handler's early exit, boxed so the err arm stays small enough for clippy
 pub(crate) struct Refusal(Box<Response>);
 
@@ -194,98 +160,16 @@ impl From<Response> for Refusal {
     }
 }
 
+impl From<crate::elevation::ElevationGap> for Refusal {
+    fn from(gap: crate::elevation::ElevationGap) -> Self {
+        Refusal(Box::new(gap.into_response()))
+    }
+}
+
 impl IntoResponse for Refusal {
     fn into_response(self) -> Response {
         *self.0
     }
-}
-
-pub(crate) fn dem_unavailable(reason: String) -> Response {
-    tracing::warn!("terrain tile refused: {reason}");
-    (StatusCode::SERVICE_UNAVAILABLE, reason).into_response()
-}
-
-/// Read a cached HGT file into a DEM tile.
-///
-/// HGT rows run north-to-south, the opposite of the order [`DemTile`] samples,
-/// so this must go through [`DemTile::from_north_up`]. Getting it wrong mirrors
-/// every elevation about the tile's mid-latitude, which reads as plausible
-/// terrain in the wrong place rather than as an error.
-fn dem_tile_from_hgt(
-    path: &std::path::Path,
-    lat: i32,
-    lon: i32,
-) -> Result<DemTile, std::io::Error> {
-    let hm = tiletopia_ingest::hgt_reader::read(path)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    let elevations = hm.elevations.iter().map(|&e| e as f32).collect();
-    DemTile::from_north_up(lat, lon, elevations, hm.width as u32, -9999.0).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("{}×{} is not a usable DEM grid", hm.width, hm.height),
-        )
-    })
-}
-
-/// Most one-degree SRTM tiles a single terrain request may pull from upstream.
-///
-/// These reads are anonymous, and a low-zoom terrain tile covers tens of
-/// thousands of one-degree cells, so an unbounded fetch turns one GET into a
-/// multi-terabyte download loop. Above the bound the request renders from local
-/// DEM or flat terrain instead, which is what a wide tile did in practice
-/// anyway: it never finished.
-const MAX_SRTM_TILES_PER_REQUEST: usize = 16;
-
-/// SRTM tiles to fetch for these bounds, empty when the area is too wide to
-/// serve from upstream downloads.
-fn srtm_tiles_to_fetch(bounds: [f64; 4]) -> Vec<(i32, i32)> {
-    let required = tiletopia_terrain::dem_cache::required_srtm_tiles(
-        bounds[0], bounds[1], bounds[2], bounds[3],
-    );
-    if required.len() > MAX_SRTM_TILES_PER_REQUEST {
-        tracing::debug!(
-            "terrain tile spans {} SRTM tiles, over the {MAX_SRTM_TILES_PER_REQUEST} fetch bound",
-            required.len()
-        );
-        return Vec::new();
-    }
-    required
-}
-
-/// Load DEM tiles from disk for the given bounds.
-fn load_dem_tiles_for_bounds(data_dir: &std::path::Path, bounds: [f64; 4]) -> Vec<DemTile> {
-    let required = tiletopia_terrain::global_dem::required_dem_tiles(bounds);
-    let mut tiles = Vec::new();
-
-    for (lat, lon) in required {
-        let dem_path = data_dir.join(format!("dem/{}_{}.bin", lat, lon));
-        if dem_path.exists()
-            && let Ok(tile) = load_dem_tile_from_file(&dem_path, lat, lon)
-        {
-            tiles.push(tile);
-        }
-    }
-    tiles
-}
-
-/// Load a single DEM tile from a binary file (simple format: f32 elevation array).
-fn load_dem_tile_from_file(path: &std::path::Path, lat: i32, lon: i32) -> std::io::Result<DemTile> {
-    let data = std::fs::read(path)?;
-    let samples = ((data.len() / 4) as f64).sqrt() as u32;
-
-    let elevations: Vec<f32> = data
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|b| f32::from_le_bytes(*b))
-        .collect();
-
-    DemTile::from_south_up(lat, lon, elevations, samples, -9999.0).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("{}: not a square f32 DEM grid", path.display()),
-        )
-    })
 }
 
 /// Encode a terrain mesh into quantized-mesh format (simplified).
@@ -522,14 +406,14 @@ mod tests {
             x: 0,
             y: 0,
         };
-        assert!(srtm_tiles_to_fetch(world.bounds()).is_empty());
+        assert!(crate::elevation::srtm_tiles_to_fetch(world.bounds()).is_empty());
 
         let zoom_4 = TerrainTileCoord {
             zoom: 4,
             x: 8,
             y: 5,
         };
-        assert!(srtm_tiles_to_fetch(zoom_4.bounds()).is_empty());
+        assert!(crate::elevation::srtm_tiles_to_fetch(zoom_4.bounds()).is_empty());
     }
 
     #[test]
@@ -539,63 +423,8 @@ mod tests {
             x: 2200,
             y: 1400,
         };
-        let tiles = srtm_tiles_to_fetch(coord.bounds());
-        assert!(!tiles.is_empty());
-        assert!(tiles.len() <= MAX_SRTM_TILES_PER_REQUEST);
-    }
-
-    #[test]
-    fn hgt_rows_keep_their_latitude_through_the_reader() {
-        // guards the seam the flip lived in: hgt_reader hands back north-up
-        // rows, DemTile samples south-up
-        let dir = std::env::temp_dir().join("tiletopia_hgt_orientation_test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("N43E007.hgt");
-
-        // 61×61, alpine along the north edge and sea level along the south
-        let side = 61usize;
-        let mut raw = Vec::with_capacity(side * side * 2);
-        for row in 0..side {
-            let height = (1658.0 * (1.0 - row as f64 / (side - 1) as f64)) as i16;
-            for _ in 0..side {
-                raw.extend_from_slice(&height.to_be_bytes());
-            }
-        }
-        std::fs::write(&path, &raw).unwrap();
-
-        let tile = dem_tile_from_hgt(&path, 43, 7).unwrap();
-        assert!(
-            tile.sample(43.97, 7.4).unwrap() > 1500.0,
-            "north edge must stay alpine"
-        );
-        assert!(
-            tile.sample(43.03, 7.4).unwrap() < 100.0,
-            "south edge must stay coast"
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn truncated_dem_files_are_skipped_not_sampled() {
-        let dir = std::env::temp_dir().join("tiletopia_truncated_dem_test/dem");
-        std::fs::create_dir_all(&dir).unwrap();
-
-        // empty file: the shape that crashed the sampler
-        let empty = dir.join("43_7.bin");
-        std::fs::write(&empty, []).unwrap();
-        assert!(load_dem_tile_from_file(&empty, 43, 7).is_err());
-
-        // half a grid written so far
-        let partial = dir.join("43_8.bin");
-        std::fs::write(&partial, vec![0u8; 4 * 10]).unwrap();
-        assert!(load_dem_tile_from_file(&partial, 43, 8).is_err());
-
-        // the bounds scan drops both rather than propagating a failure
-        let data_dir = dir.parent().unwrap();
-        assert!(load_dem_tiles_for_bounds(data_dir, [7.0, 43.0, 9.0, 44.0]).is_empty());
-
-        std::fs::remove_dir_all(data_dir).ok();
+        let tiles = crate::elevation::srtm_tiles_to_fetch(coord.bounds());
+        assert_eq!(tiles.len(), 1, "one degree cell holds a zoom-12 tile");
     }
 
     #[test]

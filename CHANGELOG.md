@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Elevation reads real DEM (2026-08-24). `GET /api/v1/elevation/point?lat=&lon=`
+  and `GET /api/v1/elevation/profile?path=lon,lat;lon,lat` answer from the
+  stores the terrain routes already read: a grid loaded into the DEM store, a
+  one-degree tile staged under `<data-dir>/dem/`, then the SRTM cache. The
+  answer names which one it came from and the sample spacing that store
+  actually has. Ground none of them covers is a 404 saying no elevation data is
+  staged for the location, and a tile that should be there but cannot be
+  fetched is a 503 naming it. The sine field the routes used to serve, labelled
+  `source: Srtm30m`, is gone, along with the `Copernicus30m` and `Lidar1m`
+  labels nothing ever produced. The profile walks the path it is given, up to
+  512 points, instead of a hardcoded one in San Francisco.
+
+  The analysis endpoints and the analysis XYZ tiles read the same field, so a
+  point, a profile, a hillshade and a tile of the same ground agree. A one-shot
+  analysis over ground no DEM covers is refused the same way; an XYZ tile is
+  transparent there, which is what a map library wants. An empty
+  `TILETOPIA_SRTM_BASE_URL` turns the download fallback off, so an air-gapped
+  server answers the explicit gap instead of a fetch failure.
+
+- Watershed, flow direction and flow accumulation (2026-08-24) join slope,
+  aspect, hillshade and contours on `POST /api/v1/analysis/terrain`, as PNG
+  rasters like the other raster ops. All three run over a depression-free copy
+  of the DEM, since a raw pit swallows every path that reaches it. Flow
+  directions are painted one hue per D8 code with pits grey, accumulation on a
+  log ramp, and basins by cycling hue so neighbours are told apart.
+
+- `POST /api/v1/analysis/viewshed` casts rays (2026-08-24). It runs terrano's
+  new `viewshed` over the DEM around the observer and answers one square per
+  visible cell, so a ridge's shadow is a hole in the result. It used to sweep
+  the terrain profile radially and return a star polygon of the farthest
+  visible point per azimuth, which could not express a hole. The request takes
+  `resolution` in cells per side, where it used to take `rays`.
+
 - Vector tilesets. `POST /api/v1/tilesets` takes a `.geojson`, `.geojson.gz`,
   `.fgb` or `.csv` multipart upload, answers 202 with the job id and the
   registry row, and a worker builds it into one PMTiles archive with

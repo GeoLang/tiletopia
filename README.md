@@ -40,7 +40,9 @@ A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields 
 - Delta + zigzag encoding per Cesium terrain spec
 - Prebuilt terrain bundles: serve a `ctb-tile` directory as a Cesium terrain source, no Ion token
 - `/api/v1/terrain/` reads DEM files under `<data-dir>/dem` first, then SRTM tiles. A failed download answers 503 rather than a flat mesh
-- `/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` hillshade, slope or ndvi tiles. Defaults to the loaded DEM store and a synthetic field. See Quick Start for the bbox variables that put them on real elevation
+- `/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` hillshade, slope or ndvi tiles. Defaults to the same DEM the elevation routes read. See Quick Start for the bbox variables that put them on Copernicus GLO-30 instead
+- `/api/v1/elevation/point?lat=&lon=` and `/api/v1/elevation/profile?path=lon,lat;lon,lat` read the same DEM and report which store answered. Ground no DEM covers is a 404, never an invented height
+- `POST /api/v1/analysis/terrain` slope, aspect, hillshade, contours, flow direction, flow accumulation and watershed over a bbox; `POST /api/v1/analysis/viewshed` ray-casts line of sight from an observer and returns the cells it can see
 
 ### Storage
 - Local filesystem (default)
@@ -79,11 +81,9 @@ Not implemented, whatever the code in the repository suggests:
 | STAC search | Ignores bbox, datetime, collections and limit. Returns one hardcoded item |
 | COG tiles | Offsets are fabricated. There is no HTTP client |
 | Static maps | Fills a flat grey buffer. Encodes WebP as JPEG, PDF and SVG as PNG |
-| Elevation | Always a synthetic sine field, reported as `source: Srtm30m` |
 | API keys | Seeds three fake keys. `get_by_hash` has no callers, so a key cannot authenticate |
 | Kriging | Inverse-variogram weighting, no solve. Ordinary / Simple / Universal run the same code |
 | Geoprocessing buffer / union | Buffer scales vertices radially. Union is a convex hull |
-| Terrain analysis | No aspect, watershed, flow accumulation, or viewshed ray casting |
 | Temporal versioning, CRDT, federation, CI/CD validation, multi-tenant isolation, leader election, priority queue / SLA, white-label, marketplace, geofencing, encryption, custom dashboards, AR/VR foveated rendering, cinematic flythrough, scripting, offline viewer export | `pub mod` lines with unit tests. No route, CLI or render loop calls them |
 
 The modules stay. Wiring or deleting them is a product call, recorded in `viewtopia/DESIGN_TODO.md`. Do not start from the scheduler or webhook facades.
@@ -232,12 +232,12 @@ make -C tippecanoe install PREFIX=/usr/local
   archive included, 20480 by default.
 
 Analysis tiles (`/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png`) render from the
-loaded DEM store and a synthetic field by default. Two variables put them on
-real elevation instead:
+server's own DEM by default, the same stores the elevation routes read. Two
+variables put them on Copernicus GLO-30 instead:
 
 - `TILETOPIA_ANALYSIS_DEM_BBOX` — `west,south,east,north` in degrees. Setting it
   switches the analysis tiles to Copernicus GLO-30 COGs, streamed over STAC as
-  each tile needs them. Unset means the DEM store, and nothing on the network.
+  each tile needs them. Unset means the staged DEM and the SRTM cache.
 - `TILETOPIA_ANALYSIS_STAC_API` — STAC API root, defaults to
   `https://earth-search.aws.element84.com/v1`.
 
@@ -246,12 +246,12 @@ resolve through lazy per-window STAC searches, cached in two-degree blocks for
 the engine's lifetime. A tile needing more than 32 cold block searches fails,
 so below about zoom 6 the layer answers 500 rather than mosaicking thousands
 of items. A malformed bbox refuses startup, and a search that fails answers
-500 rather than serving synthetic terrain under a layer that is meant to be
-real.
+500 rather than serving other terrain under a layer that is meant to be
+Copernicus.
 
 The `ndvi` op reads sentinel-2 L2A red and nir over the same STAC API, reduced
 per pixel to a median of the last month's items so clouds fall out of the
-stack. It has no synthetic fallback: without the bbox variable, ndvi tiles
+stack. It has no fallback: without the bbox variable, ndvi tiles
 answer 500. The trailing window anchors when the op's engine is first used and
 holds until restart. A cold tile reads every item behind the median, a few
 dozen COGs over sequential range requests, which takes minutes today: only a
@@ -371,7 +371,7 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `GET` | `/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` | Hillshade, slope or ndvi tiles, rendered on demand |
 | `GET` | `/metrics` | Prometheus metrics |
 
-Other `/api/v1/*` geospatial and premium routes are mounted. They are the facades in the table above: STAC search returns one hardcoded item, COG offsets are fabricated, static maps fill a grey buffer, elevation reports `Srtm30m` while serving a sine field, API keys cannot authenticate, scheduler and webhook workers have no callers. They are listed in OpenAPI because the router mounts them, not because they work.
+Other `/api/v1/*` geospatial and premium routes are mounted. They are the facades in the table above: STAC search returns one hardcoded item, COG offsets are fabricated, static maps fill a grey buffer, API keys cannot authenticate, scheduler and webhook workers have no callers. They are listed in OpenAPI because the router mounts them, not because they work.
 
 Tile data reads are anonymous: `tileset.json`, `tiles/{path}`, everything under
 `/api/v1/terrain/` (the generated quantized-mesh routes, the prebuilt bundles

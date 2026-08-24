@@ -1,6 +1,50 @@
 use std::sync::Arc;
 use tiletopia_server::AppState;
 
+/// The one-degree cell the terrain and analysis cases query, off Monaco.
+const FIXTURE_TILE: (i32, i32) = (43, 7);
+
+/// Samples per axis in the staged tile. 121 across a degree is about 900 m,
+/// coarse for terrain but enough structure for the analysis cases to read.
+const FIXTURE_SAMPLES: usize = 121;
+
+/// Elevation of the staged fixture tile at a point inside it: ground climbing a
+/// kilometre from south to north, with four north-south ridges 400 m tall
+/// across it. Steep enough for slope, hillshade and a viewshed to have
+/// something to read, and monotone northwards so a profile up a meridian only
+/// climbs.
+pub fn fixture_elevation_m(lat: f64, lon: f64) -> f64 {
+    let (tile_lat, tile_lon) = FIXTURE_TILE;
+    let north = lat - tile_lat as f64;
+    let east = lon - tile_lon as f64;
+    1000.0 * north + 400.0 * (8.0 * std::f64::consts::PI * east).sin()
+}
+
+/// Stage one degree of DEM the way an operator would: south-up f32 samples in
+/// `<data-dir>/dem/{lat}_{lon}.bin`, which is where every elevation query looks
+/// first.
+///
+/// Staging it here keeps the cases off the network: with nothing on disk the
+/// elevation lookups would reach for the SRTM bucket.
+fn stage_fixture_dem(data_dir: &std::path::Path) {
+    let (lat, lon) = FIXTURE_TILE;
+    let dir = data_dir.join("dem");
+    std::fs::create_dir_all(&dir).ok();
+
+    let last = (FIXTURE_SAMPLES - 1) as f64;
+    let mut bytes = Vec::with_capacity(FIXTURE_SAMPLES * FIXTURE_SAMPLES * 4);
+    for row in 0..FIXTURE_SAMPLES {
+        for col in 0..FIXTURE_SAMPLES {
+            let elevation = fixture_elevation_m(
+                lat as f64 + row as f64 / last,
+                lon as f64 + col as f64 / last,
+            );
+            bytes.extend_from_slice(&(elevation as f32).to_le_bytes());
+        }
+    }
+    std::fs::write(dir.join(format!("{lat}_{lon}.bin")), bytes).unwrap();
+}
+
 /// An `AppState` backed by a per-test temp directory and a private in-memory
 /// database, so cases running in parallel cannot see each other's rows.
 pub async fn build_state(
@@ -17,6 +61,7 @@ pub async fn build_state(
         n
     ));
     std::fs::create_dir_all(&dir).ok();
+    stage_fixture_dem(&dir);
 
     // named shared-cache memory db so all pooled connections see one database,
     // unique per test so cases stay isolated
@@ -49,7 +94,9 @@ pub async fn build_state(
         db,
         store,
         data_dir: dir,
-        srtm_base_url: tiletopia_terrain::dem_cache::DEFAULT_SRTM_BASE_URL.to_string(),
+        // empty turns the SRTM download fallback off: a case reads the staged
+        // fixture or gets an explicit gap, never the network
+        srtm_base_url: String::new(),
         job_queue,
         realtime: tiletopia_server::realtime::RealtimeState::new(),
         demo: tiletopia_server::demo::DemoState::new(),

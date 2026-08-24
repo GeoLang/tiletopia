@@ -785,8 +785,102 @@ mod tests {
         (status, ct, bytes)
     }
 
+    // -- elevation --
+
+    async fn get_body(uri: &str) -> (StatusCode, Vec<u8>) {
+        let resp = router(test_state().await)
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        (status, bytes)
+    }
+
     #[tokio::test]
-    async fn analysis_viewshed_returns_polygon() {
+    async fn elevation_point_reads_the_staged_dem() {
+        let (status, bytes) = get_body("/api/v1/elevation/point?lat=43.73&lon=7.42").await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["source"], "LocalDem");
+        let elevation = v["elevation_m"].as_f64().unwrap();
+        let staged = crate::common::fixture_elevation_m(43.73, 7.42);
+        assert!(
+            (elevation - staged).abs() < 10.0,
+            "answered {elevation} where the staged tile holds {staged}"
+        );
+        // one degree over 121 samples is a sample every ~900 m
+        assert!(v["resolution_m"].as_f64().unwrap() > 100.0);
+    }
+
+    #[tokio::test]
+    async fn elevation_point_off_the_staged_dem_says_so() {
+        let (status, bytes) = get_body("/api/v1/elevation/point?lat=10.0&lon=10.0").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let message = String::from_utf8_lossy(&bytes);
+        assert!(message.contains("no elevation data staged"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn elevation_point_checks_its_coordinates() {
+        for uri in [
+            "/api/v1/elevation/point?lat=91&lon=7.42",
+            "/api/v1/elevation/point?lat=43.73&lon=181",
+            "/api/v1/elevation/point?lat=43.73",
+            "/api/v1/elevation/point",
+        ] {
+            let (status, _) = get_body(uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn elevation_profile_walks_the_path_it_is_given() {
+        // due north, the one direction the staged tile only climbs
+        let (status, bytes) =
+            get_body("/api/v1/elevation/profile?path=7.42,43.72;7.42,43.74;7.42,43.76").await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let points = v["points"].as_array().unwrap();
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0]["source"], "LocalDem");
+        // the path runs north, and the staged ground climbs that way
+        assert!(v["elevation_gain_m"].as_f64().unwrap() > 0.0);
+        assert_eq!(v["elevation_loss_m"].as_f64().unwrap(), 0.0);
+        assert!(v["total_distance_m"].as_f64().unwrap() > 2000.0);
+        assert!(v["min_elevation_m"].as_f64().unwrap() < v["max_elevation_m"].as_f64().unwrap());
+    }
+
+    #[tokio::test]
+    async fn elevation_profile_refuses_a_path_it_cannot_walk() {
+        // off the staged tile
+        let (status, bytes) = get_body("/api/v1/elevation/profile?path=7.41,43.73;10.0,10.0").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("no elevation data staged"),
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        for uri in [
+            "/api/v1/elevation/profile?path=7.41,43.73",
+            "/api/v1/elevation/profile?path=7.41,43.73;north,west",
+            "/api/v1/elevation/profile?path=7.41,43.73;7.42",
+            "/api/v1/elevation/profile",
+        ] {
+            let (status, _) = get_body(uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    // -- analysis --
+
+    /// One square per visible cell, so the shape of what is seen survives.
+    #[tokio::test]
+    async fn analysis_viewshed_returns_the_visible_cells() {
         let (status, ct, bytes) = post_json(
             "/api/v1/analysis/viewshed",
             serde_json::json!({ "observer": [7.42, 43.73], "height_m": 2.0, "radius_m": 1000.0 }),
@@ -796,13 +890,34 @@ mod tests {
         assert!(ct.unwrap().contains("json"));
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["type"], "FeatureCollection");
-        let geom = &v["features"][0]["geometry"];
-        assert_eq!(geom["type"], "Polygon");
-        assert!(geom["coordinates"][0].as_array().unwrap().len() > 8);
+        let feature = &v["features"][0];
+        assert_eq!(feature["geometry"]["type"], "MultiPolygon");
+        let cells = feature["properties"]["visible_cells"].as_u64().unwrap();
+        assert!(cells > 0);
+        assert_eq!(
+            feature["geometry"]["coordinates"].as_array().unwrap().len() as u64,
+            cells
+        );
+        assert!(feature["properties"]["visible_area_m2"].as_f64().unwrap() > 0.0);
+    }
+
+    /// Ground the staged DEM does not reach is refused, not answered from a
+    /// model of what the terrain might look like.
+    #[tokio::test]
+    async fn analysis_over_unstaged_ground_is_refused() {
+        let (status, _, bytes) = post_json(
+            "/api/v1/analysis/terrain",
+            serde_json::json!({ "op": "slope", "bbox": [10.0, 10.0, 10.05, 10.05] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let message = String::from_utf8_lossy(&bytes);
+        assert!(message.contains("no elevation data staged"), "{message}");
     }
 
     #[tokio::test]
     async fn analysis_flood_grows_with_level() {
+        // the staged tile runs from ~320 m to ~515 m across this box
         let bbox = [7.40, 43.72, 7.45, 43.75];
         let count_at = |level: f64| async move {
             let (status, _, bytes) = post_json(
@@ -816,9 +931,38 @@ mod tests {
                 .as_u64()
                 .unwrap_or(0)
         };
-        let low = count_at(40.0).await;
-        let high = count_at(80.0).await;
-        assert!(high >= low, "high {high} should be >= low {low}");
+        let low = count_at(350.0).await;
+        let high = count_at(450.0).await;
+        assert!(low > 0, "some ground sits below 350 m");
+        assert!(high > low, "high {high} should exceed low {low}");
+    }
+
+    #[tokio::test]
+    async fn analysis_terrain_serves_the_hydrology_ops() {
+        for op in ["flow_direction", "flow_accumulation", "watershed"] {
+            let (status, ct, bytes) = post_json(
+                "/api/v1/analysis/terrain",
+                serde_json::json!({ "op": op, "bbox": [7.40, 43.72, 7.45, 43.75], "resolution": 48 }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{op}");
+            assert_eq!(ct.unwrap(), "image/png", "{op}");
+            let img = image::load_from_memory(&bytes).expect("valid png");
+            assert_eq!((img.width(), img.height()), (48, 48), "{op}");
+            assert!(distinct_pixels(&img) > 1, "{op} painted one flat colour");
+        }
+    }
+
+    #[tokio::test]
+    async fn analysis_terrain_rejects_an_unknown_op() {
+        let (status, _, bytes) = post_json(
+            "/api/v1/analysis/terrain",
+            serde_json::json!({ "op": "wetness", "bbox": [7.40, 43.72, 7.45, 43.75] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = String::from_utf8_lossy(&bytes);
+        assert!(message.contains("flow_accumulation"), "{message}");
     }
 
     #[tokio::test]
@@ -998,7 +1142,7 @@ mod tests {
         let resp = router(Arc::clone(&state))
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/analysis/export/hillshade?bbox=7,45,7.02,45.01&resolution=200")
+                    .uri("/api/v1/analysis/export/hillshade?bbox=7.30,43.50,7.32,43.51&resolution=200")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1026,7 +1170,7 @@ mod tests {
         assert_eq!(reader.meta().epsg, 3857);
         assert_eq!(reader.meta().pixel_width, 200.0);
         assert_eq!(reader.meta().pixel_height, 200.0);
-        // 0.02 x 0.01 degrees at 45N is 2226 x 1574 mercator meters, so 200
+        // 0.02 x 0.01 degrees at 43.5N is 2226 x 1535 mercator meters, so 200
         // m/px snaps up to 12 x 8 whole pixels
         let level0 = &reader.levels()[0];
         assert_eq!((level0.width, level0.height), (12, 8));

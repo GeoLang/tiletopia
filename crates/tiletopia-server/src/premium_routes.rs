@@ -20,7 +20,9 @@ use crate::{
     export::{EXPORT_FORMATS, ExportFormat, ExportJob, ExportStatus},
     feature_service, flight_planning, geocoding, geoprocessing, geostatistics, indoor, isochrone,
     map_matching, map_tiles, metering, mobile, multispectral, osm_buildings, routing,
-    scan_registration, scheduler, stac, static_map, terrain_analysis, users,
+    scan_registration, scheduler, stac, static_map, terrain_analysis,
+    terrain_api::Refusal,
+    users,
 };
 
 /// Routes for API key management.
@@ -839,34 +841,94 @@ async fn query_features(
 }
 
 /// Routes for elevation service.
+///
+/// Both read the DEM stores [`crate::elevation`] serves: a loaded grid, a tile
+/// staged under the data directory, then the SRTM cache. A location none of
+/// them covers is a 404 naming it, never an invented height.
 pub fn elevation_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/elevation/point", get(elevation_point))
-        .route("/api/v1/elevation/profile", get(elevation_profile_demo))
+        .route("/api/v1/elevation/profile", get(elevation_profile))
 }
+
+/// Points one profile request may ask for. Each one is a DEM sample, and the
+/// route is on the anonymous read surface.
+const MAX_PROFILE_POINTS: usize = 512;
 
 #[derive(Deserialize)]
 struct ElevationQuery {
-    lat: Option<f64>,
-    lon: Option<f64>,
+    lat: f64,
+    lon: f64,
 }
 
 async fn elevation_point(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ElevationQuery>,
-) -> Json<serde_json::Value> {
-    let dem = &state.elevation_store;
-    let lat = params.lat.unwrap_or(37.7749);
-    let lon = params.lon.unwrap_or(-122.4194);
-    let elev = elevation::get_elevation(lat, lon, dem);
-    Json(serde_json::json!(elev))
+) -> Result<Json<elevation::ElevationPoint>, Refusal> {
+    let (lat, lon) = (params.lat, params.lon);
+    if !elevation::on_the_globe(lon, lat) {
+        return Err(bad_coordinates());
+    }
+    let field = state
+        .elevation_sources()
+        .field([lon, lat, lon, lat])
+        .await?;
+    Ok(Json(field.point(lat, lon)?))
 }
 
-async fn elevation_profile_demo(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let path = vec![[-122.42, 37.77], [-122.41, 37.78], [-122.40, 37.79]];
-    let dem = &state.elevation_store;
-    let profile = elevation::get_profile(&path, dem);
-    Json(serde_json::json!(profile))
+#[derive(Deserialize)]
+struct ProfileQuery {
+    /// `lon,lat` pairs separated by `;`, in the order they are walked.
+    path: String,
+}
+
+async fn elevation_profile(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ProfileQuery>,
+) -> Result<Json<elevation::ElevationProfile>, Refusal> {
+    let path = parse_path(&params.path)?;
+    let bounds = elevation::bounds_of(&path).ok_or_else(bad_coordinates)?;
+    let field = state.elevation_sources().field(bounds).await?;
+    Ok(Json(field.profile(&path)?))
+}
+
+/// Parse `lon,lat;lon,lat` into the points to walk.
+fn parse_path(raw: &str) -> Result<Vec<[f64; 2]>, Refusal> {
+    let mut path = Vec::new();
+    for pair in raw.split(';').filter(|p| !p.trim().is_empty()) {
+        let mut parts = pair.split(',').map(|v| v.trim().parse::<f64>());
+        let (Some(Ok(lon)), Some(Ok(lat)), None) = (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(refuse_request(format!(
+                "path point {pair:?} is not lon,lat in degrees"
+            )));
+        };
+        if !elevation::on_the_globe(lon, lat) {
+            return Err(bad_coordinates());
+        }
+        path.push([lon, lat]);
+    }
+    if path.len() < 2 {
+        return Err(refuse_request(
+            "path needs at least two lon,lat points separated by ;".into(),
+        ));
+    }
+    if path.len() > MAX_PROFILE_POINTS {
+        return Err(refuse_request(format!(
+            "path has {} points, past the {MAX_PROFILE_POINTS} point cap",
+            path.len()
+        )));
+    }
+    Ok(path)
+}
+
+fn bad_coordinates() -> Refusal {
+    refuse_request("lon must be within -180..180 and lat within -90..90".into())
+}
+
+/// A 400 in the refusal type the elevation handlers answer with.
+fn refuse_request(reason: String) -> Refusal {
+    bad_request(reason).into_response().into()
 }
 
 /// Routes for map matching.
