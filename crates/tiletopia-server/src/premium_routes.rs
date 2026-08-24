@@ -16,7 +16,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{
-    AppState, classification, elevation,
+    AppState, classification, cog, elevation,
     export::{EXPORT_FORMATS, ExportFormat, ExportJob, ExportStatus},
     feature_service, flight_planning, geocoding, geoprocessing, geostatistics, indoor, isochrone,
     map_matching, map_tiles, metering, mobile, multispectral, osm_buildings, routing,
@@ -504,9 +504,42 @@ async fn stac_collections() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "collections": colls }))
 }
 
-async fn stac_search() -> Json<serde_json::Value> {
-    let items = stac::search_items(None, None, None, 10);
-    Json(serde_json::json!({ "type": "FeatureCollection", "features": items }))
+#[derive(Deserialize)]
+struct StacSearchQuery {
+    bbox: Option<String>,
+    datetime: Option<String>,
+    collections: Option<String>,
+    limit: Option<u32>,
+}
+
+/// Forward an item search to the configured STAC upstream. With none configured
+/// this refuses: a viewer drawing footprints has no way to tell invented items
+/// from a real catalog's answer.
+async fn stac_search(Query(params): Query<StacSearchQuery>) -> Response {
+    let searched = async {
+        // the request is read before the configuration, so a typo in bbox says
+        // so instead of being hidden behind a missing upstream
+        let params = stac::SearchParams::from_query(
+            params.bbox.as_deref(),
+            params.datetime.as_deref(),
+            params.collections.as_deref(),
+            params.limit,
+        )
+        .map_err(stac::SearchError::BadRequest)?;
+        let api = stac::upstream_api().ok_or(stac::SearchError::NoUpstream)?;
+        stac::search(&api, &params).await
+    };
+    match searched.await {
+        Ok(body) => Json(body).into_response(),
+        Err(e) => {
+            tracing::warn!("stac search refused: {e}");
+            (
+                e.status(),
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// Routes for indoor mapping.
@@ -523,7 +556,34 @@ async fn list_buildings() -> Json<serde_json::Value> {
 pub fn cog_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/cog/datasets", get(list_cog_datasets))
+        .route("/api/v1/cog/datasets/{id}/window", get(read_cog_window))
         .route("/api/v1/cog/stats", get(cog_stats))
+}
+
+/// Read a pixel window out of a registered COG. The read opens the source and
+/// makes range requests, so it runs on a blocking thread.
+async fn read_cog_window(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(window): Query<cog::WindowRequest>,
+) -> Response {
+    let read =
+        tokio::task::spawn_blocking(move || state.cog_engine.read_window(&id, &window)).await;
+    match read {
+        Ok(Ok(window)) => Json(window).into_response(),
+        Ok(Err(e)) => {
+            tracing::warn!("cog window refused: {e}");
+            (
+                e.status(),
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("cog window read panicked: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 async fn list_cog_datasets(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {

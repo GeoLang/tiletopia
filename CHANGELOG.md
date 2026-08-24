@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-24
+
+### Added
+
+- `GET /api/v1/stac/search` searches a real catalog. `TILETOPIA_STAC_API` names
+  an upstream STAC API root and the route forwards `bbox`, `datetime`,
+  `collections` and `limit` to its `/search`, answering the upstream item
+  collection unchanged so the extension fields a client reads survive. With no
+  upstream configured it answers 503 naming the variable, an unreachable or
+  failing upstream is a 502, and a 200 that carries no `features` array is a 502
+  too rather than an empty map. `limit` is capped at 500.
+- `GET /api/v1/cog/datasets/{id}/window?level&col&row&cols&rows` reads real
+  pixels out of a registered COG through terrano's windowed `CogReader`, one
+  row-major plane per band with nodata as null. Local sources are read by seek
+  and remote ones by HTTP `Range`, so a window costs the internal tiles it
+  touches. A window is capped at 512x512 pixels.
+- `TILETOPIA_COG_SOURCES` is the COG registry: one href per comma-separated
+  entry, each a local path or an http(s) URL, keyed under its filename stem the
+  way a PMTiles source is. Every entry is opened at startup and `GET
+  /api/v1/cog/datasets` reports the size, dimensions, band count, EPSG, bounds,
+  internal tile size and overview levels the file declares. Unset serves
+  nothing. A local path that cannot be opened stops the server; a remote href
+  that cannot be opened, or a host that answers 200 to a `Range` request, is
+  logged and skipped.
+
+### Removed
+
+- The demo STAC item and the two demo COG datasets, along with the local TIFF
+  tag parsing that terrano's reader replaces. `/api/v1/stac/search` and
+  `/api/v1/cog/datasets` answered invented data before this, and the COG tile
+  index fabricated byte offsets from the tile grid.
+
+### Changed
+
+- A `CogDataset` is keyed by a string id rather than a per-boot UUID, and
+  reports only what a COG header carries: `bounds` in the file's own CRS units
+  replaces the old `bbox`, `band_count` replaces the per-band type, colour
+  interpretation and statistics, and `levels` replaces `overviews`. Compression
+  and nodata are gone from the shape since the reader does not expose them.
+
 ## [Unreleased] - 2026-08-23
 
 ### Added

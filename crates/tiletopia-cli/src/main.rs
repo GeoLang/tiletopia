@@ -222,6 +222,13 @@ async fn main() -> anyhow::Result<()> {
                 tileset_dir
             };
 
+            // a remote TILETOPIA_COG_SOURCES entry is opened with reqwest's
+            // blocking client, which panics if it is called inside the runtime
+            let cog_engine =
+                tokio::task::spawn_blocking(tiletopia_server::cog::CogEngine::from_env)
+                    .await?
+                    .map_err(anyhow::Error::msg)?;
+
             let state = Arc::new(tiletopia_server::AppState {
                 db,
                 store,
@@ -247,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
                 collaboration_engine: tiletopia_server::collaboration::CollaborationEngine::new(),
                 versioning_engine: tiletopia_server::versioning::VersioningEngine::new(),
                 bim4d_engine: tiletopia_server::bim4d::Bim4DEngine::new(),
-                cog_engine: tiletopia_server::cog::CogEngine::new(),
+                cog_engine,
                 routing_engine: tiletopia_server::routing::RoutingEngine::new(),
                 map_tile_engine: tiletopia_server::map_tiles::MapTileEngine::new(),
                 feature_service_engine:
