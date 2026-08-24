@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Mesh formats (glTF, GLB, OBJ, FBX, CityGML, IFC) tile natively with textures
+  and materials (2026-08-24), so `TILETOPIA_MAGO_JAR` matters only to vector
+  files. The readers carry UVs, diffuse textures and diffuse colours into the
+  tile GLBs, a tile holding part of a textured mesh gets the crop of the
+  texture its triangles reach, and a texture that cannot be found or decoded
+  degrades to untextured with a warning. The FBX reader honours
+  `GlobalSettings` `UpAxis`/`UpAxisSign` instead of assuming y up, and reads
+  textures embedded in `Video` `Content` or by `RelativeFilename`. Two writer
+  bugs fixed on the way: a GLB with both texcoords and a texture pointed its
+  image at the texcoord buffer view, and `split_texture` could ask for a
+  zero-width crop at a UV of exactly 1.0. Tile filenames under a node with
+  more than ten children are `0-1.glb` style now, not `01.glb`.
+
 - The scheduler runs real jobs (2026-08-24). The old module is deleted whole:
   its eight-name `JobType` enum, its priority tier, its `SchedulerStats`, its
   `spawn()` that nothing called, its `create_job` that answered "an hour from
