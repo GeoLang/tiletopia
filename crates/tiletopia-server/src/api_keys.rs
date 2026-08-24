@@ -162,7 +162,7 @@ pub struct RateLimit {
     pub requests_per_day: u64,
 }
 
-/// A fresh key: the prefix plus [`KEY_RANDOM_BYTES`] of OS randomness in hex.
+/// A fresh key: the prefix plus 32 bytes of OS randomness in hex.
 ///
 /// Panics if the OS random source cannot be read, rather than minting a key with
 /// less entropy than advertised.
