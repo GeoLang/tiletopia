@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Kriging solves a linear system (2026-08-24). Ordinary kriging builds the
+  (n+1)x(n+1) semivariogram matrix with a Lagrange row and reads the kriging
+  variance off the solution as the weights dotted with the right-hand side.
+  Simple kriging builds the n x n covariance matrix, `sill - semivariance`,
+  around the caller's `known_mean` and answers `sill - w'c`. Universal kriging
+  adds constant, x and y drift rows, and reproduces a plane the samples lie on
+  exactly. All three are factored once by an in-file Gaussian elimination with
+  partial pivoting, so a grid cell costs one substitution, and a pivot below
+  1e-12 of the largest matrix entry is refused as singular instead of filling
+  the grid with NaN. Coordinates are centred on the sample centroid for the
+  drift rows. `semivariance` honours all five variogram models the methods
+  endpoint lists, each capped at the sill so simple kriging has a covariance
+  for every one.
+- `POST /api/v1/geostatistics/interpolate` takes `samples`, `bounds`,
+  `resolution` and `method` and answers the `InterpolationResult`, with one
+  kriging variance per cell for the three kriging methods. Empty samples, bounds
+  with no extent, a non-positive resolution, a non-finite coordinate or value, a
+  repeated sample location, an IDW power at or below zero, and a variogram with
+  no sill are each a 400 naming what was wrong; a singular system is a 422.
+  Samples are capped at 500 because the solve is dense, and a grid at 1,000,000
+  cells. Duplicate sample locations are refused rather than averaged: two
+  samples at one place give the matrix two identical rows, and averaging them
+  would answer a question the caller did not ask.
+
 - `GET /api/v1/stac/search` searches a real catalog. `TILETOPIA_STAC_API` names
   an upstream STAC API root and the route forwards `bbox`, `datetime`,
   `collections` and `limit` to its `/search`, answering the upstream item
@@ -32,6 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- The inverse-variogram weighting that stood in for kriging. It solved no
+  system, its weights were `sill / gamma` normalised to sum to one, its
+  "variance" was those weights dotted with the same semivariances, and ordinary,
+  simple and universal kriging all ran it, so `known_mean` was ignored and no
+  drift was ever fitted.
 - The demo STAC item and the two demo COG datasets, along with the local TIFF
   tag parsing that terrano's reader replaces. `/api/v1/stac/search` and
   `/api/v1/cog/datasets` answered invented data before this, and the COG tile
@@ -39,6 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `interpolate_grid` and `kriging_estimate` return a `Result`, and
+  `interpolate_grid` fits its variogram over the samples' own extent rather than
+  the requested bounds' width, so the lag bins cover the distances the solve
+  asks about. `GET /api/v1/geostatistics/demo` says in its payload that its five
+  samples are invented, and points at the interpolate route.
 - A `CogDataset` is keyed by a string id rather than a per-boot UUID, and
   reports only what a COG header carries: `bounds` in the file's own CRS units
   replaces the old `bbox`, `band_count` replaces the per-band type, colour

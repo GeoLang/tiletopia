@@ -1218,17 +1218,47 @@ async fn terrain_analysis_demo() -> Json<serde_json::Value> {
 }
 
 /// Routes for geostatistics.
-pub fn geostatistics_routes() -> Router<Arc<AppState>> {
+///
+/// Generic over the state so a test can serve the same route table without an
+/// `AppState`: no handler here reads any.
+pub fn geostatistics_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
         .route("/api/v1/geostatistics/methods", get(geostat_methods))
         .route("/api/v1/geostatistics/demo", get(geostat_demo))
+        .route(
+            "/api/v1/geostatistics/interpolate",
+            post(geostat_interpolate),
+        )
 }
 
 async fn geostat_methods() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "methods": ["IDW", "OrdinaryKriging", "UniversalKriging", "SimpleKriging"],
-        "variogram_models": ["Spherical", "Exponential", "Gaussian", "Linear", "Power"]
+        "variogram_models": ["Spherical", "Exponential", "Gaussian", "Linear", "Power"],
+        "max_samples": geostatistics::MAX_SAMPLES,
+        "max_grid_cells": geostatistics::MAX_GRID_CELLS
     }))
+}
+
+#[derive(Deserialize)]
+struct InterpolateRequest {
+    samples: Vec<geostatistics::SamplePoint>,
+    bounds: [f64; 4],
+    resolution: f64,
+    method: geostatistics::InterpolationMethod,
+}
+
+async fn geostat_interpolate(
+    Json(request): Json<InterpolateRequest>,
+) -> Result<Json<geostatistics::InterpolationResult>, (StatusCode, String)> {
+    geostatistics::interpolate_grid(
+        &request.samples,
+        request.bounds,
+        request.resolution,
+        &request.method,
+    )
+    .map(Json)
+    .map_err(|refusal| (refusal.status(), refusal.to_string()))
 }
 
 async fn geostat_demo() -> Json<serde_json::Value> {
@@ -1264,8 +1294,11 @@ async fn geostat_demo() -> Json<serde_json::Value> {
         [0.0, 0.0, 1.0, 1.0],
         0.25,
         &geostatistics::InterpolationMethod::Idw { power: 2.0 },
-    );
+    )
+    .expect("the demo's own five samples interpolate");
     Json(serde_json::json!({
+        "demo": "five invented samples on a unit square, not measured data. \
+                 POST /api/v1/geostatistics/interpolate to interpolate your own.",
         "grid_rows": result.grid_rows,
         "grid_cols": result.grid_cols,
         "statistics": result.statistics,
@@ -1787,5 +1820,173 @@ mod tests {
         query.concavity = Some(0.5);
 
         assert_eq!(query.into_request().unwrap().concavity, 0.5);
+    }
+
+    /// POST a body to the real geostatistics route table and read the answer.
+    async fn interpolate(body: serde_json::Value) -> (StatusCode, String) {
+        use tower::ServiceExt;
+
+        let response = geostatistics_routes::<()>()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/geostatistics/interpolate")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    fn geostat_samples(count: usize) -> Vec<serde_json::Value> {
+        (0..count)
+            .map(|i| {
+                let step = i as f64;
+                serde_json::json!({ "x": step, "y": (i % 7) as f64, "value": 10.0 + step })
+            })
+            .collect()
+    }
+
+    fn interpolate_body(method: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "samples": geostat_samples(9),
+            "bounds": [0.0, 0.0, 8.0, 6.0],
+            "resolution": 2.0,
+            "method": method
+        })
+    }
+
+    #[tokio::test]
+    async fn interpolate_answers_a_kriged_grid_with_a_variance_per_cell() {
+        let (status, body) =
+            interpolate(interpolate_body(serde_json::json!("OrdinaryKriging"))).await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let result: geostatistics::InterpolationResult = serde_json::from_str(&body).unwrap();
+        assert_eq!(result.grid_cols, 4);
+        assert_eq!(result.grid_rows, 3);
+        assert_eq!(result.values.len(), 12);
+        assert_eq!(result.variances.unwrap().len(), 12);
+        assert!(result.values.iter().all(|v| v.is_finite()));
+    }
+
+    #[tokio::test]
+    async fn interpolate_answers_the_three_kriging_methods_differently() {
+        // cell 7 sits at (7, 3), off the samples so no method just repeats one
+        const OFF_SAMPLE_CELL: usize = 7;
+        let mut answers = Vec::new();
+        for method in [
+            serde_json::json!("OrdinaryKriging"),
+            serde_json::json!("UniversalKriging"),
+            serde_json::json!({ "SimpleKriging": { "known_mean": 0.0 } }),
+        ] {
+            let (status, body) = interpolate(interpolate_body(method.clone())).await;
+            assert_eq!(status, StatusCode::OK, "{method}: {body}");
+            let result: geostatistics::InterpolationResult = serde_json::from_str(&body).unwrap();
+            answers.push((method, result.values[OFF_SAMPLE_CELL]));
+        }
+
+        for (left, right) in [(0, 1), (0, 2), (1, 2)] {
+            assert!(
+                (answers[left].1 - answers[right].1).abs() > 1e-6,
+                "{} answered {} and {} answered {}",
+                answers[left].0,
+                answers[left].1,
+                answers[right].0,
+                answers[right].1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn interpolate_refuses_an_empty_sample_list() {
+        let mut body = interpolate_body(serde_json::json!("OrdinaryKriging"));
+        body["samples"] = serde_json::json!([]);
+
+        let (status, reason) = interpolate(body).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(reason.contains("at least one sample"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn interpolate_refuses_bounds_with_no_extent() {
+        let mut body = interpolate_body(serde_json::json!("OrdinaryKriging"));
+        body["bounds"] = serde_json::json!([8.0, 0.0, 8.0, 6.0]);
+
+        let (status, reason) = interpolate(body).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(reason.contains("bounds"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn interpolate_refuses_a_grid_past_the_cell_cap() {
+        let mut body = interpolate_body(serde_json::json!({ "Idw": { "power": 2.0 } }));
+        body["resolution"] = serde_json::json!(0.001);
+
+        let (status, reason) = interpolate(body).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            reason.contains(&geostatistics::MAX_GRID_CELLS.to_string()),
+            "{reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn interpolate_refuses_more_samples_than_the_solve_accepts() {
+        let mut body = interpolate_body(serde_json::json!("OrdinaryKriging"));
+        body["samples"] = serde_json::json!(geostat_samples(geostatistics::MAX_SAMPLES + 1));
+
+        let (status, reason) = interpolate(body).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            reason.contains(&geostatistics::MAX_SAMPLES.to_string()),
+            "{reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn interpolate_refuses_samples_stacked_at_one_location() {
+        let mut body = interpolate_body(serde_json::json!("OrdinaryKriging"));
+        body["samples"] = serde_json::json!([
+            { "x": 1.0, "y": 1.0, "value": 10.0 },
+            { "x": 1.0, "y": 1.0, "value": 12.0 },
+            { "x": 4.0, "y": 3.0, "value": 14.0 },
+        ]);
+
+        let (status, reason) = interpolate(body).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(reason.contains("same location"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn interpolate_refuses_a_singular_universal_kriging_system() {
+        let mut body = interpolate_body(serde_json::json!("UniversalKriging"));
+        // collinear samples leave the x and y drift rows dependent
+        body["samples"] = serde_json::json!(
+            (0..5)
+                .map(|i| serde_json::json!({
+                    "x": i as f64,
+                    "y": 2.0 * i as f64,
+                    "value": 10.0 + i as f64
+                }))
+                .collect::<Vec<_>>()
+        );
+
+        let (status, reason) = interpolate(body).await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{reason}");
+        assert!(reason.contains("singular"), "{reason}");
     }
 }
