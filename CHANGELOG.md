@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The scheduler runs real jobs (2026-08-24). The old module is deleted whole:
+  its eight-name `JobType` enum, its priority tier, its `SchedulerStats`, its
+  `spawn()` that nothing called, its `create_job` that answered "an hour from
+  now" for every cron expression, and the three seeded jobs carrying run counts
+  of 28, 720 and 4. Nothing is seeded now, and `/api/v1/scheduler/stats` and
+  `/api/v1/scheduler/runs`, which answered counts of the seeds, are gone.
+- Three actions, which are the three the worker runs. `retile_asset` submits a
+  tiling job through `JobQueue::submit`, carrying the placement the asset's last
+  job carried so a mesh re-tile does not fail for want of coordinates.
+  `prune_export_files` removes export directories under the data directory whose
+  newest file is past an age, which nothing else removed: an export's job record
+  is process memory, so a restart left the files with nothing to delete them. A
+  directory holding no file yet is an export still encoding and is left alone.
+  `prune_finished_jobs` deletes settled rows from the `jobs` table past an age.
+  `GET /api/v1/scheduler/actions` lists exactly these three, and a test schedules
+  one job per advertised kind and fails unless every one of them executes.
+- Three schedules: `interval` in seconds, `cron`, and `one_shot` at a time in the
+  future. Cron is the `cron` crate over five standard fields, minute hour
+  day-of-month month day-of-week, at second 0 in UTC. The field count is checked
+  before parsing, because four fields padded for the crate's seconds and year is
+  a valid six-field expression meaning something else. An expression the server
+  cannot read, an interval under a second and a one-shot already past are each a
+  400 naming what was wrong.
+- `POST /api/v1/scheduler/jobs` stores a job in the new `scheduled_jobs` table:
+  the action, the schedule, an enabled flag, the next and last run, the last
+  outcome with its detail, a run count of finished runs only, and the failures in
+  a row. `PUT /api/v1/scheduler/jobs/{id}` enables or disables one, and enabling
+  recomputes the next run from now so a job that sat disabled past its time does
+  not fire on the way back. `DELETE /api/v1/scheduler/jobs/{id}` removes it. All
+  three take the Edit tier, and a job somebody else created is a 404 rather than
+  a 403. `GET /api/v1/scheduler/jobs` answers the caller's own jobs and an admin
+  every one, out of the table rather than out of memory.
+- A worker starts with the server, wakes every second, runs what the table says
+  is due, and writes the outcome back. A one-shot disables itself once it has
+  run. A failed run keeps its error on the row and comes back on the next tick;
+  three failures in a row disable the job. The next run is on the row, so a
+  scheduler built fresh over the same database picks up what is due and leaves
+  what is not.
 - Webhooks deliver real events (2026-08-24). One module is left: `webhook.rs`,
   whose signature was a `DefaultHasher` of the payload and the secret, is
   deleted, and `webhooks.rs` now holds subscriptions, delivery and the event

@@ -148,12 +148,9 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 </ul>
 </div>
 <div class="card">
-<h3>Mounted routes that do not work</h3>
+<h3>What does not work</h3>
 <ul>
-<li>Scheduler never runs a job</li>
-<li>Webhooks never deliver</li>
-<li>STAC search returns one hardcoded item</li>
-<li>COG offsets are fabricated</li>
+<li>DAE tiling: neither tiler takes the format, so those jobs fail</li>
 <li>Temporal versioning, CRDT, federation, marketplace, AR/VR: modules with no callers</li>
 </ul>
 </div>
@@ -164,7 +161,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <section id="comparison">
 <div class="container">
 <h2>GeoLang vs The Industry</h2>
-<p style="color:var(--muted);margin-bottom:20px">What this server actually does. STAC, webhooks, scheduling, kriging and indoor mapping have mounted routes. They do not work, so they are not in the table.</p>
+<p style="color:var(--muted);margin-bottom:20px">What this server actually does. The premium routes are not in the table and work too: STAC search, COG windows, webhook delivery, scheduled jobs, kriging, geoprocessing, static maps and API keys.</p>
 <div style="overflow-x:auto">
 <table>
 <thead>
@@ -183,7 +180,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 </tbody>
 </table>
 </div>
-<p style="margin-top:16px;color:var(--muted);font-size:.85rem">Ion is a hosted product. This is a binary you run. Scheduler, webhooks, STAC, COG, kriging, geoprocessing, indoor mapping and the rest of the premium routes are mounted and do not work. They are not scored.</p>
+<p style="margin-top:16px;color:var(--muted);font-size:.85rem">Ion is a hosted product. This is a binary you run. Scheduler, webhooks, STAC, COG, kriging, geoprocessing, static maps and API keys work and are not scored above.</p>
 
 <div class="grid" style="margin-top:28px">
 <div class="card">
@@ -262,7 +259,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td><code>GET</code></td><td><code>/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png</code></td><td>Hillshade, slope or ndvi tiles</td></tr>
 <tr><td><code>GET</code></td><td><code>/metrics</code></td><td>Prometheus metrics</td></tr>
 </table>
-<p style="margin-top:12px;color:var(--muted);font-size:.85rem">Other <code>/api/v1/*</code> routes are mounted (STAC, COG, scheduler, webhooks, geoprocessing, API keys). They return demo data or ignore input. See the README "Not implemented" table.</p>
+<p style="margin-top:12px;color:var(--muted);font-size:.85rem">The other <code>/api/v1/*</code> routes are real too: STAC search proxies an upstream catalog, COG windows read range requests, static maps render the DEM, kriging solves its system, geoprocessing runs real overlays, webhooks deliver HMAC-signed events, the scheduler runs the jobs it stores, and API keys authenticate read routes. What is left is in the README "Not implemented" table.</p>
 </div>
 </section>
 

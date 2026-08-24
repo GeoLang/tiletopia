@@ -739,29 +739,243 @@ async fn download_export(
         .into_response())
 }
 
-/// Routes for the scheduler.
+/// Scheduled jobs, and what the worker has done with them.
+///
+/// Creating, enabling, disabling and deleting one is a write, so it takes the
+/// Edit tier like an asset write, plus the creator-or-admin check the handlers
+/// do. The reads need a valid token because the answer depends on who is asking:
+/// a caller sees its own jobs, an admin sees every one, the same stance the
+/// webhook and asset listings take.
 pub fn scheduler_routes() -> Router<Arc<AppState>> {
+    let write_routes = Router::new()
+        .route("/api/v1/scheduler/jobs", post(create_scheduled_job))
+        .route(
+            "/api/v1/scheduler/jobs/{id}",
+            axum::routing::put(update_scheduled_job).delete(delete_scheduled_job),
+        )
+        .layer(middleware::from_fn(users::require_editor));
+
     Router::new()
         .route("/api/v1/scheduler/jobs", get(list_scheduled_jobs))
-        .route("/api/v1/scheduler/stats", get(scheduler_stats))
-        .route("/api/v1/scheduler/runs", get(recent_runs))
+        .route("/api/v1/scheduler/actions", get(scheduler_action_kinds))
+        .route("/api/v1/scheduler/jobs/{id}", get(get_scheduled_job))
+        .merge(write_routes)
 }
 
-async fn list_scheduled_jobs(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let sched = &state.scheduler;
-    let jobs = sched.list_jobs(None).await;
-    Json(serde_json::json!({ "jobs": jobs }))
+/// Longest job name accepted, so a listing stays readable and a name cannot be
+/// used as bulk storage.
+const MAX_SCHEDULED_JOB_NAME_CHARS: usize = 120;
+
+#[derive(Debug, Deserialize)]
+pub struct CreateScheduledJobRequest {
+    pub name: String,
+    /// The action, tagged by `kind`. `GET /api/v1/scheduler/actions` lists them.
+    pub action: serde_json::Value,
+    /// The schedule, tagged by `kind`: `interval`, `cron` or `one_shot`.
+    pub schedule: serde_json::Value,
+    /// Absent means enabled. A disabled job keeps its row and never comes due.
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
 }
 
-async fn scheduler_stats(State(state): State<Arc<AppState>>) -> Json<scheduler::SchedulerStats> {
-    let sched = &state.scheduler;
-    Json(sched.stats().await)
+fn enabled_by_default() -> bool {
+    true
 }
 
-async fn recent_runs(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let sched = &state.scheduler;
-    let runs = sched.recent_runs(20).await;
-    Json(serde_json::json!({ "runs": runs }))
+/// The request as the name, action and schedule a job is built from, or the
+/// refusal. An action or a schedule this server does not run is named back to
+/// the caller, never widened to something that parses.
+fn parse_scheduled_job_request(
+    request: &CreateScheduledJobRequest,
+) -> Result<(String, scheduler::ScheduledAction, scheduler::Schedule), Refusal> {
+    let name = request.name.trim();
+    if name.is_empty() || name.chars().count() > MAX_SCHEDULED_JOB_NAME_CHARS {
+        return Err(bad_json_request(format!(
+            "name must be 1 to {MAX_SCHEDULED_JOB_NAME_CHARS} characters"
+        )));
+    }
+
+    let action: scheduler::ScheduledAction = serde_json::from_value(request.action.clone())
+        .map_err(|error| {
+            bad_json_request(format!(
+                "action is not one this server runs (expected {}): {error}",
+                scheduler::ScheduledAction::KINDS.join(", ")
+            ))
+        })?;
+    action.check().map_err(bad_json_request)?;
+
+    let schedule: scheduler::Schedule =
+        serde_json::from_value(request.schedule.clone()).map_err(|error| {
+            bad_json_request(format!(
+                "schedule is not one this server keeps (expected {}): {error}",
+                scheduler::Schedule::KINDS.join(", ")
+            ))
+        })?;
+
+    Ok((name.to_string(), action, schedule))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateScheduledJobRequest {
+    pub enabled: bool,
+}
+
+fn scheduled_job_read_failed(error: sqlx::Error) -> Refusal {
+    tracing::error!("reading scheduled jobs failed: {error}");
+    refuse_as_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "reading the scheduled jobs failed".into(),
+    )
+}
+
+fn scheduled_job_write_failed(what: &str, error: sqlx::Error) -> Refusal {
+    tracing::error!("{what} a scheduled job failed: {error}");
+    refuse_as_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("{what} the scheduled job failed"),
+    )
+}
+
+/// The job this caller may change, or the refusal. Behind `require_editor`, so a
+/// valid token is always present and only the per-row creator-or-admin rule is
+/// left to check. A job somebody else created is a 404, not a 403: an editor has
+/// no business learning that it exists.
+async fn writable_scheduled_job(
+    state: &AppState,
+    id: Uuid,
+    headers: &HeaderMap,
+) -> Result<scheduler::ScheduledJob, Refusal> {
+    let claims = users::claims_from_headers(headers)
+        .map_err(|status| Refusal::from(status.into_response()))?;
+    state
+        .db
+        .get_scheduled_job(id)
+        .await
+        .map_err(scheduled_job_read_failed)?
+        .filter(|job| claims.can_admin() || job.created_by == claims.sub)
+        .ok_or_else(|| refuse_as_json(StatusCode::NOT_FOUND, "no such scheduled job".into()))
+}
+
+/// Schedule a job. The first run comes from the schedule, so a cron expression
+/// this server cannot read and a one-shot already in the past are each a 400
+/// rather than a row that never runs.
+async fn create_scheduled_job(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<CreateScheduledJobRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), Refusal> {
+    // behind require_editor, so a valid token is always present
+    let created_by = users::claims_from_headers(&headers)
+        .map_err(|status| Refusal::from(status.into_response()))?
+        .sub;
+
+    let (name, action, schedule) = parse_scheduled_job_request(&request)?;
+    let first_run = schedule
+        .first_run(chrono::Utc::now())
+        .map_err(bad_json_request)?;
+
+    let job = scheduler::ScheduledJob {
+        id: Uuid::new_v4(),
+        name,
+        action,
+        schedule,
+        enabled: request.enabled,
+        created_by,
+        created_at: chrono::Utc::now(),
+        next_run: Some(first_run),
+        last_run: None,
+        last_outcome: None,
+        run_count: 0,
+        consecutive_failures: 0,
+    };
+    state
+        .db
+        .create_scheduled_job(&job)
+        .await
+        .map_err(|error| scheduled_job_write_failed("storing", error))?;
+
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "job": job }))))
+}
+
+/// Enable or disable a job. Enabling one recomputes the next run from now, so a
+/// job that sat disabled past its time does not fire the moment it comes back.
+async fn update_scheduled_job(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateScheduledJobRequest>,
+) -> Result<Json<serde_json::Value>, Refusal> {
+    let mut job = writable_scheduled_job(&state, id, &headers).await?;
+
+    let next_run = if request.enabled {
+        job.schedule.first_run(chrono::Utc::now()).ok()
+    } else {
+        job.next_run
+    };
+    state
+        .db
+        .set_scheduled_job_enabled(id, request.enabled, next_run)
+        .await
+        .map_err(|error| scheduled_job_write_failed("updating", error))?;
+
+    job.enabled = request.enabled;
+    job.next_run = next_run;
+    Ok(Json(serde_json::json!({ "job": job })))
+}
+
+async fn delete_scheduled_job(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<StatusCode, Refusal> {
+    writable_scheduled_job(&state, id, &headers).await?;
+    state
+        .db
+        .delete_scheduled_job(id)
+        .await
+        .map_err(|error| scheduled_job_write_failed("deleting", error))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The caller's jobs, or every one for an admin, out of the database.
+async fn list_scheduled_jobs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Refusal> {
+    let claims = users::claims_from_headers(&headers)
+        .map_err(|status| Refusal::from(status.into_response()))?;
+    let jobs: Vec<scheduler::ScheduledJob> = state
+        .db
+        .list_scheduled_jobs()
+        .await
+        .map_err(scheduled_job_read_failed)?
+        .into_iter()
+        .filter(|job| claims.can_admin() || job.created_by == claims.sub)
+        .collect();
+
+    Ok(Json(serde_json::json!({ "jobs": jobs })))
+}
+
+async fn get_scheduled_job(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Refusal> {
+    let claims = users::claims_from_headers(&headers)
+        .map_err(|status| Refusal::from(status.into_response()))?;
+    let job = state
+        .db
+        .get_scheduled_job(id)
+        .await
+        .map_err(scheduled_job_read_failed)?
+        .filter(|job| claims.can_admin() || job.created_by == claims.sub)
+        .ok_or_else(|| refuse_as_json(StatusCode::NOT_FOUND, "no such scheduled job".into()))?;
+    Ok(Json(serde_json::json!({ "job": job })))
+}
+
+/// Every action a job may ask for, which is every action the worker runs.
+async fn scheduler_action_kinds() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "action_kinds": scheduler::ScheduledAction::KINDS }))
 }
 
 /// Routes for plugins/marketplace.

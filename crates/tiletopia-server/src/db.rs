@@ -1,5 +1,5 @@
-//! Persistent SQLite database for assets, jobs, API keys and webhook
-//! subscriptions.
+//! Persistent SQLite database for assets, jobs, API keys, webhook subscriptions
+//! and scheduled jobs.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::api_keys::{ApiKey, Permission, RateLimitTier};
+use crate::scheduler::{Outcome, RunOutcome, Schedule, ScheduledAction, ScheduledJob};
 use crate::users::{Organization, User, UserRole};
 use crate::webhooks::{WebhookEvent, WebhookSubscription};
 use crate::{Asset, AssetStatus, AssetType};
@@ -118,6 +119,8 @@ const TILESET_COLUMNS: &str = "id, name, status, source_id, object_key, original
 const API_KEY_COLUMNS: &str = "id, name, key_hash, permissions, tier, created_by, created_at, expires_at, last_used_at, revoked";
 
 const WEBHOOK_COLUMNS: &str = "id, url, events, secret, created_by, active, created_at";
+
+const SCHEDULED_JOB_COLUMNS: &str = "id, name, action, schedule, enabled, created_by, created_at, next_run, last_run, last_outcome, last_detail, run_count, consecutive_failures";
 
 fn enum_to_str<T: Serialize>(val: &T) -> String {
     serde_json::to_string(val)
@@ -317,6 +320,26 @@ impl Database {
                 created_by TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS scheduled_jobs (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                action TEXT NOT NULL,
+                schedule TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                next_run TEXT,
+                last_run TEXT,
+                last_outcome TEXT,
+                last_detail TEXT,
+                run_count INTEGER NOT NULL DEFAULT 0,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0
             )",
         )
         .execute(&self.pool)
@@ -947,6 +970,138 @@ impl Database {
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    // -- Scheduled jobs --
+
+    pub async fn create_scheduled_job(&self, job: &ScheduledJob) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO scheduled_jobs \
+             (id, name, action, schedule, enabled, created_by, created_at, next_run, \
+              last_run, last_outcome, last_detail, run_count, consecutive_failures) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0, 0)",
+        )
+        .bind(job.id.to_string())
+        .bind(&job.name)
+        .bind(to_json(&job.action))
+        .bind(to_json(&job.schedule))
+        .bind(job.enabled as i64)
+        .bind(&job.created_by)
+        .bind(job.created_at.to_rfc3339())
+        .bind(job.next_run.map(|at| at.to_rfc3339()))
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Every scheduled job, newest first. The listing route reads this and
+    /// filters it by who is asking.
+    pub async fn list_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>, sqlx::Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {SCHEDULED_JOB_COLUMNS} FROM scheduled_jobs ORDER BY created_at DESC"
+        ))
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter().map(row_to_scheduled_job).collect()
+    }
+
+    pub async fn get_scheduled_job(&self, id: Uuid) -> Result<Option<ScheduledJob>, sqlx::Error> {
+        let row = sqlx::query(&format!(
+            "SELECT {SCHEDULED_JOB_COLUMNS} FROM scheduled_jobs WHERE id = ?"
+        ))
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.as_ref().map(row_to_scheduled_job).transpose()
+    }
+
+    /// The jobs the worker should run now: enabled, and with a next run that has
+    /// arrived. Oldest due first, so a backlog comes out in the order it built up.
+    pub async fn due_scheduled_jobs(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ScheduledJob>, sqlx::Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {SCHEDULED_JOB_COLUMNS} FROM scheduled_jobs \
+             WHERE enabled = 1 AND next_run IS NOT NULL AND next_run <= ? \
+             ORDER BY next_run"
+        ))
+        .bind(now.to_rfc3339())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter().map(row_to_scheduled_job).collect()
+    }
+
+    /// Write back what a run did. The name, action, schedule and creator are not
+    /// writable here: a run only moves the schedule on.
+    pub async fn record_scheduled_run(&self, job: &ScheduledJob) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE scheduled_jobs SET enabled = ?, next_run = ?, last_run = ?, \
+             last_outcome = ?, last_detail = ?, run_count = ?, consecutive_failures = ? \
+             WHERE id = ?",
+        )
+        .bind(job.enabled as i64)
+        .bind(job.next_run.map(|at| at.to_rfc3339()))
+        .bind(job.last_run.map(|at| at.to_rfc3339()))
+        .bind(job.last_outcome.as_ref().map(|last| last.outcome.name()))
+        .bind(job.last_outcome.as_ref().map(|last| last.detail.clone()))
+        .bind(job.run_count as i64)
+        .bind(job.consecutive_failures as i64)
+        .bind(job.id.to_string())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Enable or disable a job, and set when it next runs. Returns the rows
+    /// changed.
+    pub async fn set_scheduled_job_enabled(
+        &self,
+        id: Uuid,
+        enabled: bool,
+        next_run: Option<DateTime<Utc>>,
+    ) -> Result<u64, sqlx::Error> {
+        let result =
+            sqlx::query("UPDATE scheduled_jobs SET enabled = ?, next_run = ? WHERE id = ?")
+                .bind(enabled as i64)
+                .bind(next_run.map(|at| at.to_rfc3339()))
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    pub async fn delete_scheduled_job(&self, id: Uuid) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM scheduled_jobs WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Remove settled tiling job rows that finished before `cutoff`, which is
+    /// what keeps the table from growing with every re-tile. Returns the rows
+    /// removed.
+    pub async fn delete_finished_jobs_before(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "DELETE FROM jobs WHERE status IN ('done', 'failed') \
+             AND completed_at IS NOT NULL AND completed_at < ?",
+        )
+        .bind(cutoff.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
 
         Ok(result.rows_affected())
     }
@@ -1591,6 +1746,47 @@ fn row_to_webhook_subscription(row: &sqlx::sqlite::SqliteRow) -> WebhookSubscrip
         active: row.get::<i64, _>("active") != 0,
         created_at: parse_datetime(&created_at_str),
     }
+}
+
+fn to_json<T: Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_default()
+}
+
+/// A stored scheduled job. Its action and its schedule have no narrowest thing
+/// to fall back to, so a row holding something this build cannot read is a
+/// decode error rather than a job that quietly does something else.
+fn row_to_scheduled_job(row: &sqlx::sqlite::SqliteRow) -> Result<ScheduledJob, sqlx::Error> {
+    let action_json: String = row.get("action");
+    let schedule_json: String = row.get("schedule");
+    let created_at_str: String = row.get("created_at");
+    let last_outcome: Option<String> = row.get("last_outcome");
+
+    let decode = |error: serde_json::Error| sqlx::Error::Decode(Box::new(error));
+    let action: ScheduledAction = serde_json::from_str(&action_json).map_err(decode)?;
+    let schedule: Schedule = serde_json::from_str(&schedule_json).map_err(decode)?;
+
+    Ok(ScheduledJob {
+        id: Uuid::parse_str(&row.get::<String, _>("id")).unwrap_or_default(),
+        name: row.get("name"),
+        action,
+        schedule,
+        enabled: row.get::<i64, _>("enabled") != 0,
+        created_by: row.get("created_by"),
+        created_at: parse_datetime(&created_at_str),
+        next_run: parse_optional_datetime(row.get("next_run")),
+        last_run: parse_optional_datetime(row.get("last_run")),
+        last_outcome: last_outcome
+            .as_deref()
+            .and_then(Outcome::from_name)
+            .map(|outcome| RunOutcome {
+                outcome,
+                detail: row
+                    .get::<Option<String>, _>("last_detail")
+                    .unwrap_or_default(),
+            }),
+        run_count: row.get::<i64, _>("run_count") as u64,
+        consecutive_failures: row.get::<i64, _>("consecutive_failures") as u32,
+    })
 }
 
 fn row_to_user(row: &sqlx::sqlite::SqliteRow) -> User {

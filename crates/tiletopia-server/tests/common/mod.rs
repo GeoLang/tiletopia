@@ -101,6 +101,12 @@ pub async fn build_state(
         Arc::clone(&webhooks),
     ));
 
+    let scheduler = Arc::new(tiletopia_server::scheduler::Scheduler::new(
+        Arc::clone(&db),
+        dir.clone(),
+        Arc::clone(&job_queue),
+    ));
+
     Arc::new(AppState {
         db,
         store,
@@ -118,7 +124,7 @@ pub async fn build_state(
         webhooks,
         workspace_store: tiletopia_server::workspaces::WorkspaceStore::new(),
         export_engine: tiletopia_server::export::ExportEngine::new(),
-        scheduler: tiletopia_server::scheduler::Scheduler::new(),
+        scheduler,
         plugin_registry: tiletopia_server::plugins::PluginRegistry::new(),
         photogrammetry_engine: tiletopia_server::photogrammetry::PhotogrammetryEngine::new(),
         classification_engine: tiletopia_server::classification::ClassificationEngine::new(),

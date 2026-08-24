@@ -197,6 +197,13 @@ async fn main() -> anyhow::Result<()> {
             ));
             Arc::clone(&job_queue).start().await;
 
+            let scheduler = Arc::new(tiletopia_server::scheduler::Scheduler::new(
+                Arc::clone(&db),
+                data_dir.clone(),
+                Arc::clone(&job_queue),
+            ));
+            Arc::clone(&scheduler).start();
+
             #[cfg(feature = "martin")]
             let current_tileset_build = tiletopia_server::tilesets::CurrentBuild::new();
 
@@ -250,7 +257,7 @@ async fn main() -> anyhow::Result<()> {
                 webhooks,
                 workspace_store: tiletopia_server::workspaces::WorkspaceStore::new(),
                 export_engine: tiletopia_server::export::ExportEngine::new(),
-                scheduler: tiletopia_server::scheduler::Scheduler::new(),
+                scheduler,
                 plugin_registry: tiletopia_server::plugins::PluginRegistry::new(),
                 photogrammetry_engine: tiletopia_server::photogrammetry::PhotogrammetryEngine::new(
                 ),

@@ -216,7 +216,7 @@ impl ExportEngine {
 
         let job = self.get_export(job_id).await.ok_or("Job not found")?;
 
-        let output_dir = data_dir.join("exports").join(job_id.to_string());
+        let output_dir = exports_dir(data_dir).join(job_id.to_string());
         std::fs::create_dir_all(&output_dir)
             .map_err(|e| format!("Failed to create output dir: {e}"))?;
 
@@ -424,10 +424,16 @@ impl ExportEngine {
     }
 }
 
+/// Where every finished export sits, one directory per job. Also what
+/// [`crate::scheduler`] prunes.
+pub fn exports_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("exports")
+}
+
 /// Locate the encoded file a finished job wrote. `encode` names it per format,
 /// and the job record does not keep the path, so the output dir is scanned.
 pub fn exported_file(data_dir: &std::path::Path, job_id: Uuid) -> Option<std::path::PathBuf> {
-    std::fs::read_dir(data_dir.join("exports").join(job_id.to_string()))
+    std::fs::read_dir(exports_dir(data_dir).join(job_id.to_string()))
         .ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.path())

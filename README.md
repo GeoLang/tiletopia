@@ -71,6 +71,13 @@ A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields 
 - A failed delivery is retried three times, 30 seconds apart and doubling, then dropped. `GET /api/v1/webhooks/deliveries` reports what happened
 - Pending deliveries live in the process: a restart drops what has not gone out yet
 
+### Scheduled Jobs
+- `POST /api/v1/scheduler/jobs` stores a job: a name, an action, a schedule, and whether it is enabled. Editor or admin, and a job belongs to whoever created it
+- Three actions, which are the three the worker runs: `retile_asset` puts an asset back on the tiling queue with the placement its last job carried, `prune_export_files` removes finished export directories past an age, `prune_finished_jobs` removes settled rows from the `jobs` table past an age
+- Three schedules: `interval` in seconds, `cron` as five standard fields (minute hour day-of-month month day-of-week, at second 0, UTC), and `one_shot` at a time in the future
+- A worker wakes every second, runs what is due, and writes the outcome to the row: `last_run`, `last_outcome`, and a `run_count` that counts finished runs only. A one-shot disables itself once it has run
+- A failed run keeps its error on the row and is retried on the next tick. Three failures in a row disable the job
+
 ### Cesium Ion Compatibility
 - Ion REST compatibility for asset id and endpoint resolution
 - A terrain asset in that layer resolves to a prebuilt bundle named after the asset id
@@ -83,10 +90,9 @@ Not implemented, whatever the code in the repository suggests:
 | Subsystem | State |
 |-----------|-------|
 | DAE tiling | Neither the native tiler nor mago-3d-tiler takes DAE, so those jobs fail. Point clouds, meshes, vector files and IFC do tile |
-| Scheduler | `spawn()` has no callers. `create_job` ignores cron. `Scheduler::new()` seeds three fabricated jobs. No job has ever run |
 | Temporal versioning, CRDT, federation, CI/CD validation, multi-tenant isolation, leader election, priority queue / SLA, white-label, marketplace, geofencing, encryption, custom dashboards, AR/VR foveated rendering, cinematic flythrough, scripting, offline viewer export | `pub mod` lines with unit tests. No route, CLI or render loop calls them |
 
-The modules stay. Wiring or deleting them is a product call, recorded in `viewtopia/DESIGN_TODO.md`. Do not start from the scheduler facade.
+The modules stay. Wiring or deleting them is a product call, recorded in `viewtopia/DESIGN_TODO.md`.
 
 ---
 
@@ -412,7 +418,7 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `GET` | `/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` | Hillshade, slope or ndvi tiles, rendered on demand |
 | `GET` | `/metrics` | Prometheus metrics |
 
-Other `/api/v1/*` geospatial and premium routes are mounted and real: STAC search proxies `TILETOPIA_STAC_API`, COG windows read `TILETOPIA_COG_SOURCES` over range requests, static maps render the DEM to PNG/JPEG/WebP/SVG/PDF, geostatistics solves kriging systems, geoprocessing runs geo's boolean overlays, webhooks deliver HMAC-signed job and asset events, and API keys authenticate read routes (`X-Api-Key`, admin-minted, hashed at rest). The facades left are in the table above: the scheduler worker has no callers, and the pub-mod-only modules have no routes.
+Other `/api/v1/*` geospatial and premium routes are mounted and real: STAC search proxies `TILETOPIA_STAC_API`, COG windows read `TILETOPIA_COG_SOURCES` over range requests, static maps render the DEM to PNG/JPEG/WebP/SVG/PDF, geostatistics solves kriging systems, geoprocessing runs geo's boolean overlays, webhooks deliver HMAC-signed job and asset events, the scheduler runs the jobs it stores, and API keys authenticate read routes (`X-Api-Key`, admin-minted, hashed at rest). The facades left are in the table above: the pub-mod-only modules have no routes.
 
 Tile data reads are anonymous: `tileset.json`, `tiles/{path}`, everything under
 `/api/v1/terrain/` (the generated quantized-mesh routes, the prebuilt bundles
@@ -500,7 +506,7 @@ What this server actually does, against Cesium Ion as a hosted 3D Tiles host.
 | Local filesystem storage | yes | no |
 | Open source | AGPL-3.0 | proprietary |
 | 3D model / BIM / vector tiling | yes | yes |
-| Temporal versioning, scheduler | no | mixed |
+| Temporal versioning | no | mixed |
 
 Price is not a capability. Ion is a hosted product. This is a binary you run.
 
@@ -512,9 +518,9 @@ Price is not a capability. Ion is a hosted product. This is a binary you run.
 cargo test
 ```
 
-896 tests (871 Rust + 25 GUI) on default features, counted per crate:
+928 tests (903 Rust + 25 GUI) on default features, counted per crate:
 - Core (115): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
-- Server (669): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine (module only, no route reaches it), audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing (module only, no route reaches it), retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
+- Server (701): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine (module only, no route reaches it), audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing (module only, no route reaches it), retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduled jobs, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
 - Ingest (42): LAS/LAZ, E57, PLY, GeoTIFF, DTED, HGT, USGS DEM, glTF, OBJ, FBX, CityGML, CityJSON and IFC readers, CRS detection
 - Terrain (28): quantized mesh generation, global DEM terrain
 - Store (12): local filesystem CRUD, path traversal
@@ -523,7 +529,7 @@ cargo test
 GUI: `cd gui && pnpm run test:all` (10 vitest unit tests + 15 Playwright e2e).
 
 Feature-gated tests (`gpu`, `onnx`, `video`, `ml`, `martin`, `wasm-plugins`, cloud
-stores) are not in the 871 and need their feature enabled to run.
+stores) are not in the 903 and need their feature enabled to run.
 
 ---
 

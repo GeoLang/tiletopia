@@ -120,7 +120,10 @@ pub struct AppState {
     pub webhooks: Arc<webhooks::WebhookQueue>,
     pub workspace_store: workspaces::WorkspaceStore,
     pub export_engine: export::ExportEngine,
-    pub scheduler: scheduler::Scheduler,
+    /// Runs the scheduled jobs that are due. Shares the database and
+    /// [`job_queue::JobQueue`] the routes use, so a scheduled re-tile lands on
+    /// the same queue an uploader's does.
+    pub scheduler: Arc<scheduler::Scheduler>,
     pub plugin_registry: plugins::PluginRegistry,
     pub photogrammetry_engine: photogrammetry::PhotogrammetryEngine,
     pub classification_engine: classification::ClassificationEngine,
