@@ -1683,11 +1683,39 @@ mod tests {
         token: Option<&str>,
         filename: &str,
     ) -> (StatusCode, serde_json::Value) {
+        upload_parts(
+            state,
+            token,
+            &[("file", Some(filename), b"glTF-bytes".to_vec())],
+        )
+        .await
+    }
+
+    // one multipart part: field name, the filename it carries if any, and the value.
+    type UploadPart<'a> = (&'a str, Option<&'a str>, Vec<u8>);
+
+    // POST /api/v1/assets with the parts in the order given.
+    async fn upload_parts(
+        state: &Arc<AppState>,
+        token: Option<&str>,
+        parts: &[UploadPart<'_>],
+    ) -> (StatusCode, serde_json::Value) {
         let boundary = "tiletopiatestboundary";
-        let body = format!(
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
-             filename=\"{filename}\"\r\n\r\nglTF-bytes\r\n--{boundary}--\r\n"
-        );
+        let mut body: Vec<u8> = Vec::new();
+        for (field, filename, value) in parts {
+            body.extend_from_slice(
+                format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"")
+                    .as_bytes(),
+            );
+            if let Some(filename) = filename {
+                body.extend_from_slice(format!("; filename=\"{filename}\"").as_bytes());
+            }
+            body.extend_from_slice(b"\r\n\r\n");
+            body.extend_from_slice(value);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
         let mut req = Request::builder()
             .method("POST")
             .uri("/api/v1/assets")
@@ -1708,6 +1736,84 @@ mod tests {
             .unwrap();
         let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, v)
+    }
+
+    // the per-asset directories the uploads created, named by asset id.
+    fn asset_directories(state: &Arc<AppState>) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(&state.data_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| uuid::Uuid::parse_str(name).is_ok())
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn upload_larger_than_the_default_body_limit_is_stored_whole() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "big-upload-editor@example.com").await;
+
+        // axum's own default caps the body at 2 MB
+        let file = vec![b'x'; 3 * 1024 * 1024];
+        let (status, asset) = upload_parts(
+            &state,
+            Some(&editor_token),
+            &[("file", Some("big.tif"), file.clone())],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(asset["size_bytes"].as_u64(), Some(file.len() as u64));
+        let stored = state
+            .data_dir
+            .join(asset["id"].as_str().unwrap())
+            .join("input")
+            .join("big.tif");
+        assert_eq!(std::fs::metadata(&stored).unwrap().len(), file.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn a_name_field_after_the_file_field_still_names_the_asset() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "late-name-editor@example.com").await;
+
+        let (status, asset) = upload_parts(
+            &state,
+            Some(&editor_token),
+            &[
+                ("file", Some("sent.tif"), vec![b'x'; 3 * 1024 * 1024]),
+                ("name", None, b"renamed.tif".to_vec()),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(asset["name"].as_str(), Some("renamed.tif"));
+        let input_dir = state
+            .data_dir
+            .join(asset["id"].as_str().unwrap())
+            .join("input");
+        assert!(input_dir.join("renamed.tif").exists());
+        assert!(!input_dir.join("sent.tif").exists());
+    }
+
+    #[tokio::test]
+    async fn a_refused_extension_leaves_no_streamed_file_behind() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "bad-extension-editor@example.com").await;
+
+        let (status, _) = upload_parts(
+            &state,
+            Some(&editor_token),
+            &[("file", Some("notes.txt"), vec![b'x'; 3 * 1024 * 1024])],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(asset_directories(&state).is_empty());
     }
 
     #[tokio::test]

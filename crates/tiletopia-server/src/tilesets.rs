@@ -57,10 +57,6 @@ const ACCEPTED_EXTENSIONS: [&str; 4] = [".geojson.gz", ".geojson", ".fgb", ".csv
 /// How often the worker looks for a queued build.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Largest upload the route takes. Axum's own default is 2 MB, which is smaller
-/// than any file worth building a tileset from.
-pub const MAX_UPLOAD_BYTES: usize = 4 * 1024 * 1024 * 1024;
-
 /// The 202 answer to an upload: the job that will build the archive, and the
 /// registry row it is building. One build per archive, so the job id is the
 /// tileset id and `GET /api/v1/tilesets/{id}` is what a client polls.
@@ -478,36 +474,6 @@ pub async fn register_ready_tilesets(
     Ok(())
 }
 
-/// Stream one multipart field to `path`. The whole point of this route is a
-/// file too big to hold in memory, so the bytes go straight to disk.
-async fn write_field(
-    field: &mut axum::extract::multipart::Field<'_>,
-    path: &Path,
-) -> Result<(), RouteError> {
-    use tokio::io::AsyncWriteExt;
-
-    tokio::fs::create_dir_all(path.parent().unwrap_or(path))
-        .await
-        .map_err(|_| server_error("could not create the build directory"))?;
-    let mut file = tokio::fs::File::create(path)
-        .await
-        .map_err(|_| server_error("could not create the uploaded file"))?;
-
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|_| bad_request("could not read the uploaded file"))?
-    {
-        file.write_all(&chunk)
-            .await
-            .map_err(|_| server_error("could not write the uploaded file"))?;
-    }
-    file.flush()
-        .await
-        .map_err(|_| server_error("could not write the uploaded file"))?;
-    Ok(())
-}
-
 /// The `name` field, counted as it arrives so an oversized one is refused
 /// rather than held and stored.
 async fn read_name(field: &mut axum::extract::multipart::Field<'_>) -> Result<String, RouteError> {
@@ -583,7 +549,7 @@ pub async fn upload_tileset(
                 // the uploader's filename never becomes a path here, only the
                 // extension tippecanoe reads the format from
                 let input = scratch.join(format!("source{extension}"));
-                if let Err(error) = write_field(&mut field, &input).await {
+                if let Err(error) = crate::upload::write_field(&mut field, &input).await {
                     let _ = tokio::fs::remove_dir_all(&scratch).await;
                     return Err(error);
                 }

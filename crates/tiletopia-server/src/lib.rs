@@ -243,7 +243,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     // POST /v1/assets so an upload cannot be done at viewer level by going
     // through the native API instead. Asset reads stay on the main router.
     let asset_write_routes = Router::new()
-        .route("/api/v1/assets", axum::routing::post(upload::upload_asset))
+        .merge(
+            // the upload streams to disk, so it takes the same 4 GiB body as a
+            // tileset build rather than axum's 2 MB default
+            Router::new()
+                .route("/api/v1/assets", axum::routing::post(upload::upload_asset))
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    upload::MAX_UPLOAD_BYTES,
+                )),
+        )
         .route("/api/v1/assets/{id}", axum::routing::delete(delete_asset))
         .route(
             "/api/v1/assets/{id}/tile",
@@ -375,7 +383,7 @@ pub fn router(state: Arc<AppState>) -> Router {
                     axum::routing::delete(tilesets::delete_tileset),
                 )
                 .layer(axum::extract::DefaultBodyLimit::max(
-                    tilesets::MAX_UPLOAD_BYTES,
+                    upload::MAX_UPLOAD_BYTES,
                 ))
                 .layer(middleware::from_fn(users::require_editor)),
         );
