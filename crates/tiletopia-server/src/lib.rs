@@ -112,7 +112,9 @@ pub struct AppState {
     pub demo: demo::DemoState,
     pub catalog: catalog::OpenDataCatalog,
     pub started_at: Instant,
-    pub api_key_store: api_keys::ApiKeyStore,
+    /// Per-key request budgets. Process-local and fed by
+    /// [`auth::auth_middleware`]; the keys themselves live in the database.
+    pub api_key_rate_limiter: api_keys::RateLimiter,
     pub metering_store: metering::MeteringStore,
     pub webhook_engine: webhooks::WebhookEngine,
     pub workspace_store: workspaces::WorkspaceStore,
@@ -403,10 +405,13 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .layer(middleware::from_fn(users::require_editor)),
         );
 
-    app.layer(middleware::from_fn(auth::auth_middleware))
-        .merge(auth_routes)
-        .layer(CorsLayer::permissive())
-        .with_state(state)
+    app.layer(middleware::from_fn_with_state(
+        Arc::clone(&state),
+        auth::auth_middleware,
+    ))
+    .merge(auth_routes)
+    .layer(CorsLayer::permissive())
+    .with_state(state)
 }
 
 async fn health() -> Json<serde_json::Value> {

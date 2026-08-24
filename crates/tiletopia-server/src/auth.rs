@@ -1,13 +1,18 @@
 //! JWT authentication middleware.
 
 use axum::{
-    extract::Request,
-    http::{HeaderMap, Method, StatusCode, Uri},
+    Json,
+    extract::{Request, State},
+    http::{HeaderMap, Method, StatusCode, Uri, header::RETRY_AFTER},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use jsonwebtoken::{DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+use crate::AppState;
+use crate::api_keys::{ApiKey, Permission, RateLimitResult, hash_presented_key};
 
 const TOOL_TOKEN_USE: &str = "tool";
 pub const TILETOPIA_READ_SCOPE: &str = "tiletopia:read";
@@ -281,6 +286,160 @@ pub fn is_public_read(method: &Method, path: &str) -> bool {
     }
 }
 
+/// Header an API key is presented in.
+pub const API_KEY_HEADER: &str = "X-Api-Key";
+
+/// What a live API key needs to reach a route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteAccess {
+    /// No key reaches this route, whatever it carries.
+    None,
+    /// Any live key. Reading a key's own usage needs no permission.
+    AnyKey,
+    /// A key carrying this permission.
+    Needs(Permission),
+}
+
+/// Which routes an API key may reach, and with what permission.
+///
+/// Anything not listed refuses every key, so widening key access is a
+/// deliberate edit here. Two kinds of route are absent on purpose:
+///
+/// - admin surfaces. Key management, `/api/v1/admin/`, org management and the
+///   tile cache stats sit behind [`crate::users::require_admin`], which reads
+///   JWTs only, and there is no Admin permission for a key to carry.
+/// - routes whose handler reads the caller's JWT `sub` to scope its answer
+///   (assets, exports, portal items, tilesets, `/api/v1/users/me`). A key has no
+///   platform user behind it, so those would 401 inside the handler anyway.
+pub fn route_access(method: &Method, path: &str) -> RouteAccess {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let read_only = matches!(*method, Method::GET | Method::HEAD);
+    let computes = matches!(*method, Method::GET | Method::POST);
+
+    match segments.as_slice() {
+        // a key reading its own usage
+        ["api", "v1", "api-keys", "usage"] if read_only => RouteAccess::AnyKey,
+
+        // catalog and dataset metadata
+        ["api", "v1", "catalog", ..] if read_only => RouteAccess::Needs(Permission::Read),
+        ["api", "v1", "stac", ..] if read_only => RouteAccess::Needs(Permission::Read),
+        ["api", "v1", "cog", ..] if read_only => RouteAccess::Needs(Permission::Read),
+        ["api", "v1", "features", ..] if read_only => RouteAccess::Needs(Permission::Read),
+        ["api", "v1", "geocoding", ..] if read_only => RouteAccess::Needs(Permission::Read),
+
+        // rendered output a caller downloads. the export arm consumes the path
+        // whatever the method, so the analysis compute arm below cannot claim a
+        // write to it
+        ["api", "v1", "analysis", "export", ..] if read_only => {
+            RouteAccess::Needs(Permission::Export)
+        }
+        ["api", "v1", "analysis", "export", ..] => RouteAccess::None,
+        ["api", "v1", "static-map", ..] if computes => RouteAccess::Needs(Permission::Export),
+
+        // terrain and elevation compute
+        ["api", "v1", "elevation", ..] if computes => RouteAccess::Needs(Permission::Terrain),
+        ["api", "v1", "terrain-analysis", ..] if computes => {
+            RouteAccess::Needs(Permission::Terrain)
+        }
+
+        // analysis compute
+        ["api", "v1", "analysis", ..] if computes => RouteAccess::Needs(Permission::Analytics),
+        ["api", "v1", "geostatistics", ..] if computes => RouteAccess::Needs(Permission::Analytics),
+        ["api", "v1", "geoprocessing", ..] if computes => RouteAccess::Needs(Permission::Analytics),
+
+        _ => RouteAccess::None,
+    }
+}
+
+/// The API key a request presents, if any.
+fn presented_api_key(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(API_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|presented| !presented.is_empty())
+}
+
+/// A refusal naming the reason class. Never the key, and never which key.
+/// Boxed, so the error arm of [`authorize_api_key`] stays small.
+fn key_refusal(status: StatusCode, reason: &str) -> Box<Response> {
+    Box::new((status, Json(serde_json::json!({ "error": reason }))).into_response())
+}
+
+/// Authorize a request that presented an API key: resolve the digest, check
+/// revocation and expiry, match the route against [`route_access`], then spend a
+/// token from the rate limiter.
+///
+/// Every failure is a refusal, so a bad or over-budget key never falls back to
+/// the JWT path.
+async fn authorize_api_key(
+    state: &AppState,
+    presented: &str,
+    method: &Method,
+    path: &str,
+) -> Result<ApiKey, Box<Response>> {
+    let hash = hash_presented_key(presented)
+        .ok_or_else(|| key_refusal(StatusCode::UNAUTHORIZED, "malformed api key"))?;
+
+    let key = state
+        .db
+        .api_key_by_hash(&hash)
+        .await
+        .map_err(|error| {
+            tracing::error!("api key lookup failed: {error}");
+            key_refusal(StatusCode::INTERNAL_SERVER_ERROR, "api key lookup failed")
+        })?
+        .ok_or_else(|| key_refusal(StatusCode::UNAUTHORIZED, "unknown api key"))?;
+
+    if key.revoked {
+        return Err(key_refusal(StatusCode::UNAUTHORIZED, "revoked api key"));
+    }
+    if key.expired_at(chrono::Utc::now()) {
+        return Err(key_refusal(StatusCode::UNAUTHORIZED, "expired api key"));
+    }
+
+    let allowed = match route_access(method, path) {
+        RouteAccess::None => false,
+        RouteAccess::AnyKey => true,
+        RouteAccess::Needs(permission) => key.allows(permission),
+    };
+    if !allowed {
+        return Err(key_refusal(
+            StatusCode::FORBIDDEN,
+            "api key not permitted on this route",
+        ));
+    }
+
+    match state
+        .api_key_rate_limiter
+        .check_rate_limit(key.id, &key.rate_limit())
+        .await
+    {
+        RateLimitResult::Allowed => {}
+        RateLimitResult::Denied {
+            reason,
+            retry_after_ms,
+        } => {
+            // seconds for the standard header, milliseconds in the body for a
+            // caller that wants to retry sooner than a whole second
+            let retry_after_seconds = retry_after_ms.div_ceil(1000).max(1);
+            return Err(Box::new(
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(RETRY_AFTER, retry_after_seconds.to_string())],
+                    Json(serde_json::json!({
+                        "error": reason,
+                        "retry_after_ms": retry_after_ms,
+                        "retry_after_seconds": retry_after_seconds,
+                    })),
+                )
+                    .into_response(),
+            ));
+        }
+    }
+
+    Ok(key)
+}
+
 /// Bearer token for a request: the `Authorization` header, or on the realtime
 /// WebSocket path a `Sec-WebSocket-Protocol: bearer, <jwt>` offer.
 ///
@@ -314,11 +473,17 @@ fn subprotocol_token(headers: &HeaderMap) -> Option<&str> {
     entries.next()
 }
 
-/// Auth middleware — extracts and validates JWT from Authorization header.
+/// Auth middleware — validates the JWT in the Authorization header, or the API
+/// key in `X-Api-Key`.
+///
 /// If `TILETOPIA_JWT_SECRET` is not set, auth is disabled (open access);
 /// [`startup_check`] is what keeps the serve path from reaching that state by
 /// accident.
-pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, StatusCode> {
+pub async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
     // explicit opt-out wins, so "disabled" means the same thing here as it does
     // at startup even when a secret happens to be present
     if auth_disabled() {
@@ -342,6 +507,32 @@ pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, S
     }
 
     if is_public_read(request.method(), request.uri().path()) {
+        return Ok(next.run(request).await);
+    }
+
+    // an X-Api-Key is the credential for the request that sends it: a bad key is
+    // refused rather than falling back to whatever bearer token came with it
+    if let Some(presented) = presented_api_key(request.headers()) {
+        let method = request.method().clone();
+        let path = request.uri().path().to_owned();
+        let key = match authorize_api_key(&state, presented, &method, &path).await {
+            Ok(key) => key,
+            Err(refusal) => return Ok(*refusal),
+        };
+
+        // last use is a convenience for the key listing, so it runs off the
+        // request path and a failed write only logs
+        let db = Arc::clone(&state.db);
+        let key_id = key.id;
+        tokio::spawn(async move {
+            if let Err(error) = db.touch_api_key(key_id, chrono::Utc::now()).await {
+                tracing::warn!("recording api key use failed: {error}");
+            }
+        });
+
+        // the resolved key, so the usage handler knows who asked without
+        // hashing and looking it up a second time
+        request.extensions_mut().insert(key);
         return Ok(next.run(request).await);
     }
 
@@ -694,6 +885,195 @@ mod tests {
                 assert!(!is_public_read(&method, path), "{method} {path}");
             }
         }
+    }
+
+    // ── which routes a key reaches ───────────────────────────────────────────
+
+    #[test]
+    fn each_permission_reaches_the_routes_it_names() {
+        for (method, path, permission) in [
+            (Method::GET, "/api/v1/catalog", Permission::Read),
+            (
+                Method::GET,
+                "/api/v1/catalog/opentopography",
+                Permission::Read,
+            ),
+            (Method::GET, "/api/v1/stac/collections", Permission::Read),
+            (Method::GET, "/api/v1/cog/datasets", Permission::Read),
+            (
+                Method::GET,
+                "/api/v1/cog/datasets/ramp/window",
+                Permission::Read,
+            ),
+            (Method::GET, "/api/v1/features/query", Permission::Read),
+            (Method::GET, "/api/v1/geocoding/search", Permission::Read),
+            (Method::GET, "/api/v1/elevation/point", Permission::Terrain),
+            (
+                Method::GET,
+                "/api/v1/terrain-analysis/operations",
+                Permission::Terrain,
+            ),
+            (
+                Method::POST,
+                "/api/v1/analysis/viewshed",
+                Permission::Analytics,
+            ),
+            (
+                Method::POST,
+                "/api/v1/geostatistics/interpolate",
+                Permission::Analytics,
+            ),
+            (
+                Method::POST,
+                "/api/v1/geoprocessing/run",
+                Permission::Analytics,
+            ),
+            (Method::GET, "/api/v1/static-map/render", Permission::Export),
+            (
+                Method::POST,
+                "/api/v1/static-map/render",
+                Permission::Export,
+            ),
+            (
+                Method::GET,
+                "/api/v1/analysis/export/hillshade",
+                Permission::Export,
+            ),
+        ] {
+            assert_eq!(
+                route_access(&method, path),
+                RouteAccess::Needs(permission),
+                "{method} {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_reads_its_own_usage_without_a_permission() {
+        assert_eq!(
+            route_access(&Method::GET, "/api/v1/api-keys/usage"),
+            RouteAccess::AnyKey
+        );
+    }
+
+    /// Key management, admin surfaces, and the routes whose handler scopes its
+    /// answer to a platform user. A key reaching any of these would either
+    /// escalate or 401 inside the handler.
+    #[test]
+    fn no_key_reaches_an_admin_surface_or_a_user_scoped_route() {
+        for path in [
+            "/api/v1/api-keys",
+            "/api/v1/api-keys/8d1f",
+            "/api/v1/api-keys/8d1f/revoke",
+            "/api/v1/admin/stats",
+            "/api/v1/admin/users",
+            "/api/v1/admin/users/8d1f/role",
+            "/api/v1/orgs",
+            "/api/v1/tiles/cache/stats",
+            "/api/v1/plugins/registry",
+            "/api/v1/users/me",
+            "/api/v1/assets",
+            "/api/v1/assets/8d1f",
+            "/api/v1/assets/8d1f/jobs",
+            "/api/v1/exports",
+            "/api/v1/exports/download/8d1f",
+            "/api/v1/portal/items",
+            "/api/v1/tilesets",
+            "/v1/assets",
+            "/v1/tokens",
+        ] {
+            for method in [Method::GET, Method::POST, Method::DELETE, Method::PUT] {
+                assert_eq!(
+                    route_access(&method, path),
+                    RouteAccess::None,
+                    "{method} {path}"
+                );
+            }
+        }
+    }
+
+    /// The classes above are GET or POST; nothing else in them is a key route,
+    /// so a write cannot ride a read class.
+    #[test]
+    fn a_write_never_rides_a_key_route_class() {
+        for path in [
+            "/api/v1/catalog",
+            "/api/v1/stac/search",
+            "/api/v1/cog/datasets",
+            "/api/v1/features/layers",
+            "/api/v1/geocoding/search",
+            "/api/v1/analysis/export/slope",
+            "/api/v1/api-keys/usage",
+        ] {
+            for method in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH] {
+                assert_eq!(
+                    route_access(&method, path),
+                    RouteAccess::None,
+                    "{method} {path}"
+                );
+            }
+        }
+        for method in [Method::PUT, Method::DELETE, Method::PATCH] {
+            assert_eq!(
+                route_access(&method, "/api/v1/static-map/render"),
+                RouteAccess::None,
+                "{method}"
+            );
+        }
+    }
+
+    /// Matching is anchored at the root on whole segments, so a crafted path
+    /// cannot borrow a class it is only named like.
+    #[test]
+    fn crafted_paths_reach_no_class() {
+        for path in [
+            "/proxy/api/v1/catalog",
+            "/api/v1/admin/catalog",
+            "/api/v1/users/me/catalog",
+            "/api/v1/catalogue",
+            "/api/v1/staccato",
+            "/api/v1/cognition/datasets",
+            "/api/v1/terrain-analysis-admin/x",
+            "/api/v1/api-keys/usage/all",
+            "/api/v1",
+            "/",
+        ] {
+            assert_eq!(
+                route_access(&Method::GET, path),
+                RouteAccess::None,
+                "GET {path}"
+            );
+        }
+    }
+
+    /// Public tile reads are decided before any key is looked at, so they need
+    /// no class of their own.
+    #[test]
+    fn public_reads_need_no_key_class() {
+        for path in [
+            "/api/v1/terrain/layer.json",
+            "/api/v1/assets/8d1f/tileset.json",
+            "/api/v1/tiles/sources",
+        ] {
+            assert!(is_public_read(&Method::GET, path), "{path}");
+            assert_eq!(
+                route_access(&Method::GET, path),
+                RouteAccess::None,
+                "GET {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_or_empty_api_key_header_is_no_credential() {
+        assert_eq!(presented_api_key(&HeaderMap::new()), None);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(API_KEY_HEADER, "".parse().unwrap());
+        assert_eq!(presented_api_key(&headers), None);
+
+        headers.insert(API_KEY_HEADER, "ttk_abc".parse().unwrap());
+        assert_eq!(presented_api_key(&headers), Some("ttk_abc"));
     }
 
     fn uri(s: &str) -> Uri {

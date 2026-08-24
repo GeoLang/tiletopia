@@ -106,6 +106,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing. A local path that cannot be opened stops the server; a remote href
   that cannot be opened, or a host that answers 200 to a `Range` request, is
   logged and skipped.
+- API keys authenticate a request (2026-08-24). A key is `ttk_` plus 32 bytes of
+  OS randomness in hex, and what the database holds is its SHA-256 hex digest,
+  so the plaintext exists only in the create response. `X-Api-Key` is resolved
+  by one indexed lookup on that digest: a string not shaped like a key is
+  refused before any lookup, which is also what makes presenting the stored
+  digest itself a 401. Revoked and expired keys are 401 naming which of the two
+  it was, a key outside the route's class is 403, and a key past its budget is
+  429 with `Retry-After` in seconds and `retry_after_ms` in the body. Last use is
+  recorded off the request path, so a failed write cannot fail a request. A
+  request carrying `X-Api-Key` is authenticated by that key alone: a bad key is
+  refused rather than falling back to a bearer token that came with it, and a
+  good key never inherits that token's reach. `is_public_read` paths are decided
+  before any key is looked at, so tile reads stay anonymous.
+- `POST /api/v1/api-keys` mints a key from a `name`, a `permissions` list, a
+  `tier` of free, pro or enterprise, and an optional RFC 3339 `expires_at` in
+  the future. It answers the plaintext key once. `GET /api/v1/api-keys` lists
+  every key as metadata: no plaintext and no digest, since `key_hash` cannot
+  serialize. `POST /api/v1/api-keys/{id}/revoke` kills a key and keeps the row,
+  `DELETE /api/v1/api-keys/{id}` drops it. All four sit behind `require_admin`,
+  which reads JWTs only, so key management is admin-only and no key reaches it:
+  there is no self-service key management, and no Admin permission for a key to
+  carry. An unknown permission, an unknown tier, an empty permission list and an
+  expiry in the past are each a 400 naming what was wrong.
+- A key's permission maps to a route class in `auth::route_access`: Read reaches
+  the catalog, STAC, COG, feature and geocoding GETs; Terrain the elevation and
+  terrain-analysis routes; Analytics the analysis, geostatistics and
+  geoprocessing compute; Export the static-map render and the analysis exports.
+  Anything not listed refuses every key, including `/api/v1/admin/`, org
+  management, the tile cache stats, and the routes whose handler scopes its
+  answer to a platform user (assets, exports, portal items, tilesets,
+  `/api/v1/users/me`).
+- `GET /api/v1/api-keys/usage` is the one route a key reads about itself, and
+  answers real counts out of the rate limiter: today's requests, when they
+  reset, and the tier's per-second and per-day budgets. A key sees its own row,
+  an admin sees every key, anyone else is refused.
 
 ### Removed
 
@@ -125,6 +160,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tag parsing that terrano's reader replaces. `/api/v1/stac/search` and
   `/api/v1/cog/datasets` answered invented data before this, and the COG tile
   index fabricated byte offsets from the tile grid.
+- The three seeded demo API keys and the in-memory `ApiKeyStore` that held them.
+  `GET /api/v1/api-keys` served those seeds, and the store's `get_by_hash` had no
+  caller, so no key had ever authenticated anything. The `api_keys` table's
+  plaintext `token` column goes with them, along with the `create_api_key`,
+  `get_api_key` and `delete_api_key` that nothing called.
+- The `Write` and `Admin` key permissions. Every write route sits behind
+  `require_editor` or `require_admin`, which read JWTs only, so neither
+  permission reached a route: what a key may do is now exactly the four classes
+  `route_access` lists.
+- The rate limiter's upload-bytes and tile-request counters, and the
+  `upload_bytes_per_day` and `tile_requests_per_day` limits beside them. Nothing
+  fed them, and the tile reads they were meant to count are anonymous, so there
+  is no key to count them against. The limiter enforces requests per second and
+  requests per day, which is what it measured.
 
 ### Changed
 
@@ -133,6 +182,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the requested bounds' width, so the lag bins cover the distances the solve
   asks about. `GET /api/v1/geostatistics/demo` says in its payload that its five
   samples are invented, and points at the interpolate route.
+- The `api_keys` table is recreated with `key_hash`, `permissions`, `tier`,
+  `created_by`, `last_used_at` and `revoked` columns, dropping the old plaintext
+  shape on a database that already has it. Nothing is lost: the table had no
+  writer, so no row was ever stored in it.
+- `AppState` carries an `api_key_rate_limiter` where it carried an
+  `api_key_store`; the keys themselves live in the database. `auth_middleware` is
+  layered with `from_fn_with_state` so it can reach both.
 - A `CogDataset` is keyed by a string id rather than a per-boot UUID, and
   reports only what a COG header carries: `bounds` in the file's own CRS units
   replaces the old `bbox`, `band_count` replaces the per-band type, colour

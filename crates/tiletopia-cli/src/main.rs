@@ -239,7 +239,7 @@ async fn main() -> anyhow::Result<()> {
                 demo: tiletopia_server::demo::DemoState::new(),
                 catalog: tiletopia_server::catalog::OpenDataCatalog::new(),
                 started_at: std::time::Instant::now(),
-                api_key_store: tiletopia_server::api_keys::ApiKeyStore::new(),
+                api_key_rate_limiter: tiletopia_server::api_keys::RateLimiter::new(),
                 metering_store: tiletopia_server::metering::MeteringStore::new(),
                 webhook_engine: tiletopia_server::webhooks::WebhookEngine::new(),
                 workspace_store: tiletopia_server::workspaces::WorkspaceStore::new(),

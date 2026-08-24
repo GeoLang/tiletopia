@@ -6,6 +6,7 @@ use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
+use crate::api_keys::{ApiKey, Permission, RateLimitTier};
 use crate::users::{Organization, User, UserRole};
 use crate::{Asset, AssetStatus, AssetType};
 
@@ -87,17 +88,6 @@ pub enum TilesetStatus {
     Failed,
 }
 
-/// Persistent record for an API key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApiKeyRecord {
-    pub id: Uuid,
-    pub name: String,
-    pub token: String,
-    pub scopes: Vec<String>,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
-}
-
 /// Persistent record for an annotation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnnotationRecord {
@@ -122,6 +112,8 @@ const ASSET_COLUMNS: &str =
 const JOB_COLUMNS: &str = "id, asset_id, status, progress, input_path, output_format, created_at, started_at, completed_at, error, points_processed, tiles_written, longitude, latitude, crs";
 
 const TILESET_COLUMNS: &str = "id, name, status, source_id, object_key, original_filename, layer_name, argv, size_bytes, created_at, started_at, built_at, error, owner_id";
+
+const API_KEY_COLUMNS: &str = "id, name, key_hash, permissions, tier, created_by, created_at, expires_at, last_used_at, revoked";
 
 fn enum_to_str<T: Serialize>(val: &T) -> String {
     serde_json::to_string(val)
@@ -281,14 +273,32 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        // api_keys used to hold a plaintext `token` column and had no writer, so
+        // no row was ever stored in that shape. Dropping it is what lets the
+        // hashed shape below be created on a database that saw the old one.
+        let stores_plaintext_tokens =
+            sqlx::query("SELECT 1 FROM pragma_table_info('api_keys') WHERE name = 'token'")
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some();
+        if stores_plaintext_tokens {
+            sqlx::query("DROP TABLE api_keys")
+                .execute(&self.pool)
+                .await?;
+        }
+
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS api_keys (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                token TEXT NOT NULL UNIQUE,
-                scopes TEXT NOT NULL DEFAULT '[]',
+                key_hash TEXT NOT NULL UNIQUE,
+                permissions TEXT NOT NULL DEFAULT '[]',
+                tier TEXT NOT NULL,
+                created_by TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                expires_at TEXT
+                expires_at TEXT,
+                last_used_at TEXT,
+                revoked INTEGER NOT NULL DEFAULT 0
             )",
         )
         .execute(&self.pool)
@@ -760,40 +770,77 @@ impl Database {
 
     // -- API Key management --
 
-    pub async fn create_api_key(&self, key: &ApiKeyRecord) -> Result<(), sqlx::Error> {
-        let id = key.id.to_string();
-        let created_at = key.created_at.to_rfc3339();
-        let expires_at = key.expires_at.map(|dt| dt.to_rfc3339());
-        let scopes = serde_json::to_string(&key.scopes).unwrap_or_else(|_| "[]".into());
+    pub async fn create_api_key(&self, key: &ApiKey) -> Result<(), sqlx::Error> {
+        let permissions = serde_json::to_string(&key.permissions).unwrap_or_else(|_| "[]".into());
 
         sqlx::query(
-            "INSERT INTO api_keys (id, name, token, scopes, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO api_keys \
+             (id, name, key_hash, permissions, tier, created_by, created_at, expires_at, last_used_at, revoked) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(&id)
+        .bind(key.id.to_string())
         .bind(&key.name)
-        .bind(&key.token)
-        .bind(&scopes)
-        .bind(&created_at)
-        .bind(&expires_at)
+        .bind(&key.key_hash)
+        .bind(&permissions)
+        .bind(key.tier.name())
+        .bind(&key.created_by)
+        .bind(key.created_at.to_rfc3339())
+        .bind(key.expires_at.map(|dt| dt.to_rfc3339()))
+        .bind(key.last_used_at.map(|dt| dt.to_rfc3339()))
+        .bind(key.revoked as i64)
         .execute(&self.pool)
         .await?;
 
         Ok(())
     }
 
-    pub async fn get_api_key(&self, token: &str) -> Result<Option<ApiKeyRecord>, sqlx::Error> {
-        let row = sqlx::query(
-            "SELECT id, name, token, scopes, created_at, expires_at FROM api_keys WHERE token = ?",
-        )
-        .bind(token)
+    /// The key with this digest. Exact match on the UNIQUE `key_hash` column, so
+    /// resolving a credential is one indexed lookup rather than a scan.
+    ///
+    /// Revoked and expired rows come back like any other: the credential path
+    /// decides, so it can answer which of the two it was.
+    pub async fn api_key_by_hash(&self, key_hash: &str) -> Result<Option<ApiKey>, sqlx::Error> {
+        let row = sqlx::query(&format!(
+            "SELECT {API_KEY_COLUMNS} FROM api_keys WHERE key_hash = ?"
+        ))
+        .bind(key_hash)
         .fetch_optional(&self.pool)
         .await?;
 
         Ok(row.map(|r| row_to_api_key(&r)))
     }
 
-    pub async fn delete_api_key(&self, id: Uuid) -> Result<(), sqlx::Error> {
-        sqlx::query("DELETE FROM api_keys WHERE id = ?")
+    pub async fn list_api_keys(&self) -> Result<Vec<ApiKey>, sqlx::Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {API_KEY_COLUMNS} FROM api_keys ORDER BY created_at DESC"
+        ))
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.iter().map(row_to_api_key).collect())
+    }
+
+    /// Mark a key dead, keeping the row so a leaked key cannot come back and the
+    /// listing still shows it. Returns the rows changed.
+    pub async fn revoke_api_key(&self, id: Uuid) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("UPDATE api_keys SET revoked = 1 WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn delete_api_key(&self, id: Uuid) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM api_keys WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn touch_api_key(&self, id: Uuid, at: DateTime<Utc>) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE api_keys SET last_used_at = ? WHERE id = ?")
+            .bind(at.to_rfc3339())
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
@@ -1386,19 +1433,32 @@ fn row_to_job(row: &sqlx::sqlite::SqliteRow) -> JobRecord {
     }
 }
 
-fn row_to_api_key(row: &sqlx::sqlite::SqliteRow) -> ApiKeyRecord {
+/// A stored key. An unreadable permission or tier maps to the narrowest thing
+/// there is, so a hand-edited row can only ever lose reach.
+fn row_to_api_key(row: &sqlx::sqlite::SqliteRow) -> ApiKey {
     let id_str: String = row.get("id");
-    let scopes_str: String = row.get("scopes");
+    let permissions_str: String = row.get("permissions");
+    let tier_str: String = row.get("tier");
     let created_at_str: String = row.get("created_at");
     let expires_at: Option<String> = row.get("expires_at");
+    let last_used_at: Option<String> = row.get("last_used_at");
 
-    ApiKeyRecord {
+    let permission_names: Vec<String> = serde_json::from_str(&permissions_str).unwrap_or_default();
+
+    ApiKey {
         id: Uuid::parse_str(&id_str).unwrap_or_default(),
         name: row.get("name"),
-        token: row.get("token"),
-        scopes: serde_json::from_str(&scopes_str).unwrap_or_default(),
+        key_hash: row.get("key_hash"),
+        permissions: permission_names
+            .iter()
+            .filter_map(|name| Permission::from_name(name))
+            .collect(),
+        tier: RateLimitTier::from_name(&tier_str).unwrap_or(RateLimitTier::Free),
+        created_by: row.get("created_by"),
         created_at: parse_datetime(&created_at_str),
+        last_used_at: parse_optional_datetime(last_used_at),
         expires_at: parse_optional_datetime(expires_at),
+        revoked: row.get::<i64, _>("revoked") != 0,
     }
 }
 

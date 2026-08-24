@@ -16,7 +16,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{
-    AppState, classification, cog, elevation,
+    AppState, api_keys, classification, cog, elevation,
     export::{EXPORT_FORMATS, ExportFormat, ExportJob, ExportStatus},
     feature_service, flight_planning, geocoding, geoprocessing, geostatistics, indoor, isochrone,
     map_matching, map_tiles, metering, mobile, multispectral, osm_buildings, routing,
@@ -25,46 +25,259 @@ use crate::{
     users,
 };
 
-/// Routes for API key management.
+/// API key management, and per-key usage.
+///
+/// Minting, listing, revoking and deleting are admin-only: there is no
+/// self-service key management, so every key on the server was created by an
+/// admin and the listing is the whole set. Usage is the one route a key may read
+/// about itself, so it sits outside the admin gate and the handler decides.
 pub fn api_key_routes() -> Router<Arc<AppState>> {
+    let management = Router::new()
+        .route(
+            "/api/v1/api-keys",
+            get(list_api_keys).post(create_api_key_route),
+        )
+        .route(
+            "/api/v1/api-keys/{id}",
+            axum::routing::delete(delete_api_key_route),
+        )
+        .route("/api/v1/api-keys/{id}/revoke", post(revoke_api_key_route))
+        .layer(middleware::from_fn(users::require_admin));
+
     Router::new()
-        .route("/api/v1/api-keys", get(list_api_keys))
         .route("/api/v1/api-keys/usage", get(get_usage))
+        .merge(management)
 }
 
-async fn list_api_keys(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let store = &state.api_key_store;
-    let keys = store.list_keys(None).await;
-    Json(serde_json::json!({
-        "keys": keys.iter().map(|k| serde_json::json!({
-            "id": k.id,
-            "name": k.name,
-            "prefix": &k.key_hash[..12],
-            "permissions": k.permissions,
-            "created_at": k.created_at,
-            "last_used_at": k.last_used_at,
-            "revoked": k.revoked,
-            "rate_limit": {
-                "requests_per_second": k.rate_limit.requests_per_second,
-                "requests_per_day": k.rate_limit.requests_per_day,
+#[derive(Debug, Deserialize)]
+pub struct CreateApiKeyRequest {
+    pub name: String,
+    pub permissions: Vec<String>,
+    pub tier: String,
+    /// RFC 3339, and in the future. Absent means the key never expires.
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Longest key name accepted, so a listing stays readable and a name cannot be
+/// used as bulk storage.
+const MAX_KEY_NAME_CHARS: usize = 120;
+
+/// A refusal carrying the reason as JSON, the same shape the credential path in
+/// [`crate::auth`] answers with.
+fn refuse_key_request(status: StatusCode, reason: String) -> Refusal {
+    (status, Json(serde_json::json!({ "error": reason })))
+        .into_response()
+        .into()
+}
+
+fn bad_key_request(reason: String) -> Refusal {
+    refuse_key_request(StatusCode::BAD_REQUEST, reason)
+}
+
+/// The request as the fields a key is built from, or the refusal. Unknown
+/// permissions and tiers are named back to the caller and refused, never
+/// widened or narrowed to something that parses.
+fn parse_create_request(
+    request: &CreateApiKeyRequest,
+) -> Result<(Vec<api_keys::Permission>, api_keys::RateLimitTier), Refusal> {
+    let name = request.name.trim();
+    if name.is_empty() || name.chars().count() > MAX_KEY_NAME_CHARS {
+        return Err(bad_key_request(format!(
+            "name must be 1 to {MAX_KEY_NAME_CHARS} characters"
+        )));
+    }
+
+    let tier = api_keys::RateLimitTier::from_name(&request.tier).ok_or_else(|| {
+        let known: Vec<&str> = api_keys::RateLimitTier::ALL
+            .iter()
+            .map(|tier| tier.name())
+            .collect();
+        bad_key_request(format!(
+            "unknown tier '{}' (expected {})",
+            request.tier,
+            known.join(", ")
+        ))
+    })?;
+
+    if request.permissions.is_empty() {
+        return Err(bad_key_request(
+            "a key needs at least one permission".into(),
+        ));
+    }
+    let mut permissions = Vec::new();
+    for name in &request.permissions {
+        let permission = api_keys::Permission::from_name(name).ok_or_else(|| {
+            let known: Vec<&str> = api_keys::Permission::ALL
+                .iter()
+                .map(|permission| permission.name())
+                .collect();
+            bad_key_request(format!(
+                "unknown permission '{name}' (expected {})",
+                known.join(", ")
+            ))
+        })?;
+        if !permissions.contains(&permission) {
+            permissions.push(permission);
+        }
+    }
+
+    if let Some(expires_at) = request.expires_at
+        && expires_at <= chrono::Utc::now()
+    {
+        return Err(bad_key_request("expires_at is in the past".into()));
+    }
+
+    Ok((permissions, tier))
+}
+
+/// Mint a key. The plaintext is in this response and nowhere else: what is
+/// stored is its SHA-256 digest, so a lost key is replaced, never recovered.
+async fn create_api_key_route(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<CreateApiKeyRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), Refusal> {
+    // behind require_admin, so a valid admin token is always present
+    let created_by = users::claims_from_headers(&headers)
+        .map_err(|status| Refusal::from(status.into_response()))?
+        .sub;
+    let (permissions, tier) = parse_create_request(&request)?;
+
+    let plaintext = api_keys::generate_key();
+    let key_hash =
+        api_keys::hash_presented_key(&plaintext).expect("a freshly generated key is well formed");
+    let key = api_keys::ApiKey {
+        id: Uuid::new_v4(),
+        name: request.name.trim().to_string(),
+        key_hash,
+        permissions,
+        tier,
+        created_by,
+        created_at: chrono::Utc::now(),
+        last_used_at: None,
+        expires_at: request.expires_at,
+        revoked: false,
+    };
+
+    state
+        .db
+        .create_api_key(&key)
+        .await
+        .map_err(|error| write_failed("storing", error))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "key": plaintext,
+            "warning": "this is the only time the key is shown",
+            "api_key": key,
+        })),
+    ))
+}
+
+/// Every key the server holds, metadata only: no plaintext, and no digest
+/// either (see the `key_hash` field of [`api_keys::ApiKey`]).
+async fn list_api_keys(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, Refusal> {
+    let keys = state.db.list_api_keys().await.map_err(read_failed)?;
+    Ok(Json(serde_json::json!({ "keys": keys })))
+}
+
+/// Kill a key, keeping the row. A revoked key stays refused forever, and the
+/// listing still shows that it existed.
+async fn revoke_api_key_route(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, Refusal> {
+    let revoked = state
+        .db
+        .revoke_api_key(id)
+        .await
+        .map_err(|error| write_failed("revoking", error))?;
+    if revoked == 0 {
+        return Err(refuse_key_request(
+            StatusCode::NOT_FOUND,
+            "no such key".into(),
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Drop the row entirely, for a key an admin wants out of the listing. Revoking
+/// is what a leaked key needs; this is cleanup.
+async fn delete_api_key_route(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, Refusal> {
+    let deleted = state
+        .db
+        .delete_api_key(id)
+        .await
+        .map_err(|error| write_failed("deleting", error))?;
+    if deleted == 0 {
+        return Err(refuse_key_request(
+            StatusCode::NOT_FOUND,
+            "no such key".into(),
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn read_failed(error: sqlx::Error) -> Refusal {
+    tracing::error!("reading api keys failed: {error}");
+    refuse_key_request(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "reading the keys failed".into(),
+    )
+}
+
+fn write_failed(what: &str, error: sqlx::Error) -> Refusal {
+    tracing::error!("{what} an api key failed: {error}");
+    refuse_key_request(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("{what} the key failed"),
+    )
+}
+
+/// Today's request count. A key sees its own; an admin sees every key.
+async fn get_usage(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    key: Option<axum::Extension<api_keys::ApiKey>>,
+) -> Result<Json<serde_json::Value>, Refusal> {
+    // the middleware resolved the key, so a caller presenting one reads only its
+    // own row without a second lookup
+    let keys = match key {
+        Some(axum::Extension(key)) => vec![key],
+        None => {
+            let claims = users::claims_from_headers(&headers)
+                .map_err(|status| Refusal::from(status.into_response()))?;
+            if !claims.can_admin() {
+                return Err(refuse_key_request(
+                    StatusCode::FORBIDDEN,
+                    "admin only".into(),
+                ));
             }
-        })).collect::<Vec<_>>()
-    }))
-}
+            state.db.list_api_keys().await.map_err(read_failed)?
+        }
+    };
 
-async fn get_usage(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let store = &state.api_key_store;
-    let keys = store.list_keys(None).await;
-    let usages: Vec<_> = keys
-        .iter()
-        .map(|k| {
-            serde_json::json!({
-                "key_id": k.id,
-                "name": k.name,
-            })
-        })
-        .collect();
-    Json(serde_json::json!({ "usage": usages }))
+    let mut usage = Vec::with_capacity(keys.len());
+    for key in keys {
+        let today = state.api_key_rate_limiter.get_usage(key.id).await;
+        usage.push(serde_json::json!({
+            "key_id": key.id,
+            "name": key.name,
+            "tier": key.tier,
+            "requests_per_second": key.rate_limit().requests_per_second,
+            "requests_per_day": key.rate_limit().requests_per_day,
+            "requests_today": today.map(|today| today.requests_today).unwrap_or(0),
+            "resets_at": today.map(|today| today.resets_at),
+        }));
+    }
+    Ok(Json(serde_json::json!({ "usage": usage })))
 }
 
 /// Routes for metering and billing.
