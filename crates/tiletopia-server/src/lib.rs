@@ -141,6 +141,10 @@ pub struct AppState {
     /// Where the built PMTiles archives sit, see [`tilesets::tileset_dir`].
     #[cfg(feature = "martin")]
     pub tileset_dir: std::path::PathBuf,
+    /// The build the tileset worker is running, so deleting that tileset kills
+    /// its tippecanoe instead of leaving it to finish an archive nobody wants.
+    #[cfg(feature = "martin")]
+    pub current_tileset_build: tilesets::CurrentBuild,
 }
 
 /// A managed geospatial asset.

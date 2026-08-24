@@ -90,6 +90,7 @@ fn builder_for(state: &Arc<AppState>) -> Arc<TilesetBuilder> {
             state.data_dir.clone(),
             state.tileset_dir.clone(),
             state.martin_backend.clone(),
+            state.current_tileset_build.clone(),
         )
         .unwrap(),
     )
@@ -795,4 +796,185 @@ async fn the_catalog_shows_an_operator_archive_to_everyone_and_a_tileset_to_its_
     assert_eq!(status, StatusCode::OK);
     let (status, _) = request(&state, "GET", &format!("/martin/{owned}/0/0/0"), &stranger).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+/// How long a build a delete has cancelled would otherwise sleep for, far
+/// longer than the case is willing to wait.
+const CANCELLED_BUILD_SLEEP: &str = "30";
+
+/// What a cancelled build is given to be killed, cleaned up after and reported,
+/// wide enough that a loaded machine does not fail the case.
+const CANCEL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A claimed row whose build is this command rather than tippecanoe, so a case
+/// can hold a build open or finish one without the binary. The command is built
+/// from the archive path the builder will look for.
+async fn queue_build(
+    state: &Arc<AppState>,
+    owner: &str,
+    argv: impl FnOnce(&std::path::Path) -> Vec<String>,
+) -> TilesetRecord {
+    let id = uuid::Uuid::new_v4();
+    let object_key = format!("{id}.pmtiles");
+    let record = TilesetRecord {
+        id,
+        name: "stand-in build".to_string(),
+        status: TilesetStatus::Building,
+        source_id: id.to_string(),
+        argv: argv(&state.tileset_dir.join(&object_key)),
+        object_key,
+        original_filename: "roads.geojson".to_string(),
+        layer_name: "roads".to_string(),
+        size_bytes: 0,
+        created_at: chrono::Utc::now(),
+        built_at: None,
+        error: None,
+        owner_id: owner.to_string(),
+        started_at: None,
+    };
+    state.db.create_tileset(&record).await.unwrap();
+    record
+}
+
+/// Wait until the worker holds the slot for this build, so a delete cannot land
+/// before there is a child to kill.
+async fn await_running_build(state: &Arc<AppState>, id: uuid::Uuid) {
+    let deadline = std::time::Instant::now() + CANCEL_DEADLINE;
+    while state.current_tileset_build.building() != Some(id) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the build never took the slot"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_building_tileset_kills_the_build_instead_of_waiting_it_out() {
+    let editor = token("tileset-editor", "editor");
+    let state = common::build_state(
+        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+        None,
+    )
+    .await;
+
+    let record = queue_build(&state, "tileset-editor", |_| {
+        vec!["sleep".to_string(), CANCELLED_BUILD_SLEEP.to_string()]
+    })
+    .await;
+    let id = record.id;
+    let builder = builder_for(&state);
+    let build = tokio::spawn(async move { builder.build(record).await });
+    await_running_build(&state, id).await;
+
+    let (status, _) = request(&state, "DELETE", &format!("/api/v1/tilesets/{id}"), &editor).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    tokio::time::timeout(CANCEL_DEADLINE, build)
+        .await
+        .expect("the build outlived the delete")
+        .unwrap();
+
+    assert!(!state.tileset_dir.join(format!("{id}.pmtiles")).exists());
+    assert!(!state.martin_backend.contains(&id.to_string()).await);
+    assert!(state.db.get_tileset(id).await.unwrap().is_none());
+    assert!(state.current_tileset_build.building().is_none());
+}
+
+#[tokio::test]
+async fn deleting_a_tileset_that_is_not_building_leaves_the_running_build_alone() {
+    let editor = token("tileset-editor", "editor");
+    let state = common::build_state(
+        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+        None,
+    )
+    .await;
+
+    let other = register_tileset(&state, "tileset-editor", "other roads").await;
+    let record = queue_build(&state, "tileset-editor", |_| {
+        vec!["sleep".to_string(), CANCELLED_BUILD_SLEEP.to_string()]
+    })
+    .await;
+    let id = record.id;
+    let builder = builder_for(&state);
+    let build = tokio::spawn(async move { builder.build(record).await });
+    await_running_build(&state, id).await;
+
+    let (status, _) = request(
+        &state,
+        "DELETE",
+        &format!("/api/v1/tilesets/{other}"),
+        &editor,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!state.tileset_dir.join(format!("{other}.pmtiles")).exists());
+    assert!(!state.martin_backend.contains(&other).await);
+    assert!(
+        state
+            .db
+            .get_tileset(other.parse().unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(state.current_tileset_build.building(), Some(id));
+    assert!(!build.is_finished(), "the other delete killed this build");
+
+    // stop the sleep rather than let the case wait it out
+    assert_eq!(state.db.delete_tileset(id).await.unwrap(), 1);
+    state.current_tileset_build.cancel(id);
+    tokio::time::timeout(CANCEL_DEADLINE, build)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_finished_build_leaves_the_slot_empty_so_a_later_delete_cancels_nothing() {
+    let editor = token("tileset-editor", "editor");
+    let state = common::build_state(
+        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+        None,
+    )
+    .await;
+
+    // a build that writes a real archive, which is a whole successful run
+    // without needing tippecanoe
+    let prebuilt = state.data_dir.join("prebuilt.pmtiles");
+    write_archive(&prebuilt);
+    let record = queue_build(&state, "tileset-editor", |archive| {
+        vec![
+            "cp".to_string(),
+            prebuilt.display().to_string(),
+            archive.display().to_string(),
+        ]
+    })
+    .await;
+    let id = record.id;
+
+    builder_for(&state).build(record).await;
+
+    assert_eq!(
+        state.db.get_tileset(id).await.unwrap().unwrap().status,
+        TilesetStatus::Ready
+    );
+    assert!(state.current_tileset_build.building().is_none());
+
+    let other = register_tileset(&state, "tileset-editor", "other roads").await;
+    let (status, _) = request(
+        &state,
+        "DELETE",
+        &format!("/api/v1/tilesets/{other}"),
+        &editor,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(state.current_tileset_build.building().is_none());
+    assert_eq!(
+        state.db.get_tileset(id).await.unwrap().unwrap().status,
+        TilesetStatus::Ready
+    );
 }

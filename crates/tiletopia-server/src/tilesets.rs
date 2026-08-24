@@ -6,7 +6,7 @@
 //! and re-uploading makes a new one.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::{Multipart, State};
@@ -14,6 +14,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::db::{Database, TilesetRecord, TilesetStatus};
@@ -299,8 +300,49 @@ async fn stderr_tail(mut stderr: tokio::process::ChildStderr) -> String {
     String::from_utf8_lossy(&buffer).trim().to_string()
 }
 
+/// The tileset the worker is building right now, held by the worker and by the
+/// delete route so a delete can stop the build it would otherwise wait out.
+/// One build runs at a time, so one slot covers it.
+#[derive(Clone, Default)]
+pub struct CurrentBuild(Arc<Mutex<Option<(Uuid, CancellationToken)>>>);
+
+impl CurrentBuild {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Which tileset is being built, `None` between builds.
+    pub fn building(&self) -> Option<Uuid> {
+        self.0.lock().unwrap().as_ref().map(|(id, _)| *id)
+    }
+
+    /// Take the slot for this build, handing back the token its child watches.
+    fn take(&self, id: Uuid) -> CancellationToken {
+        let token = CancellationToken::new();
+        *self.0.lock().unwrap() = Some((id, token.clone()));
+        token
+    }
+
+    fn release(&self) {
+        *self.0.lock().unwrap() = None;
+    }
+
+    /// Stop the running build when it is this tileset's, otherwise do nothing.
+    pub fn cancel(&self, id: Uuid) {
+        if let Some((building, token)) = self.0.lock().unwrap().as_ref()
+            && *building == id
+        {
+            token.cancel();
+        }
+    }
+}
+
 /// Run one tippecanoe build. `Ok` means the archive is written.
-async fn run_tippecanoe(argv: &[String], limits: &BuildLimits) -> Result<(), String> {
+async fn run_tippecanoe(
+    argv: &[String],
+    limits: &BuildLimits,
+    cancellation: &CancellationToken,
+) -> Result<(), String> {
     let mut child = build_command(argv, limits)
         .spawn()
         .map_err(|e| format!("could not run {TIPPECANOE}: {e}"))?;
@@ -312,12 +354,20 @@ async fn run_tippecanoe(argv: &[String], limits: &BuildLimits) -> Result<(), Str
 
     // the kill goes before the stderr read is awaited: a live child holds the
     // write end of the pipe open, so reading to end would wait for it
-    let waited = tokio::time::timeout(limits.timeout, child.wait()).await;
-    if waited.is_err() {
+    let waited = tokio::select! {
+        waited = tokio::time::timeout(limits.timeout, child.wait()) => Some(waited),
+        () = cancellation.cancelled() => None,
+    };
+    if !matches!(waited, Some(Ok(_))) {
         let _ = child.kill().await;
     }
     let tail = collect.await.unwrap_or_default();
 
+    let Some(waited) = waited else {
+        return Err(format!(
+            "{TIPPECANOE} was killed because the tileset was deleted: {tail}"
+        ));
+    };
     let Ok(status) = waited else {
         let seconds = limits.timeout.as_secs();
         return Err(format!(
@@ -339,6 +389,7 @@ pub struct TilesetBuilder {
     data_dir: PathBuf,
     tileset_dir: PathBuf,
     backend: MartinTileBackend,
+    current_build: CurrentBuild,
     limits: BuildLimits,
 }
 
@@ -350,12 +401,14 @@ impl TilesetBuilder {
         data_dir: PathBuf,
         tileset_dir: PathBuf,
         backend: MartinTileBackend,
+        current_build: CurrentBuild,
     ) -> Result<Self, String> {
         Ok(Self {
             db,
             data_dir,
             tileset_dir,
             backend,
+            current_build,
             limits: BuildLimits::from_env()?,
         })
     }
@@ -380,7 +433,11 @@ impl TilesetBuilder {
     pub async fn build(&self, mut tileset: TilesetRecord) {
         let scratch = build_dir(&self.data_dir, tileset.id);
         let archive = self.tileset_dir.join(&tileset.object_key);
-        let outcome = self.build_archive(&tileset, &scratch, &archive).await;
+        let cancellation = self.current_build.take(tileset.id);
+        let outcome = self
+            .build_archive(&tileset, &scratch, &archive, &cancellation)
+            .await;
+        self.current_build.release();
         let _ = tokio::fs::remove_dir_all(&scratch).await;
 
         tileset.built_at = Some(chrono::Utc::now());
@@ -420,6 +477,7 @@ impl TilesetBuilder {
         tileset: &TilesetRecord,
         scratch: &Path,
         archive: &Path,
+        cancellation: &CancellationToken,
     ) -> Result<u64, String> {
         tokio::fs::create_dir_all(temporary_dir(scratch))
             .await
@@ -432,7 +490,7 @@ impl TilesetBuilder {
         // last run was killed in the middle of would never get past this
         remove_archive(archive).await;
 
-        run_tippecanoe(&tileset.argv, &self.limits).await?;
+        run_tippecanoe(&tileset.argv, &self.limits, cancellation).await?;
 
         let size_bytes = tokio::fs::metadata(archive)
             .await
@@ -660,6 +718,9 @@ pub async fn delete_tileset(
         .delete_tileset(id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // after the row is gone, so the killed build's finish_tileset cannot write
+    // a status back onto a row this call is about to delete
+    state.current_tileset_build.cancel(id);
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -766,7 +827,9 @@ mod tests {
         };
         let argv = vec!["sleep".to_string(), "30".to_string()];
 
-        let error = run_tippecanoe(&argv, &limits).await.unwrap_err();
+        let error = run_tippecanoe(&argv, &limits, &CancellationToken::new())
+            .await
+            .unwrap_err();
         assert!(error.contains("killed after"), "{error}");
     }
 
@@ -783,7 +846,9 @@ mod tests {
             "echo refused on stderr >&2; exit 3".to_string(),
         ];
 
-        let error = run_tippecanoe(&argv, &limits).await.unwrap_err();
+        let error = run_tippecanoe(&argv, &limits, &CancellationToken::new())
+            .await
+            .unwrap_err();
         assert!(error.contains("refused on stderr"), "{error}");
     }
 }

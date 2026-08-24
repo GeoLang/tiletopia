@@ -61,6 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The build's address-space cap applies only on Linux. macOS rejects
   `RLIMIT_AS` with `EINVAL`, which surfaced as a failed spawn once setrlimit
   errors stopped being ignored, and builds only run in Linux images.
+- `DELETE /api/v1/tilesets/{id}` kills the tippecanoe building that tileset.
+  The run used to finish, holding CPU and disk for minutes to write an archive
+  the delete had already accounted for.
 
 - A build the server was restarted in the middle of finishes when it is queued
   again. tippecanoe exits rather than write over an archive, so the half-built

@@ -80,5 +80,7 @@ pub async fn build_state(
         martin_backend: tiletopia_server::map_tiles::martin_backend::MartinTileBackend::new(),
         #[cfg(feature = "martin")]
         tileset_dir: tileset_dir.clone(),
+        #[cfg(feature = "martin")]
+        current_tileset_build: tiletopia_server::tilesets::CurrentBuild::new(),
     })
 }

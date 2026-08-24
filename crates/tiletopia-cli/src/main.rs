@@ -192,6 +192,9 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(&job_queue).start().await;
 
             #[cfg(feature = "martin")]
+            let current_tileset_build = tiletopia_server::tilesets::CurrentBuild::new();
+
+            #[cfg(feature = "martin")]
             let tileset_dir = {
                 use tiletopia_server::tilesets;
                 let tileset_dir = tilesets::tileset_dir(&data_dir);
@@ -211,6 +214,7 @@ async fn main() -> anyhow::Result<()> {
                         data_dir.clone(),
                         tileset_dir.clone(),
                         martin_backend.clone(),
+                        current_tileset_build.clone(),
                     )
                     .map_err(anyhow::Error::msg)?,
                 )
@@ -256,6 +260,8 @@ async fn main() -> anyhow::Result<()> {
                 martin_backend,
                 #[cfg(feature = "martin")]
                 tileset_dir,
+                #[cfg(feature = "martin")]
+                current_tileset_build,
             });
 
             let app = tiletopia_server::router(state);
