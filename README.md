@@ -20,7 +20,7 @@ Ingest point clouds, tile them into OGC 3D Tiles 1.1, and serve them with view-d
 - Optional GPU point-cloud decimation via wgpu (`--features gpu`)
 - Draco/meshopt compression for tile delivery
 
-The job queue tiles point clouds with the native tiler. Meshes (glTF, glb, OBJ, FBX, CityGML) go to [mago-3d-tiler](https://github.com/Gaia3D/mago-3d-tiler) (MPL-2.0) when `TILETOPIA_MAGO_JAR` points at a jar, which the Docker image bundles with a JRE 21. Without the jar they go to this repository's own mesh tiler, which drops textures and materials and places the model by the upload's `longitude` and `latitude`, so a mesh upload with neither a placement nor a jar fails naming both. The jar ships natives for Linux and Windows x64 only, so on macOS the mago jobs fail inside mago. Vector files (GeoJSON, GeoPackage, KML) go to mago only, and without the jar they fail naming the variable. IFC always goes to the native mesh tiler and needs no jar. It is placed by the upload's `longitude` and `latitude`, or by the `IfcSite` reference coordinates when the upload leaves them out, and an IFC with neither fails rather than landing at the centre of the earth. `crs` is ignored on the native path. DAE uploads still fail with an error naming the format: neither tiler takes it. An upload whose extension is not on the list answers 400.
+The job queue tiles point clouds and meshes (glTF, glb, OBJ, FBX, CityGML, IFC) with the native tiler, whatever `TILETOPIA_MAGO_JAR` is set to. The readers carry UVs, diffuse textures and diffuse colours through to the tile GLBs, and a tile holding part of a textured mesh carries the crop of the texture its triangles reach. A mesh with a texture the readers cannot find or decode tiles untextured. A mesh is placed by the upload's `longitude` and `latitude`, and one without them fails naming them. IFC falls back to the `IfcSite` reference coordinates, and an IFC with neither fails rather than landing at the centre of the earth. `crs` is ignored on the native path. Vector files (GeoJSON, GeoPackage, KML) go to [mago-3d-tiler](https://github.com/Gaia3D/mago-3d-tiler) (MPL-2.0), which the Docker image bundles with a JRE 21; without the jar they fail naming the variable. The jar ships natives for Linux and Windows x64 only, so on macOS the mago jobs fail inside mago. DAE uploads still fail with an error naming the format: neither tiler takes it. An upload whose extension is not on the list answers 400.
 
 A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields beside the file. Longitude and latitude place a model that has local coordinates, and one without the other is refused. The tiles land at `/api/v1/assets/{id}/tileset.json`, with content under `/api/v1/assets/{id}/data/{file}` from mago and `/api/v1/assets/{id}/tiles/{file}` from the native tiler.
 
@@ -182,10 +182,11 @@ tiletopia tile --input scan.las --output ./tileset --max-error 1.0
 tiletopia serve --data-dir ./data --port 3000
 ```
 
-- `TILETOPIA_MAGO_JAR` — path to the mago-3d-tiler jar that tiles meshes and
-  vector files. The Docker image sets it. Outside the image, download
+- `TILETOPIA_MAGO_JAR` — path to the mago-3d-tiler jar that tiles vector files.
+  The Docker image sets it. Outside the image, download
   `mago-3d-tiler-1.16.2.jar` from the Gaia3D releases and point this at it, with
-  a JDK 21 on `PATH`. Unset means mesh and vector jobs fail naming the variable.
+  a JDK 21 on `PATH`. Unset means vector jobs fail naming the variable. Meshes
+  never need it.
 - `TILETOPIA_PMTILES_DIR` — directory of PMTiles archives to serve under
   `/martin`. Every `*.pmtiles` file directly in it, subdirectories excluded, is
   registered under its filename stem: `basemap.pmtiles` answers at

@@ -14,6 +14,7 @@ tracing = { workspace = true }
 las = { workspace = true }
 tiff = { workspace = true }
 gltf = { workspace = true }
+image = { workspace = true }
 e57 = { workspace = true }
 ply-rs = { workspace = true }
 tobj = { workspace = true }
@@ -24,3 +25,5 @@ ifc-lite-geometry = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# writes the small FBX documents the fbx_reader tests read back
+fbxcel = { version = "0.9", features = ["tree", "writer"] }

@@ -3493,6 +3493,11 @@ f 1 2 3 4\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
     const POINT_GEOJSON: &str = r#"{"type":"FeatureCollection","features":[
 {"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[10,20]}}]}"#;
 
+    /// A footprint mago can extrude, at 10°E 20°N.
+    const BLOCK_GEOJSON: &str = r#"{"type":"FeatureCollection","features":[
+{"type":"Feature","properties":{"name":"block","height":12.0},"geometry":{"type":"Polygon",
+"coordinates":[[[10.0,20.0],[10.0005,20.0],[10.0005,20.0005],[10.0,20.0005],[10.0,20.0]]]}}]}"#;
+
     /// Multipart upload of `contents` under `filename`, with any extra text
     /// fields the upload takes beside the file.
     async fn upload_with_fields(
@@ -3588,10 +3593,11 @@ f 1 2 3 4\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
         }
     }
 
-    /// An OBJ upload comes back as a 3D Tiles tileset whose content the `data`
-    /// route serves. Needs the jar, so it is skipped when the variable is unset.
+    /// A GeoJSON upload comes back as a 3D Tiles tileset whose content the
+    /// `data` route serves. Needs the jar, so it is skipped when the variable
+    /// is unset.
     #[tokio::test]
-    async fn obj_upload_is_tiled_by_the_external_tiler() {
+    async fn geojson_upload_is_tiled_by_the_external_tiler() {
         use tiletopia_server::db::JobStatus;
 
         let Ok(jar) = std::env::var(MAGO_JAR_VAR) else {
@@ -3600,16 +3606,10 @@ f 1 2 3 4\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
         };
 
         let state = state_with_external_tiler(Some(jar.into())).await;
-        let token = bootstrap_editor(&state, "mago-obj-editor@example.com").await;
+        let token = bootstrap_editor(&state, "mago-geojson-editor@example.com").await;
 
-        let (status, body) = upload_with_fields(
-            &state,
-            &token,
-            "cube.obj",
-            CUBE_OBJ,
-            &[("longitude", "10"), ("latitude", "20"), ("crs", "3857")],
-        )
-        .await;
+        let (status, body) =
+            upload_with_fields(&state, &token, "block.geojson", BLOCK_GEOJSON, &[]).await;
         assert_eq!(status, StatusCode::CREATED);
         let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
@@ -3874,13 +3874,14 @@ END-ISO-10303-21;
         );
     }
 
-    /// With no jar configured an OBJ falls back to the native mesh tiler and
-    /// lands where the upload's longitude and latitude say.
+    /// A mesh is tiled by this repository even with a jar configured, and lands
+    /// where the upload's longitude and latitude say.
     #[tokio::test]
-    async fn obj_upload_without_the_jar_is_tiled_natively() {
+    async fn obj_upload_is_tiled_natively_with_a_jar_configured() {
         use tiletopia_server::db::JobStatus;
 
-        let state = state_with_external_tiler(None).await;
+        // never run: an OBJ does not reach the external tiler any more
+        let state = state_with_external_tiler(Some("/nonexistent/mago.jar".into())).await;
         let token = bootstrap_editor(&state, "native-obj-editor@example.com").await;
 
         let (status, body) = upload_with_fields(
@@ -3928,10 +3929,10 @@ END-ISO-10303-21;
         assert_eq!(&tile[..4], b"glTF", "tile content is not a glb");
     }
 
-    /// An OBJ carries no coordinates of its own, so with neither an upload
-    /// placement nor a jar the job fails naming both ways out.
+    /// An OBJ carries no coordinates of its own, so without an upload placement
+    /// the job fails saying what to send.
     #[tokio::test]
-    async fn an_obj_with_no_placement_and_no_jar_fails_naming_both_options() {
+    async fn an_obj_with_no_placement_fails_naming_longitude_and_latitude() {
         use tiletopia_server::db::JobStatus;
 
         let state = state_with_external_tiler(None).await;
@@ -3946,7 +3947,6 @@ END-ISO-10303-21;
         assert_eq!(settled.status, JobStatus::Failed);
         let error = settled.error.expect("a failed job says why");
         assert!(error.contains("longitude and latitude"), "{error}");
-        assert!(error.contains(MAGO_JAR_VAR), "{error}");
     }
 
     /// DAE has no reader here and no mago input type, so it still fails naming

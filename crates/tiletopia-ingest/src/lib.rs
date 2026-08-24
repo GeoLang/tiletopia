@@ -15,6 +15,7 @@ pub mod ifc_reader;
 pub mod las_reader;
 pub mod obj_reader;
 pub mod ply_reader;
+pub mod texture_image;
 pub mod tiff_reader;
 pub mod usgs_dem_reader;
 
@@ -117,12 +118,59 @@ pub struct Heightmap {
 }
 
 /// Mesh data from glTF/OBJ/etc.
+///
+/// One material per mesh: a source mesh painted with several materials is read
+/// as several `MeshData`, which is what the GLB writer takes.
 #[derive(Debug, Clone)]
 pub struct MeshData {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    /// glTF UV space, origin at the top left. Empty, or one per position.
+    pub texcoords: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     pub name: String,
+    pub material: Option<Material>,
+}
+
+/// The single material a `MeshData` is painted with.
+#[derive(Debug, Clone)]
+pub struct Material {
+    /// glTF `baseColorFactor`, RGBA.
+    pub base_color_factor: [f32; 4],
+    pub texture: Option<Texture>,
+}
+
+/// A texture image in its file encoding, with the dimensions it decodes to.
+#[derive(Debug, Clone)]
+pub struct Texture {
+    pub image_data: Vec<u8>,
+    /// `image/png` or `image/jpeg`, the two glTF takes.
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl From<MeshData> for tiletopia_core::mesh_tiler::MeshData {
+    fn from(mesh: MeshData) -> Self {
+        let (base_color_factor, texture) = match mesh.material {
+            Some(material) => (Some(material.base_color_factor), material.texture),
+            None => (None, None),
+        };
+        Self {
+            positions: mesh.positions,
+            normals: mesh.normals,
+            texcoords: mesh.texcoords,
+            indices: mesh.indices,
+            name: mesh.name,
+            base_color_factor,
+            texture: texture.map(|texture| tiletopia_core::glb_writer::TextureData {
+                image_data: texture.image_data,
+                mime_type: texture.mime_type,
+                width: texture.width,
+                height: texture.height,
+            }),
+        }
+    }
 }
 
 /// Read a point cloud file (LAS/LAZ).

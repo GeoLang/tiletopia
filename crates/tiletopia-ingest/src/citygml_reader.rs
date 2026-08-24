@@ -75,12 +75,14 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
         meshes.push(MeshData {
             positions: all_positions,
             normals: Vec::new(),
+            texcoords: Vec::new(),
             indices: all_indices,
             name: path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("citygml")
                 .to_string(),
+            material: None,
         });
     }
 

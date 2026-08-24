@@ -9333,10 +9333,12 @@ name = "tiletopia-ingest"
 version = "0.1.0"
 dependencies = [
  "e57",
+ "fbxcel",
  "fbxcel-dom",
  "gltf",
  "ifc-lite-core",
  "ifc-lite-geometry",
+ "image",
  "las",
  "nubis-core 0.1.0 (git+https://github.com/GeoLang/nubis.git?tag=v0.1.0)",
  "ply-rs",

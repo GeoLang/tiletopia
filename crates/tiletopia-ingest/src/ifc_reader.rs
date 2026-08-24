@@ -78,8 +78,10 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
         meshes.push(MeshData {
             positions,
             normals,
+            texcoords: Vec::new(),
             indices: ifc_mesh.indices,
             name,
+            material: None,
         });
     }
 

@@ -2,19 +2,24 @@
 
 use crate::bounding_volume::Aabb;
 use crate::compression::simplify_mesh;
-use crate::glb_writer::{self, GlbMesh};
+use crate::glb_writer::{self, GlbMesh, TextureData};
 use crate::{BoundingVolume, Refine, Tile, TileContent, Tileset, TilesetAsset};
 use image::GenericImageView;
 use std::io;
 use std::path::Path;
 
-/// Input mesh data (mirrors `tiletopia_ingest::MeshData`).
+/// Input mesh data (mirrors `tiletopia_ingest::MeshData`), carrying the one
+/// material the GLB writer takes per mesh.
 #[derive(Debug, Clone)]
 pub struct MeshData {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    /// glTF UV space. Empty, or one per position.
+    pub texcoords: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     pub name: String,
+    pub base_color_factor: Option<[f32; 4]>,
+    pub texture: Option<TextureData>,
 }
 
 /// Configuration for the mesh tiling pipeline.
@@ -97,11 +102,51 @@ impl MeshTileNode {
     }
 }
 
-/// Build a mesh tile tree from a set of input meshes.
+/// Build a mesh tile tree from a set of input meshes. Meshes that share a
+/// material are tiled together; each further material gets its own subtree,
+/// because a tile's GLB carries one material.
 pub fn build_mesh_tree(meshes: &[MeshData], config: &MeshTilingConfig) -> MeshTileNode {
-    let (positions, normals, indices) = merge_meshes(meshes);
-    let bounds = compute_aabb(&positions);
-    build_recursive(&positions, &normals, &indices, bounds, 0, config)
+    let groups = group_by_material(meshes);
+
+    let Some((first, rest)) = groups.split_first() else {
+        return MeshTileNode::Leaf {
+            bounds: Aabb::empty(),
+            mesh: empty_glb_mesh(),
+            depth: 0,
+        };
+    };
+
+    if rest.is_empty() {
+        return build_recursive(
+            first,
+            &first.indices,
+            compute_aabb(&first.positions),
+            0,
+            config,
+        );
+    }
+
+    let mut bounds = Aabb::empty();
+    let mut children = Vec::with_capacity(groups.len());
+    for group in &groups {
+        let group_bounds = compute_aabb(&group.positions);
+        bounds.expand_point(group_bounds.min);
+        bounds.expand_point(group_bounds.max);
+        children.push(Box::new(build_recursive(
+            group,
+            &group.indices,
+            group_bounds,
+            1,
+            config,
+        )));
+    }
+
+    MeshTileNode::Internal {
+        bounds,
+        children,
+        lod_mesh: empty_glb_mesh(),
+        depth: 0,
+    }
 }
 
 /// Write mesh tiles (GLB files + tileset.json) to disk.
@@ -143,22 +188,78 @@ pub fn tile_meshes(
 
 // ── internals ───────────────────────────────────────────────────────────────
 
-fn merge_meshes(meshes: &[MeshData]) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>) {
-    let total_verts: usize = meshes.iter().map(|m| m.positions.len()).sum();
-    let total_idx: usize = meshes.iter().map(|m| m.indices.len()).sum();
+/// The meshes painted with one material, merged into one vertex and index
+/// array.
+struct MaterialGroup {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    texcoords: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+    base_color_factor: Option<[f32; 4]>,
+    texture: Option<TextureData>,
+}
 
-    let mut positions = Vec::with_capacity(total_verts);
-    let mut normals = Vec::with_capacity(total_verts);
-    let mut indices = Vec::with_capacity(total_idx);
+fn group_by_material(meshes: &[MeshData]) -> Vec<MaterialGroup> {
+    let mut groups: Vec<MaterialGroup> = Vec::new();
 
-    for m in meshes {
-        let base = positions.len() as u32;
-        positions.extend_from_slice(&m.positions);
-        normals.extend_from_slice(&m.normals);
-        indices.extend(m.indices.iter().map(|&i| i + base));
+    for mesh in meshes {
+        if mesh.positions.is_empty() {
+            continue;
+        }
+        let group = match groups.iter().position(|group| group.takes(mesh)) {
+            Some(index) => &mut groups[index],
+            None => {
+                groups.push(MaterialGroup {
+                    positions: Vec::new(),
+                    normals: Vec::new(),
+                    texcoords: Vec::new(),
+                    indices: Vec::new(),
+                    base_color_factor: mesh.base_color_factor,
+                    texture: mesh.texture.clone(),
+                });
+                groups.last_mut().expect("just pushed")
+            }
+        };
+
+        let base = group.positions.len() as u32;
+        // an attribute only carries on while it lines up with the positions
+        if group.normals.len() == base as usize && mesh.normals.len() == mesh.positions.len() {
+            group.normals.extend_from_slice(&mesh.normals);
+        }
+        if group.texcoords.len() == base as usize && mesh.texcoords.len() == mesh.positions.len() {
+            group.texcoords.extend_from_slice(&mesh.texcoords);
+        }
+        group.positions.extend_from_slice(&mesh.positions);
+        group.indices.extend(mesh.indices.iter().map(|i| i + base));
     }
 
-    (positions, normals, indices)
+    for group in &mut groups {
+        if group.normals.len() != group.positions.len() {
+            group.normals.clear();
+        }
+        if group.texcoords.len() != group.positions.len() {
+            group.texcoords.clear();
+        }
+        if group.texture.is_some() && group.texcoords.is_empty() {
+            tracing::warn!("mesh has a texture but no UVs, tiling it untextured");
+            group.texture = None;
+        }
+    }
+
+    groups
+}
+
+impl MaterialGroup {
+    fn takes(&self, mesh: &MeshData) -> bool {
+        if self.base_color_factor != mesh.base_color_factor {
+            return false;
+        }
+        match (&self.texture, &mesh.texture) {
+            (None, None) => true,
+            (Some(mine), Some(theirs)) => mine.image_data == theirs.image_data,
+            _ => false,
+        }
+    }
 }
 
 fn compute_aabb(positions: &[[f32; 3]]) -> Aabb {
@@ -170,19 +271,19 @@ fn compute_aabb(positions: &[[f32; 3]]) -> Aabb {
 }
 
 fn build_recursive(
-    positions: &[[f32; 3]],
-    normals: &[[f32; 3]],
+    group: &MaterialGroup,
     indices: &[u32],
     bounds: Aabb,
     depth: u32,
     config: &MeshTilingConfig,
 ) -> MeshTileNode {
+    let positions = &group.positions;
     let tri_count = indices.len() / 3;
 
     if tri_count <= config.max_triangles_per_tile || depth >= config.max_depth {
         return MeshTileNode::Leaf {
             bounds,
-            mesh: make_glb_mesh(positions, normals, indices, config.content_y_up),
+            mesh: make_glb_mesh(group, indices, config),
             depth,
         };
     }
@@ -218,7 +319,7 @@ fn build_recursive(
     if left_idx.is_empty() || right_idx.is_empty() {
         return MeshTileNode::Leaf {
             bounds,
-            mesh: make_glb_mesh(positions, normals, indices, config.content_y_up),
+            mesh: make_glb_mesh(group, indices, config),
             depth,
         };
     }
@@ -226,26 +327,13 @@ fn build_recursive(
     let left_bounds = aabb_from_indices(positions, &left_idx);
     let right_bounds = aabb_from_indices(positions, &right_idx);
 
-    let left = build_recursive(
-        positions,
-        normals,
-        &left_idx,
-        left_bounds,
-        depth + 1,
-        config,
-    );
-    let right = build_recursive(
-        positions,
-        normals,
-        &right_idx,
-        right_bounds,
-        depth + 1,
-        config,
-    );
+    let left = build_recursive(group, &left_idx, left_bounds, depth + 1, config);
+    let right = build_recursive(group, &right_idx, right_bounds, depth + 1, config);
 
     // LOD mesh for this internal node — simplified version of the full mesh at this level.
+    // meshopt keeps the vertex array as it is, so texcoords still pair up.
     let lod_indices = simplify_mesh(positions, indices, config.simplification_ratio);
-    let lod_mesh = make_glb_mesh(positions, normals, &lod_indices, config.content_y_up);
+    let lod_mesh = make_glb_mesh(group, &lod_indices, config);
 
     MeshTileNode::Internal {
         bounds,
@@ -264,33 +352,55 @@ fn aabb_from_indices(positions: &[[f32; 3]], indices: &[u32]) -> Aabb {
     aabb
 }
 
-fn make_glb_mesh(
-    positions: &[[f32; 3]],
-    normals: &[[f32; 3]],
-    indices: &[u32],
-    content_y_up: bool,
-) -> GlbMesh {
-    let mut positions = positions.to_vec();
-    let mut normals_opt = if normals.is_empty() {
-        None
-    } else {
-        Some(normals.to_vec())
-    };
-    if content_y_up {
+fn make_glb_mesh(group: &MaterialGroup, indices: &[u32], config: &MeshTilingConfig) -> GlbMesh {
+    let mut positions = group.positions.clone();
+    let mut normals = (!group.normals.is_empty()).then(|| group.normals.clone());
+    if config.content_y_up {
         z_up_to_y_up(&mut positions);
-        if let Some(normals) = &mut normals_opt {
+        if let Some(normals) = &mut normals {
             z_up_to_y_up(normals);
         }
     }
+
+    // a tile holding part of a textured mesh carries only the part of the
+    // texture its triangles reach
+    let split = group
+        .texture
+        .as_ref()
+        .filter(|_| indices.len() < group.indices.len())
+        .map(|texture| split_texture(texture, &group.texcoords, indices));
+    let (texture, texcoords) = match split {
+        Some((texture, texcoords)) => (Some(texture), Some(texcoords)),
+        None => (
+            group.texture.clone(),
+            (!group.texcoords.is_empty()).then(|| group.texcoords.clone()),
+        ),
+    };
+
     GlbMesh {
         positions,
-        normals: normals_opt,
+        normals,
         indices: Some(indices.to_vec()),
+        colors: None,
+        texcoords,
+        metadata: None,
+        feature_ids: None,
+        texture,
+        base_color_factor: group.base_color_factor,
+    }
+}
+
+fn empty_glb_mesh() -> GlbMesh {
+    GlbMesh {
+        positions: Vec::new(),
+        normals: None,
+        indices: None,
         colors: None,
         texcoords: None,
         metadata: None,
         feature_ids: None,
         texture: None,
+        base_color_factor: None,
     }
 }
 
@@ -317,11 +427,10 @@ impl NodePath {
 
     fn to_filename(&self) -> String {
         if self.segments.is_empty() {
-            "root.glb".to_string()
-        } else {
-            let s: String = self.segments.iter().map(|i| char::from(b'0' + i)).collect();
-            format!("{s}.glb")
+            return "root.glb".to_string();
         }
+        let path: Vec<String> = self.segments.iter().map(u8::to_string).collect();
+        format!("{}.glb", path.join("-"))
     }
 }
 
@@ -476,9 +585,10 @@ pub fn split_texture(
         image::load_from_memory(&original.image_data).expect("texture image should be decodable");
     let (w, h) = img.dimensions();
 
-    // Crop region in pixel space.
-    let crop_x = (u_min * w as f32).floor() as u32;
-    let crop_y = (v_min * h as f32).floor() as u32;
+    // Crop region in pixel space. A UV of exactly 1 would start the crop past
+    // the last pixel, so the origin stops one short of the edge.
+    let crop_x = ((u_min * w as f32).floor() as u32).min(w - 1);
+    let crop_y = ((v_min * h as f32).floor() as u32).min(h - 1);
     let crop_w = ((u_range * w as f32).ceil() as u32).max(1).min(w - crop_x);
     let crop_h = ((v_range * h as f32).ceil() as u32).max(1).min(h - crop_y);
 
@@ -540,8 +650,11 @@ mod tests {
         MeshData {
             positions,
             normals,
+            texcoords: Vec::new(),
             indices,
             name: "cube".into(),
+            base_color_factor: None,
+            texture: None,
         }
     }
 
@@ -571,8 +684,11 @@ mod tests {
         MeshData {
             positions,
             normals,
+            texcoords: Vec::new(),
             indices,
             name: "grid".into(),
+            base_color_factor: None,
+            texture: None,
         }
     }
 
@@ -677,8 +793,11 @@ mod tests {
         let mesh = MeshData {
             positions: vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 2.0, 6.0]],
             normals: vec![[0.0, 0.0, 1.0]; 3],
+            texcoords: Vec::new(),
             indices: vec![0, 1, 2],
             name: "slab".into(),
+            base_color_factor: None,
+            texture: None,
         };
         let config = MeshTilingConfig {
             content_y_up: true,
@@ -776,6 +895,241 @@ mod tests {
         image::load_from_memory(&cropped.image_data).expect("cropped texture should be valid");
     }
 
+    /// A grid mesh with UVs spanning the whole texture.
+    fn textured_grid_mesh(n: usize, texture: glb_writer::TextureData) -> MeshData {
+        let mut mesh = grid_mesh(n);
+        mesh.texcoords = mesh
+            .positions
+            .iter()
+            .map(|p| [p[0] / n as f32, p[1] / n as f32])
+            .collect();
+        mesh.texture = Some(texture);
+        mesh
+    }
+
+    /// The GLB's JSON, and the bytes each buffer view names.
+    fn read_glb(path: &Path) -> (serde_json::Value, Vec<Vec<u8>>) {
+        let bytes = std::fs::read(path).expect("a written tile");
+        let glb = gltf::Glb::from_slice(&bytes).expect("a parseable GLB");
+        let json: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+        let bin = glb.bin.unwrap_or_default();
+        let views = json["bufferViews"]
+            .as_array()
+            .map(|views| {
+                views
+                    .iter()
+                    .map(|view| {
+                        let offset = view["byteOffset"].as_u64().unwrap_or(0) as usize;
+                        let length = view["byteLength"].as_u64().unwrap() as usize;
+                        bin[offset..offset + length].to_vec()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        (json, views)
+    }
+
+    fn texture_bytes(json: &serde_json::Value, views: &[Vec<u8>]) -> Vec<u8> {
+        assert_eq!(
+            json["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["index"], 0,
+            "the material should point at the texture"
+        );
+        let source = json["textures"][0]["source"].as_u64().unwrap() as usize;
+        let view = json["images"][source]["bufferView"].as_u64().unwrap() as usize;
+        views[view].clone()
+    }
+
+    fn leaf_textures(node: &MeshTileNode, found: &mut Vec<(u32, u32)>) {
+        match node {
+            MeshTileNode::Leaf { mesh, .. } => {
+                let texture = mesh.texture.as_ref().expect("a leaf texture");
+                found.push((texture.width, texture.height));
+            }
+            MeshTileNode::Internal { children, .. } => {
+                for child in children {
+                    leaf_textures(child, found);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_textured_mesh_reaches_the_tile_glb() {
+        let dir = std::env::temp_dir().join("tiletopia_mesh_textured_tile_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let original = make_test_texture(8, 8);
+        let original_bytes = original.image_data.clone();
+        let mesh = textured_grid_mesh(2, original);
+        tile_meshes(&[mesh], &dir, &MeshTilingConfig::default()).expect("tile_meshes failed");
+
+        let (json, views) = read_glb(&dir.join("tiles/root.glb"));
+        assert_eq!(json["images"][0]["mimeType"], "image/png");
+        assert!(json["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"].is_number());
+        // one tile holds the whole mesh, so the texture goes through uncropped
+        assert_eq!(texture_bytes(&json, &views), original_bytes);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn splitting_a_textured_mesh_crops_the_texture_per_tile() {
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 100,
+            ..Default::default()
+        };
+        let mesh = textured_grid_mesh(32, make_test_texture(128, 128));
+        let tree = build_mesh_tree(&[mesh], &config);
+
+        let mut sizes = Vec::new();
+        leaf_textures(&tree, &mut sizes);
+        assert!(sizes.len() > 1, "the mesh should have been split");
+        for (width, height) in &sizes {
+            assert!(
+                *width < 128 && *height < 128,
+                "a tile's texture should be cropped, got {width}x{height}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cropped_tile_texture_still_decodes_and_its_uvs_span_it() {
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 100,
+            ..Default::default()
+        };
+        let mesh = textured_grid_mesh(16, make_test_texture(64, 64));
+        let tree = build_mesh_tree(&[mesh], &config);
+
+        let MeshTileNode::Internal { children, .. } = &tree else {
+            panic!("expected a split");
+        };
+        let (MeshTileNode::Leaf { mesh, .. } | MeshTileNode::Internal { lod_mesh: mesh, .. }) =
+            &**children.first().unwrap();
+        let texture = mesh.texture.as_ref().expect("a texture");
+        image::load_from_memory(&texture.image_data).expect("a decodable crop");
+
+        let texcoords = mesh.texcoords.as_ref().expect("texcoords");
+        assert_eq!(texcoords.len(), mesh.positions.len());
+        let used: Vec<[f32; 2]> = mesh
+            .indices
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|&i| texcoords[i as usize])
+            .collect();
+        let u_max = used.iter().map(|uv| uv[0]).fold(f32::MIN, f32::max);
+        let v_max = used.iter().map(|uv| uv[1]).fold(f32::MIN, f32::max);
+        assert!(
+            (u_max - 1.0).abs() < 0.01,
+            "u should reach the crop edge: {u_max}"
+        );
+        assert!(
+            (v_max - 1.0).abs() < 0.01,
+            "v should reach the crop edge: {v_max}"
+        );
+    }
+
+    #[test]
+    fn each_material_gets_its_own_subtree() {
+        let dir = std::env::temp_dir().join("tiletopia_mesh_two_materials_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut wall = textured_grid_mesh(2, make_test_texture(8, 8));
+        wall.name = "wall".into();
+        let mut roof = textured_grid_mesh(2, make_test_texture(4, 4));
+        roof.name = "roof".into();
+
+        tile_meshes(&[wall, roof], &dir, &MeshTilingConfig::default()).expect("tile_meshes failed");
+
+        let tileset: Tileset =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("tileset.json")).unwrap())
+                .unwrap();
+        assert_eq!(tileset.root.children.len(), 2);
+        assert!(
+            tileset.root.content.is_none(),
+            "the root holds no geometry of its own"
+        );
+
+        let sizes: Vec<(u32, u32)> = ["tiles/0.glb", "tiles/1.glb"]
+            .iter()
+            .map(|name| {
+                let (json, views) = read_glb(&dir.join(name));
+                let image = image::load_from_memory(&texture_bytes(&json, &views)).unwrap();
+                (image.width(), image.height())
+            })
+            .collect();
+        assert!(
+            sizes.contains(&(8, 8)) && sizes.contains(&(4, 4)),
+            "{sizes:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn meshes_sharing_a_material_are_tiled_together() {
+        let texture = make_test_texture(8, 8);
+        let first = textured_grid_mesh(2, texture.clone());
+        let second = textured_grid_mesh(2, texture);
+        let tree = build_mesh_tree(&[first, second], &MeshTilingConfig::default());
+
+        let MeshTileNode::Leaf { mesh, .. } = &tree else {
+            panic!("one material should give one subtree");
+        };
+        assert_eq!(mesh.positions.len(), 18);
+        assert_eq!(mesh.texcoords.as_ref().unwrap().len(), 18);
+    }
+
+    #[test]
+    fn simplification_keeps_one_texcoord_per_vertex() {
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 100,
+            ..Default::default()
+        };
+        let mesh = textured_grid_mesh(32, make_test_texture(64, 64));
+        let tree = build_mesh_tree(&[mesh], &config);
+
+        let MeshTileNode::Internal { lod_mesh, .. } = &tree else {
+            panic!("expected a split");
+        };
+        let texcoords = lod_mesh.texcoords.as_ref().expect("texcoords");
+        assert_eq!(texcoords.len(), lod_mesh.positions.len());
+        let highest = lod_mesh.indices.as_ref().unwrap().iter().max().unwrap();
+        assert!((*highest as usize) < texcoords.len());
+    }
+
+    #[test]
+    fn a_base_color_factor_reaches_the_tile_without_a_texture() {
+        let dir = std::env::temp_dir().join("tiletopia_mesh_base_color_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut mesh = cube_mesh();
+        mesh.base_color_factor = Some([1.0, 0.0, 0.0, 1.0]);
+        tile_meshes(&[mesh], &dir, &MeshTilingConfig::default()).expect("tile_meshes failed");
+
+        let (json, _) = read_glb(&dir.join("tiles/root.glb"));
+        assert_eq!(
+            json["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"],
+            serde_json::json!([1.0, 0.0, 0.0, 1.0])
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_texture_without_uvs_is_dropped() {
+        let mut mesh = cube_mesh();
+        mesh.texture = Some(make_test_texture(4, 4));
+        let tree = build_mesh_tree(&[mesh], &MeshTilingConfig::default());
+
+        let MeshTileNode::Leaf { mesh, .. } = &tree else {
+            panic!("expected a leaf");
+        };
+        assert!(mesh.texture.is_none());
+        assert!(mesh.texcoords.is_none());
+    }
+
     #[test]
     fn glb_with_texture_round_trip() {
         let tex = make_test_texture(4, 4);
@@ -788,6 +1142,7 @@ mod tests {
             metadata: None,
             feature_ids: None,
             texture: Some(tex),
+            base_color_factor: None,
         };
 
         let mut buf = Vec::new();

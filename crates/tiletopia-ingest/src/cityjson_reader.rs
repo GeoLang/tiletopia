@@ -101,8 +101,10 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             meshes.push(MeshData {
                 positions,
                 normals: Vec::new(),
+                texcoords: Vec::new(),
                 indices,
                 name: name.clone(),
+                material: None,
             });
         }
     }

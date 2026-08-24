@@ -91,17 +91,17 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <li>Parallel tiling (Rayon)</li>
 <li>Optional GPU via wgpu</li>
 <li>Draco/meshopt compression</li>
-<li>Meshes tiled by mago-3d-tiler (MPL-2.0), bundled in the image, when TILETOPIA_MAGO_JAR is set</li>
-<li>Without the jar meshes go to the native mesh tiler, which drops textures and materials and places the model from the upload's longitude and latitude</li>
-<li>Vector files tiled by mago-3d-tiler only</li>
-<li>IFC always read and tiled natively, placed from the upload's longitude and latitude or the IfcSite coordinates. DAE fails with an error naming the format</li>
+<li>Meshes read and tiled natively, with their UVs, diffuse textures and diffuse colours, placed from the upload's longitude and latitude</li>
+<li>A tile holding part of a textured mesh carries the crop of the texture its triangles reach</li>
+<li>Vector files tiled by mago-3d-tiler (MPL-2.0) only, bundled in the image, needing TILETOPIA_MAGO_JAR</li>
+<li>IFC placed from the upload's longitude and latitude or the IfcSite coordinates. DAE fails with an error naming the format</li>
 </ul>
 </div>
 <div class="card">
 <h3>Input Formats</h3>
 <ul>
 <li>LAS, LAZ, E57, PLY: the native tiler</li>
-<li>glTF, GLB, OBJ, FBX, CityGML: mago-3d-tiler when TILETOPIA_MAGO_JAR is set, the native mesh tiler otherwise, placed by the upload's longitude and latitude and without textures or materials</li>
+<li>glTF, GLB, OBJ, FBX, CityGML: the native mesh tiler, with textures and materials, placed by the upload's longitude and latitude</li>
 <li>GeoJSON, GeoPackage, KML: mago-3d-tiler only, with optional longitude, latitude and crs upload fields</li>
 <li>IFC: the native mesh tiler, placed by the upload's longitude and latitude or the IfcSite coordinates. crs is ignored</li>
 <li>DAE uploads but fails: neither tiler takes it. Any other extension answers 400</li>

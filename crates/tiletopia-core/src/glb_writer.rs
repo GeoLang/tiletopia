@@ -25,9 +25,13 @@ pub struct GlbMesh {
     pub metadata: Option<TileMetadata>,
     pub feature_ids: Option<Vec<u32>>,
     pub texture: Option<TextureData>,
+    /// glTF `baseColorFactor`, RGBA. Written as a material of its own when the
+    /// mesh has no texture.
+    pub base_color_factor: Option<[f32; 4]>,
 }
 
 /// Texture image data for photogrammetry meshes.
+#[derive(Debug, Clone)]
 pub struct TextureData {
     pub image_data: Vec<u8>,
     pub mime_type: String,
@@ -333,6 +337,8 @@ fn build_json(mesh: &GlbMesh, layout: &BufferLayout) -> String {
             "type": "VEC2"
         }));
         attributes.insert("TEXCOORD_0".to_string(), serde_json::json!(acc_idx));
+        bv_idx += 1;
+        acc_idx += 1;
     }
 
     let mut primitive = serde_json::json!({ "attributes": attributes });
@@ -340,43 +346,49 @@ fn build_json(mesh: &GlbMesh, layout: &BufferLayout) -> String {
         primitive["indices"] = serde_json::json!(idx_acc);
     }
 
-    // Texture — add image buffer view, image, texture, sampler, and material
+    // Material — the texture image and its buffer view, the base colour, or both
     let mut images_json = Vec::new();
     let mut textures_json = Vec::new();
     let mut samplers_json = Vec::new();
     let mut materials_json = Vec::new();
-    if let Some(ref tex) = mesh.texture {
-        // Buffer view for the texture image blob (no byte stride, no target)
-        buffer_views.push(serde_json::json!({
-            "buffer": 0,
-            "byteOffset": layout.texture_offset,
-            "byteLength": layout.texture_len
-        }));
-        let tex_bv = bv_idx;
-        bv_idx += 1;
+    if mesh.texture.is_some() || mesh.base_color_factor.is_some() {
+        let mut pbr = serde_json::json!({
+            "metallicFactor": 0.0,
+            "roughnessFactor": 1.0
+        });
 
-        images_json.push(serde_json::json!({
-            "bufferView": tex_bv,
-            "mimeType": tex.mime_type
-        }));
-        samplers_json.push(serde_json::json!({
-            "magFilter": 9729,
-            "minFilter": 9987,
-            "wrapS": 10497,
-            "wrapT": 10497
-        }));
-        textures_json.push(serde_json::json!({
-            "source": 0,
-            "sampler": 0
-        }));
-        materials_json.push(serde_json::json!({
-            "pbrMetallicRoughness": {
-                "baseColorTexture": { "index": 0 },
-                "metallicFactor": 0.0,
-                "roughnessFactor": 1.0
-            }
-        }));
+        if let Some(ref tex) = mesh.texture {
+            // Buffer view for the texture image blob (no byte stride, no target)
+            buffer_views.push(serde_json::json!({
+                "buffer": 0,
+                "byteOffset": layout.texture_offset,
+                "byteLength": layout.texture_len
+            }));
+            let tex_bv = bv_idx;
+            bv_idx += 1;
 
+            images_json.push(serde_json::json!({
+                "bufferView": tex_bv,
+                "mimeType": tex.mime_type
+            }));
+            samplers_json.push(serde_json::json!({
+                "magFilter": 9729,
+                "minFilter": 9987,
+                "wrapS": 10497,
+                "wrapT": 10497
+            }));
+            textures_json.push(serde_json::json!({
+                "source": 0,
+                "sampler": 0
+            }));
+            pbr["baseColorTexture"] = serde_json::json!({ "index": 0 });
+        }
+
+        if let Some(factor) = mesh.base_color_factor {
+            pbr["baseColorFactor"] = serde_json::json!(factor);
+        }
+
+        materials_json.push(serde_json::json!({ "pbrMetallicRoughness": pbr }));
         primitive["material"] = serde_json::json!(0);
     }
 
@@ -517,6 +529,8 @@ fn build_json(mesh: &GlbMesh, layout: &BufferLayout) -> String {
         root["images"] = serde_json::json!(images_json);
         root["textures"] = serde_json::json!(textures_json);
         root["samplers"] = serde_json::json!(samplers_json);
+    }
+    if !materials_json.is_empty() {
         root["materials"] = serde_json::json!(materials_json);
     }
 
@@ -698,6 +712,7 @@ mod tests {
             metadata: None,
             feature_ids: None,
             texture: None,
+            base_color_factor: None,
         }
     }
 
@@ -712,6 +727,7 @@ mod tests {
             metadata: None,
             feature_ids: None,
             texture: None,
+            base_color_factor: None,
         };
         let mut buf = Vec::new();
         write_glb(&mesh, &mut buf).unwrap();
@@ -762,6 +778,7 @@ mod tests {
             metadata: None,
             feature_ids: None,
             texture: None,
+            base_color_factor: None,
         };
         let mut buf = Vec::new();
         write_glb(&mesh, &mut buf).unwrap();
@@ -781,6 +798,7 @@ mod tests {
             metadata: None,
             feature_ids: None,
             texture: None,
+            base_color_factor: None,
         };
         let mut buf = Vec::new();
         write_glb(&mesh, &mut buf).unwrap();
@@ -800,6 +818,7 @@ mod tests {
             metadata: None,
             feature_ids: None,
             texture: None,
+            base_color_factor: None,
         };
         let mut buf = Vec::new();
         write_glb(&mesh, &mut buf).unwrap();
@@ -835,6 +854,7 @@ mod tests {
             }),
             feature_ids: Some(vec![0, 1, 2]),
             texture: None,
+            base_color_factor: None,
         };
         let mut buf = Vec::new();
         write_glb(&mesh, &mut buf).unwrap();
@@ -889,6 +909,7 @@ mod tests {
             }),
             feature_ids: Some(vec![0, 1]),
             texture: None,
+            base_color_factor: None,
         };
         let mut buf = Vec::new();
         write_glb(&mesh, &mut buf).unwrap();
@@ -950,6 +971,7 @@ mod tests {
             }),
             feature_ids: Some(vec![0, 1]),
             texture: None,
+            base_color_factor: None,
         };
         let mut buf = Vec::new();
         write_glb(&mesh, &mut buf).unwrap();
@@ -992,6 +1014,7 @@ mod tests {
                 width: 2,
                 height: 2,
             }),
+            base_color_factor: None,
         };
         let mut buf = Vec::new();
         write_glb(&mesh, &mut buf).unwrap();
@@ -1013,6 +1036,38 @@ mod tests {
         // Primitive should reference material 0.
         let prim = &json["meshes"][0]["primitives"][0];
         assert_eq!(prim["material"], 0);
+
+        let total = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+        assert_eq!(total as usize, buf.len());
+    }
+
+    #[test]
+    fn base_color_factor_writes_a_material_of_its_own() {
+        let mesh = GlbMesh {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: None,
+            indices: Some(vec![0, 1, 2]),
+            colors: None,
+            texcoords: None,
+            metadata: None,
+            feature_ids: None,
+            texture: None,
+            base_color_factor: Some([0.25, 0.5, 0.75, 1.0]),
+        };
+        let mut buf = Vec::new();
+        write_glb(&mesh, &mut buf).unwrap();
+
+        let glb = gltf::Glb::from_slice(&buf).expect("should parse GLB");
+        let json: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+
+        let pbr = &json["materials"][0]["pbrMetallicRoughness"];
+        assert_eq!(
+            pbr["baseColorFactor"],
+            serde_json::json!([0.25, 0.5, 0.75, 1.0])
+        );
+        assert!(pbr.get("baseColorTexture").is_none());
+        assert!(json.get("images").is_none());
+        assert_eq!(json["meshes"][0]["primitives"][0]["material"], 0);
 
         let total = u32::from_le_bytes(buf[8..12].try_into().unwrap());
         assert_eq!(total as usize, buf.len());
