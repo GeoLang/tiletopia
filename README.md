@@ -78,12 +78,7 @@ Not implemented, whatever the code in the repository suggests:
 | DAE tiling | Neither the native tiler nor mago-3d-tiler takes DAE, so those jobs fail. Point clouds, meshes, vector files and IFC do tile |
 | Scheduler | `spawn()` has no callers. `create_job` ignores cron. `Scheduler::new()` seeds three fabricated jobs. No job has ever run |
 | Webhooks | HMAC delivery is written in `process_pending`, which nothing calls. Subscribe is read-only. Seeded with demo secrets |
-| STAC search | Ignores bbox, datetime, collections and limit. Returns one hardcoded item |
-| COG tiles | Offsets are fabricated. There is no HTTP client |
-| Static maps | Fills a flat grey buffer. Encodes WebP as JPEG, PDF and SVG as PNG |
-| API keys | Seeds three fake keys. `get_by_hash` has no callers, so a key cannot authenticate |
-| Kriging | Inverse-variogram weighting, no solve. Ordinary / Simple / Universal run the same code |
-| Geoprocessing buffer / union | Buffer scales vertices radially. Union is a convex hull |
+| STAC collections | The collection list is hardcoded beside the real `/stac/search` proxy |
 | Temporal versioning, CRDT, federation, CI/CD validation, multi-tenant isolation, leader election, priority queue / SLA, white-label, marketplace, geofencing, encryption, custom dashboards, AR/VR foveated rendering, cinematic flythrough, scripting, offline viewer export | `pub mod` lines with unit tests. No route, CLI or render loop calls them |
 
 The modules stay. Wiring or deleting them is a product call, recorded in `viewtopia/DESIGN_TODO.md`. Do not start from the scheduler or webhook facades.
@@ -411,7 +406,7 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `GET` | `/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` | Hillshade, slope or ndvi tiles, rendered on demand |
 | `GET` | `/metrics` | Prometheus metrics |
 
-Other `/api/v1/*` geospatial and premium routes are mounted. They are the facades in the table above: STAC search returns one hardcoded item, COG offsets are fabricated, static maps fill a grey buffer, API keys cannot authenticate, scheduler and webhook workers have no callers. They are listed in OpenAPI because the router mounts them, not because they work.
+Other `/api/v1/*` geospatial and premium routes are mounted and real: STAC search proxies `TILETOPIA_STAC_API`, COG windows read `TILETOPIA_COG_SOURCES` over range requests, static maps render the DEM to PNG/JPEG/WebP/SVG/PDF, geostatistics solves kriging systems, geoprocessing runs geo's boolean overlays, and API keys authenticate read routes (`X-Api-Key`, admin-minted, hashed at rest). The facades left are in the table above: scheduler and webhook workers have no callers, and the pub-mod-only modules have no routes.
 
 Tile data reads are anonymous: `tileset.json`, `tiles/{path}`, everything under
 `/api/v1/terrain/` (the generated quantized-mesh routes, the prebuilt bundles
@@ -511,9 +506,9 @@ Price is not a capability. Ion is a hosted product. This is a binary you run.
 cargo test
 ```
 
-739 tests (714 Rust + 25 GUI) on default features, counted per crate:
+896 tests (871 Rust + 25 GUI) on default features, counted per crate:
 - Core (115): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
-- Server (512): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine (module only, no route reaches it), audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing (module only, no route reaches it), retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
+- Server (669): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine (module only, no route reaches it), audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing (module only, no route reaches it), retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduler, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
 - Ingest (42): LAS/LAZ, E57, PLY, GeoTIFF, DTED, HGT, USGS DEM, glTF, OBJ, FBX, CityGML, CityJSON and IFC readers, CRS detection
 - Terrain (28): quantized mesh generation, global DEM terrain
 - Store (12): local filesystem CRUD, path traversal
@@ -522,7 +517,7 @@ cargo test
 GUI: `cd gui && pnpm run test:all` (10 vitest unit tests + 15 Playwright e2e).
 
 Feature-gated tests (`gpu`, `onnx`, `video`, `ml`, `martin`, `wasm-plugins`, cloud
-stores) are not in the 714 and need their feature enabled to run.
+stores) are not in the 871 and need their feature enabled to run.
 
 ---
 
