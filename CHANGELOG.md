@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Geoprocessing operates on real geometry (2026-08-24). Buffer, union,
+  intersection and difference are the `geo` crate's offset and boolean overlay,
+  so a buffered square gains rounded corners with the area of the analytic
+  rounded square, the union of two overlapping squares is the L they cover
+  rather than a hull around both, the union of two disjoint squares is a
+  MultiPolygon with two parts, and a difference that encloses its second
+  geometry cuts a hole. Intersection no longer clips against the second
+  polygon's edges as half-planes, which answered the unit square instead of the
+  whole L for a concave clip. Centroid is the area-weighted polygon centroid,
+  not the mean of the vertices, so an L answers (1.1, 1.1) and not (4/3, 4/3).
+  Buffering projects to meters with a local equirectangular frame about the
+  geometry's centroid latitude, and is refused past 89 degrees of latitude where
+  that frame collapses. Convex hull (Graham scan), Douglas-Peucker simplify and
+  the ray-casting point-in-polygon test are unchanged.
+- `POST /api/v1/geoprocessing/run` takes an `operation`, a GeoJSON-shaped
+  `geometry`, a second `other` geometry for the binary operations, and
+  `distance_m` or `tolerance` where the operation needs one. It answers the
+  result geometry with GeoJSON nesting, plus the geodesic `area_m2` and
+  `length_m` where the result has them. Boolean overlay and buffer always answer
+  a MultiPolygon so a caller reads one shape whether the result split or not. An
+  unknown operation, a missing `distance_m` or `tolerance`, a missing second
+  geometry, a non-finite coordinate, a ring under four positions and a
+  non-polygon input to an overlay are each a 400 naming what was wrong.
+  `/operations` now lists only the seven operations `run` accepts: Dissolve,
+  Clip and Voronoi were advertised and unimplemented, and are gone.
 - Kriging solves a linear system (2026-08-24). Ordinary kriging builds the
   (n+1)x(n+1) semivariogram matrix with a Lagrange row and reads the kriging
   variance off the solution as the weights dotted with the right-hand side.

@@ -811,33 +811,64 @@ async fn isochrone_profiles() -> Json<serde_json::Value> {
 }
 
 /// Routes for geoprocessing operations.
-pub fn geoprocessing_routes() -> Router<Arc<AppState>> {
+pub fn geoprocessing_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
         .route("/api/v1/geoprocessing/operations", get(list_geo_operations))
         .route("/api/v1/geoprocessing/demo", get(geoprocessing_demo))
+        .route("/api/v1/geoprocessing/run", post(run_geoprocessing))
 }
 
 async fn list_geo_operations() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "operations": ["Buffer", "ConvexHull", "Centroid", "Simplify", "Intersection", "Union", "Difference"]
-    }))
+    Json(serde_json::json!({ "operations": geoprocessing::OPERATIONS }))
+}
+
+#[derive(Deserialize)]
+struct GeoprocessingRunRequest {
+    operation: String,
+    geometry: geoprocessing::Geometry,
+    #[serde(default)]
+    other: Option<geoprocessing::Geometry>,
+    #[serde(default)]
+    distance_m: Option<f64>,
+    #[serde(default)]
+    tolerance: Option<f64>,
+}
+
+async fn run_geoprocessing(
+    Json(request): Json<GeoprocessingRunRequest>,
+) -> Result<Json<geoprocessing::GeoprocessingResult>, (StatusCode, String)> {
+    let operation = geoprocessing::GeoOperation::parse(
+        &request.operation,
+        request.distance_m,
+        request.tolerance,
+    )
+    .map_err(|error| bad_request(error.to_string()))?;
+    geoprocessing::run(&operation, &request.geometry, request.other.as_ref())
+        .map(Json)
+        .map_err(|error| bad_request(error.to_string()))
 }
 
 async fn geoprocessing_demo() -> Json<serde_json::Value> {
-    let polygon = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]];
-    let geom = geoprocessing::Geometry {
-        geom_type: geoprocessing::GeomType::Polygon,
-        coordinates: polygon.clone(),
-    };
-    let buffered = geoprocessing::buffer(&geom, 100.0);
-    let centroid = geoprocessing::centroid(&polygon);
-    let hull = geoprocessing::convex_hull(&polygon);
+    let square = geoprocessing::Geometry::Polygon(vec![vec![
+        [0.0, 0.0],
+        [0.01, 0.0],
+        [0.01, 0.01],
+        [0.0, 0.01],
+        [0.0, 0.0],
+    ]]);
+    let buffered = geoprocessing::run(
+        &geoprocessing::GeoOperation::Buffer { distance_m: 100.0 },
+        &square,
+        None,
+    )
+    .expect("the demo's own square buffers");
     Json(serde_json::json!({
-        "original_vertices": polygon.len(),
-        "buffered_vertices": buffered.buffered.coordinates.len(),
-        "buffer_area_m2": buffered.area_m2,
-        "centroid": centroid,
-        "hull_vertices": hull.len()
+        "demo": "one invented square near 0,0 buffered by 100 m, not your data. \
+                 POST /api/v1/geoprocessing/run to run an operation on your own geometry.",
+        "operation": buffered.operation,
+        "geometry": buffered.geometry,
+        "area_m2": buffered.area_m2,
+        "length_m": buffered.length_m
     }))
 }
 
@@ -1988,5 +2019,233 @@ mod tests {
 
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{reason}");
         assert!(reason.contains("singular"), "{reason}");
+    }
+
+    /// Send a request to the real geoprocessing route table and read the answer.
+    async fn geoprocessing_request(
+        method: &str,
+        uri: &str,
+        body: Option<String>,
+    ) -> (StatusCode, String) {
+        use tower::ServiceExt;
+
+        let mut request = axum::http::Request::builder().method(method).uri(uri);
+        if body.is_some() {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+        }
+        let response = geoprocessing_routes::<()>()
+            .oneshot(
+                request
+                    .body(body.map(Body::from).unwrap_or_else(Body::empty))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    async fn geoprocess(body: serde_json::Value) -> (StatusCode, String) {
+        geoprocessing_request("POST", "/api/v1/geoprocessing/run", Some(body.to_string())).await
+    }
+
+    fn geoprocessing_square(min_x: f64, min_y: f64, side: f64) -> serde_json::Value {
+        serde_json::json!({
+            "type": "Polygon",
+            "coordinates": [[
+                [min_x, min_y],
+                [min_x + side, min_y],
+                [min_x + side, min_y + side],
+                [min_x, min_y + side],
+                [min_x, min_y],
+            ]]
+        })
+    }
+
+    #[tokio::test]
+    async fn geoprocessing_run_buffers_a_square_into_a_rounded_multipolygon() {
+        let (status, body) = geoprocess(serde_json::json!({
+            "operation": "Buffer",
+            "geometry": geoprocessing_square(0.0, 0.0, 0.01),
+            "distance_m": 100.0
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let result: geoprocessing::GeoprocessingResult = serde_json::from_str(&body).unwrap();
+        let geoprocessing::Geometry::MultiPolygon(parts) = &result.geometry else {
+            panic!(
+                "expected a MultiPolygon, got {}",
+                result.geometry.type_name()
+            );
+        };
+        assert_eq!(parts.len(), 1);
+        assert!(
+            parts[0][0].len() > 5,
+            "a buffered square has rounded corners, got {} positions",
+            parts[0][0].len()
+        );
+        assert!(result.area_m2.unwrap() > 0.0);
+    }
+
+    #[tokio::test]
+    async fn geoprocessing_run_unions_two_disjoint_squares_into_two_parts() {
+        let (status, body) = geoprocess(serde_json::json!({
+            "operation": "Union",
+            "geometry": geoprocessing_square(0.0, 0.0, 1.0),
+            "other": geoprocessing_square(2.0, 0.0, 1.0)
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let result: geoprocessing::GeoprocessingResult = serde_json::from_str(&body).unwrap();
+        let geoprocessing::Geometry::MultiPolygon(parts) = &result.geometry else {
+            panic!(
+                "expected a MultiPolygon, got {}",
+                result.geometry.type_name()
+            );
+        };
+        assert_eq!(parts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn geoprocessing_run_answers_a_centroid_point_with_no_area() {
+        let (status, body) = geoprocess(serde_json::json!({
+            "operation": "Centroid",
+            "geometry": geoprocessing_square(0.0, 0.0, 2.0)
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let result: geoprocessing::GeoprocessingResult = serde_json::from_str(&body).unwrap();
+        assert!(
+            matches!(result.geometry, geoprocessing::Geometry::Point([x, y]) if (x - 1.0).abs() < 1e-9 && (y - 1.0).abs() < 1e-9),
+            "{:?}",
+            result.geometry
+        );
+        assert!(result.area_m2.is_none());
+    }
+
+    #[tokio::test]
+    async fn geoprocessing_run_simplifies_a_line() {
+        let (status, body) = geoprocess(serde_json::json!({
+            "operation": "Simplify",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [[0.0, 0.0], [0.1, 0.001], [0.2, 0.0], [0.3, 0.5]]
+            },
+            "tolerance": 0.01
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let result: geoprocessing::GeoprocessingResult = serde_json::from_str(&body).unwrap();
+        let geoprocessing::Geometry::LineString(positions) = &result.geometry else {
+            panic!("expected a LineString, got {}", result.geometry.type_name());
+        };
+        assert!(positions.len() < 4, "{positions:?}");
+        assert!(result.length_m.unwrap() > 0.0);
+    }
+
+    #[tokio::test]
+    async fn geoprocessing_run_refuses_an_unknown_operation_and_names_the_accepted_set() {
+        let (status, reason) = geoprocess(serde_json::json!({
+            "operation": "Voronoi",
+            "geometry": geoprocessing_square(0.0, 0.0, 1.0)
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        for name in geoprocessing::OPERATIONS {
+            assert!(reason.contains(name), "{reason} does not name {name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn geoprocessing_run_refuses_a_binary_operation_without_a_second_geometry() {
+        let (status, reason) = geoprocess(serde_json::json!({
+            "operation": "Intersection",
+            "geometry": geoprocessing_square(0.0, 0.0, 1.0)
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(reason.contains("other"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn geoprocessing_run_refuses_a_ring_with_three_positions() {
+        let (status, reason) = geoprocess(serde_json::json!({
+            "operation": "ConvexHull",
+            "geometry": { "type": "Polygon", "coordinates": [[[0.0, 0.0], [1.0, 0.0], [0.0, 0.0]]] }
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(reason.contains("at least 4 positions"), "{reason}");
+    }
+
+    /// JSON has no NaN and rejects a number too large for a double, so a request
+    /// cannot carry a non-finite coordinate as far as `geoprocessing::run`. The
+    /// finite check there still guards every other caller.
+    #[tokio::test]
+    async fn geoprocessing_run_refuses_a_coordinate_json_cannot_hold() {
+        let body = r#"{"operation":"Centroid","geometry":{"type":"Polygon",
+            "coordinates":[[[0,0],[1e400,0],[1,1],[0,0]]]}}"#;
+
+        let (status, reason) =
+            geoprocessing_request("POST", "/api/v1/geoprocessing/run", Some(body.to_string()))
+                .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{reason}");
+        assert!(reason.contains("number out of range"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn geoprocessing_run_refuses_buffer_without_a_distance() {
+        let (status, reason) = geoprocess(serde_json::json!({
+            "operation": "Buffer",
+            "geometry": geoprocessing_square(0.0, 0.0, 1.0)
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(reason.contains("distance_m"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn geoprocessing_operations_lists_only_what_run_accepts() {
+        let (status, body) =
+            geoprocessing_request("GET", "/api/v1/geoprocessing/operations", None).await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let listed: Vec<String> =
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|name| name.as_str().unwrap().to_string())
+                .collect();
+        assert!(!listed.is_empty());
+        for name in listed {
+            geoprocessing::GeoOperation::parse(&name, Some(100.0), Some(0.5))
+                .unwrap_or_else(|error| panic!("/operations lists '{name}' but run said {error}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn geoprocessing_demo_says_it_is_a_demo() {
+        let (status, body) = geoprocessing_request("GET", "/api/v1/geoprocessing/demo", None).await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let demo = serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        assert!(
+            demo["demo"].as_str().unwrap().contains("invented"),
+            "the demo payload must say it is a demo: {body}"
+        );
     }
 }
