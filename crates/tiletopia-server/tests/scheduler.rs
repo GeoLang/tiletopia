@@ -20,9 +20,6 @@ use tiletopia_server::{AppState, Asset, AssetStatus, AssetType, router};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-const JWT_SECRET_ENV: &str = "TILETOPIA_JWT_SECRET";
-const TEST_SECRET: &str = "0123456789abcdef0123456789abcdef";
-
 /// A cube the native mesh tiler takes, so a scheduled re-tile has real input to
 /// submit.
 const CUBE_OBJ: &str = "\
@@ -38,43 +35,6 @@ const PAST_DUE: Duration = Duration::from_millis(1400);
 
 /// How long a case waits for the background worker to get somewhere.
 const WAIT_LIMIT: Duration = Duration::from_secs(60);
-
-/// Put the auth middleware into its enforcing state, once for the binary.
-fn signing_secret() -> &'static str {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // safe: the only writer in this test binary, before any request runs
-        unsafe {
-            std::env::set_var(JWT_SECRET_ENV, TEST_SECRET);
-            std::env::remove_var("TILETOPIA_AUTH_DISABLED");
-        }
-    });
-    TEST_SECRET
-}
-
-fn token(subject: &str, role: &str) -> String {
-    use jsonwebtoken::{EncodingKey, Header, encode};
-    let claims = serde_json::json!({
-        "sub": subject,
-        "exp": chrono::Utc::now().timestamp() + 300,
-        "role": role,
-    });
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(signing_secret().as_bytes()),
-    )
-    .unwrap()
-}
-
-async fn test_state() -> Arc<AppState> {
-    signing_secret();
-    common::build_state(
-        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
-        None,
-    )
-    .await
-}
 
 struct Answer {
     status: StatusCode,
@@ -224,8 +184,8 @@ fn restarted_scheduler(state: &Arc<AppState>) -> Scheduler {
 /// starts runs its real action, and the row carries the outcome.
 #[tokio::test]
 async fn an_interval_job_runs_its_action_and_the_row_records_the_outcome() {
-    let state = test_state().await;
-    let editor = token("editor-one", "editor");
+    let state = common::test_state().await;
+    let editor = common::token("editor-one", "editor");
 
     let asset_id = staged_asset(&state, "editor-one").await;
     let stale_job = settled_job_row(&state, asset_id, 3).await;
@@ -277,8 +237,8 @@ async fn an_interval_job_runs_its_action_and_the_row_records_the_outcome() {
 
 #[tokio::test]
 async fn a_one_shot_runs_once_and_disables_itself() {
-    let state = test_state().await;
-    let editor = token("editor-two", "editor");
+    let state = common::test_state().await;
+    let editor = common::token("editor-two", "editor");
 
     let created = schedule(
         &state,
@@ -308,8 +268,8 @@ async fn a_one_shot_runs_once_and_disables_itself() {
 
 #[tokio::test]
 async fn a_disabled_job_never_runs_until_it_is_enabled() {
-    let state = test_state().await;
-    let editor = token("editor-three", "editor");
+    let state = common::test_state().await;
+    let editor = common::token("editor-three", "editor");
 
     let created = send(
         &state,
@@ -373,8 +333,8 @@ async fn a_disabled_job_never_runs_until_it_is_enabled() {
 /// the same database runs what is due and leaves what is not.
 #[tokio::test]
 async fn the_next_run_survives_a_restart() {
-    let state = test_state().await;
-    let editor = token("editor-four", "editor");
+    let state = common::test_state().await;
+    let editor = common::token("editor-four", "editor");
 
     let due_soon = schedule(
         &state,
@@ -427,8 +387,8 @@ async fn the_next_run_survives_a_restart() {
 /// and is disabled once the attempts run out.
 #[tokio::test]
 async fn a_failing_job_records_its_error_and_is_disabled_at_the_attempt_bound() {
-    let state = test_state().await;
-    let editor = token("editor-five", "editor");
+    let state = common::test_state().await;
+    let editor = common::token("editor-five", "editor");
 
     let gone = Uuid::new_v4();
     let created = schedule(
@@ -466,9 +426,9 @@ async fn a_failing_job_records_its_error_and_is_disabled_at_the_attempt_bound() 
 
 #[tokio::test]
 async fn the_write_routes_refuse_a_viewer_token() {
-    let state = test_state().await;
-    let editor = token("editor-six", "editor");
-    let viewer = token("viewer", "viewer");
+    let state = common::test_state().await;
+    let editor = common::token("editor-six", "editor");
+    let viewer = common::token("viewer", "viewer");
 
     let created = schedule(
         &state,
@@ -519,9 +479,9 @@ async fn the_write_routes_refuse_a_viewer_token() {
 
 #[tokio::test]
 async fn another_callers_job_is_not_there_to_read_or_change() {
-    let state = test_state().await;
-    let mine = token("editor-seven", "editor");
-    let theirs = token("editor-eight", "editor");
+    let state = common::test_state().await;
+    let mine = common::token("editor-seven", "editor");
+    let theirs = common::token("editor-eight", "editor");
 
     let created = schedule(
         &state,
@@ -561,7 +521,7 @@ async fn another_callers_job_is_not_there_to_read_or_change() {
         listing.text
     );
 
-    let admin = token("root", "admin");
+    let admin = common::token("root", "admin");
     let all = send(
         &state,
         empty_request("GET", "/api/v1/scheduler/jobs", &admin),
@@ -594,8 +554,8 @@ async fn another_callers_job_is_not_there_to_read_or_change() {
 /// advertised kind, and every one of them executes.
 #[tokio::test]
 async fn the_advertised_action_kinds_are_exactly_the_ones_the_worker_runs() {
-    let state = test_state().await;
-    let editor = token("editor-nine", "editor");
+    let state = common::test_state().await;
+    let editor = common::token("editor-nine", "editor");
     let asset_id = staged_asset(&state, "editor-nine").await;
 
     let advertised = send(
@@ -644,8 +604,8 @@ async fn the_advertised_action_kinds_are_exactly_the_ones_the_worker_runs() {
 
 #[tokio::test]
 async fn scheduling_refuses_an_action_and_a_schedule_the_server_does_not_run() {
-    let state = test_state().await;
-    let editor = token("editor-ten", "editor");
+    let state = common::test_state().await;
+    let editor = common::token("editor-ten", "editor");
 
     for (body, expected) in [
         (
@@ -798,8 +758,8 @@ async fn the_deleted_scheduler_identifiers_are_absent() {
         );
     }
 
-    let state = test_state().await;
-    let editor = token("editor-eleven", "editor");
+    let state = common::test_state().await;
+    let editor = common::token("editor-eleven", "editor");
     for path in ["/api/v1/scheduler/stats", "/api/v1/scheduler/runs"] {
         let answer = send(&state, empty_request("GET", path, &editor)).await;
         assert_eq!(answer.status, StatusCode::NOT_FOUND, "GET {path}");

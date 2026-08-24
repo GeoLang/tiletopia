@@ -21,9 +21,6 @@ use tiletopia_server::{AppState, Asset, AssetStatus, AssetType, router};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-const JWT_SECRET_ENV: &str = "TILETOPIA_JWT_SECRET";
-const TEST_SECRET: &str = "0123456789abcdef0123456789abcdef";
-
 /// A cube the native mesh tiler can tile, so a job reaches Done without the
 /// external tiler.
 const CUBE_OBJ: &str = "\
@@ -32,43 +29,6 @@ f 1 2 3 4\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
 
 /// How long a case waits for a background worker to get somewhere.
 const WAIT_LIMIT: Duration = Duration::from_secs(60);
-
-/// Put the auth middleware into its enforcing state, once for the binary.
-fn signing_secret() -> &'static str {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // safe: the only writer in this test binary, before any request runs
-        unsafe {
-            std::env::set_var(JWT_SECRET_ENV, TEST_SECRET);
-            std::env::remove_var("TILETOPIA_AUTH_DISABLED");
-        }
-    });
-    TEST_SECRET
-}
-
-fn token(subject: &str, role: &str) -> String {
-    use jsonwebtoken::{EncodingKey, Header, encode};
-    let claims = serde_json::json!({
-        "sub": subject,
-        "exp": chrono::Utc::now().timestamp() + 300,
-        "role": role,
-    });
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(signing_secret().as_bytes()),
-    )
-    .unwrap()
-}
-
-async fn test_state() -> Arc<AppState> {
-    signing_secret();
-    common::build_state(
-        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
-        None,
-    )
-    .await
-}
 
 struct Answer {
     status: StatusCode,
@@ -257,8 +217,8 @@ async fn settle_only_job(state: &Arc<AppState>, asset_id: Uuid) -> tiletopia_ser
 /// gets a signed payload describing that deletion.
 #[tokio::test]
 async fn a_subscription_receives_a_signed_payload_for_the_event_it_asked_for() {
-    let state = test_state().await;
-    let editor = token("editor-one", "editor");
+    let state = common::test_state().await;
+    let editor = common::token("editor-one", "editor");
     let (url, received) = receiver(StatusCode::OK).await;
     let (subscription_id, secret) =
         subscribe(&state, &editor, &url, &[WebhookEvent::AssetDeleted.name()]).await;
@@ -316,8 +276,8 @@ async fn a_subscription_receives_a_signed_payload_for_the_event_it_asked_for() {
 
 #[tokio::test]
 async fn a_failing_receiver_is_retried_with_backoff_and_stops_at_the_bound() {
-    let state = test_state().await;
-    let editor = token("editor-two", "editor");
+    let state = common::test_state().await;
+    let editor = common::token("editor-two", "editor");
     let (url, received) = receiver(StatusCode::INTERNAL_SERVER_ERROR).await;
     subscribe(&state, &editor, &url, &[WebhookEvent::AssetDeleted.name()]).await;
 
@@ -389,8 +349,8 @@ async fn a_failing_receiver_is_retried_with_backoff_and_stops_at_the_bound() {
 
 #[tokio::test]
 async fn a_deleted_or_paused_subscription_and_one_wanting_another_event_receive_nothing() {
-    let state = test_state().await;
-    let editor = token("editor-three", "editor");
+    let state = common::test_state().await;
+    let editor = common::token("editor-three", "editor");
     let worker = Arc::clone(&state.webhooks).start();
 
     let (wanted_url, wanted) = receiver(StatusCode::OK).await;
@@ -474,9 +434,9 @@ async fn a_deleted_or_paused_subscription_and_one_wanting_another_event_receive_
 
 #[tokio::test]
 async fn the_write_routes_refuse_a_viewer_token() {
-    let state = test_state().await;
-    let editor = token("editor-four", "editor");
-    let viewer = token("viewer", "viewer");
+    let state = common::test_state().await;
+    let editor = common::token("editor-four", "editor");
+    let viewer = common::token("viewer", "viewer");
     let (url, _) = receiver(StatusCode::OK).await;
     let (id, _) = subscribe(&state, &editor, &url, &[WebhookEvent::AssetDeleted.name()]).await;
 
@@ -506,9 +466,9 @@ async fn the_write_routes_refuse_a_viewer_token() {
 
 #[tokio::test]
 async fn the_listing_shows_a_caller_its_own_subscriptions_and_an_admin_every_one() {
-    let state = test_state().await;
-    let mine = token("editor-five", "editor");
-    let theirs = token("editor-six", "editor");
+    let state = common::test_state().await;
+    let mine = common::token("editor-five", "editor");
+    let theirs = common::token("editor-six", "editor");
     let (url, _) = receiver(StatusCode::OK).await;
 
     let (my_id, my_secret) =
@@ -527,7 +487,7 @@ async fn the_listing_shows_a_caller_its_own_subscriptions_and_an_admin_every_one
 
     let all = send(
         &state,
-        empty_request("GET", "/api/v1/webhooks", &token("root", "admin")),
+        empty_request("GET", "/api/v1/webhooks", &common::token("root", "admin")),
     )
     .await;
     let subscriptions = all.body["subscriptions"].as_array().unwrap();
@@ -550,8 +510,8 @@ async fn the_listing_shows_a_caller_its_own_subscriptions_and_an_admin_every_one
 
 #[tokio::test]
 async fn subscribing_refuses_an_unknown_event_and_a_url_that_is_not_http() {
-    let state = test_state().await;
-    let editor = token("editor-seven", "editor");
+    let state = common::test_state().await;
+    let editor = common::token("editor-seven", "editor");
 
     for (body, expected) in [
         (
@@ -598,8 +558,8 @@ async fn subscribing_refuses_an_unknown_event_and_a_url_that_is_not_http() {
 /// takes every advertised event, and the three real paths that emit fill it.
 #[tokio::test]
 async fn the_advertised_event_types_are_exactly_the_ones_the_server_emits() {
-    let state = test_state().await;
-    let editor = token("editor-eight", "editor");
+    let state = common::test_state().await;
+    let editor = common::token("editor-eight", "editor");
     let worker = Arc::clone(&state.webhooks).start();
 
     let advertised = send(

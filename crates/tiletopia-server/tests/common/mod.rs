@@ -1,5 +1,48 @@
+// every test binary compiles this module on its own, and none of them use all of it
+#![allow(dead_code)]
+
 use std::sync::Arc;
 use tiletopia_server::AppState;
+
+const JWT_SECRET_ENV: &str = "TILETOPIA_JWT_SECRET";
+const TEST_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+/// Put the auth middleware into its enforcing state, once for the binary.
+pub fn signing_secret() -> &'static str {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // safe: the only writer in this test binary, before any request runs
+        unsafe {
+            std::env::set_var(JWT_SECRET_ENV, TEST_SECRET);
+            std::env::remove_var("TILETOPIA_AUTH_DISABLED");
+        }
+    });
+    TEST_SECRET
+}
+
+pub fn token(subject: &str, role: &str) -> String {
+    use jsonwebtoken::{EncodingKey, Header, encode};
+    let claims = serde_json::json!({
+        "sub": subject,
+        "exp": chrono::Utc::now().timestamp() + 300,
+        "role": role,
+    });
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(signing_secret().as_bytes()),
+    )
+    .unwrap()
+}
+
+pub async fn test_state() -> Arc<AppState> {
+    signing_secret();
+    build_state(
+        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+        None,
+    )
+    .await
+}
 
 /// Delay before a failed webhook delivery's second attempt in the test state.
 pub const WEBHOOK_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(20);

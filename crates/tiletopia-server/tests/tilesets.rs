@@ -17,9 +17,6 @@ use tiletopia_server::tilesets::{
 use tiletopia_server::{AppState, router};
 use tower::ServiceExt;
 
-const JWT_SECRET_ENV: &str = "TILETOPIA_JWT_SECRET";
-const TEST_SECRET: &str = "0123456789abcdef0123456789abcdef";
-
 /// Two points far enough apart that tippecanoe picks maxzoom 0, so the archive
 /// holds tile 0/0/0 and the test does not have to guess a zoom.
 const FIXTURE_GEOJSON: &str = r#"{"type":"FeatureCollection","features":[
@@ -28,35 +25,6 @@ const FIXTURE_GEOJSON: &str = r#"{"type":"FeatureCollection","features":[
 
 /// How long a build of the fixture above is given before the test gives up.
 const BUILD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
-
-/// Put the auth middleware into its enforcing state, once for the binary. Every
-/// case here signs with the same secret, so there is nothing to serialize.
-fn signing_secret() -> &'static str {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // safe: the only writer in this test binary, before any request runs
-        unsafe {
-            std::env::set_var(JWT_SECRET_ENV, TEST_SECRET);
-            std::env::remove_var("TILETOPIA_AUTH_DISABLED");
-        }
-    });
-    TEST_SECRET
-}
-
-fn token(subject: &str, role: &str) -> String {
-    use jsonwebtoken::{EncodingKey, Header, encode};
-    let claims = serde_json::json!({
-        "sub": subject,
-        "exp": chrono::Utc::now().timestamp() + 300,
-        "role": role,
-    });
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(signing_secret().as_bytes()),
-    )
-    .unwrap()
-}
 
 /// `false` when tippecanoe is not installed, with the reason printed. Nothing
 /// else in the suite needs the binary.
@@ -208,7 +176,7 @@ async fn a_geojson_upload_builds_an_archive_that_serves_tiles_until_it_is_delete
     if !tippecanoe_installed() {
         return;
     }
-    let editor = token("tileset-editor", "editor");
+    let editor = common::token("tileset-editor", "editor");
     let (state, worker) = state_with_builder().await;
 
     let (status, accepted) = upload(&state, &editor, "city roads.geojson", FIXTURE_GEOJSON).await;
@@ -319,7 +287,7 @@ async fn a_file_tippecanoe_refuses_fails_the_build_and_keeps_its_stderr() {
     if !tippecanoe_installed() {
         return;
     }
-    let editor = token("tileset-editor", "editor");
+    let editor = common::token("tileset-editor", "editor");
     let (state, worker) = state_with_builder().await;
 
     let (status, accepted) = upload(&state, &editor, "broken.geojson", "not json at all").await;
@@ -354,7 +322,7 @@ async fn a_ready_archive_re_registers_after_a_restart() {
     if !tippecanoe_installed() {
         return;
     }
-    let editor = token("tileset-editor", "editor");
+    let editor = common::token("tileset-editor", "editor");
     let (state, worker) = state_with_builder().await;
 
     let (_, accepted) = upload(&state, &editor, "roads.geojson", FIXTURE_GEOJSON).await;
@@ -381,7 +349,7 @@ async fn a_build_whose_row_was_deleted_leaves_no_archive_or_source() {
     if !tippecanoe_installed() {
         return;
     }
-    let editor = token("tileset-editor", "editor");
+    let editor = common::token("tileset-editor", "editor");
     let state = common::build_state(
         tiletopia_server::analysis_tiles::AnalysisEngines::new(),
         None,
@@ -404,7 +372,7 @@ async fn a_build_whose_row_was_deleted_leaves_no_archive_or_source() {
 
 #[tokio::test]
 async fn an_extension_tippecanoe_cannot_read_is_refused_before_any_build() {
-    let editor = token("tileset-editor", "editor");
+    let editor = common::token("tileset-editor", "editor");
     let state = common::build_state(
         tiletopia_server::analysis_tiles::AnalysisEngines::new(),
         None,
@@ -420,7 +388,7 @@ async fn an_extension_tippecanoe_cannot_read_is_refused_before_any_build() {
 
 #[tokio::test]
 async fn an_upload_past_the_default_body_limit_is_taken() {
-    let editor = token("tileset-editor", "editor");
+    let editor = common::token("tileset-editor", "editor");
     let state = common::build_state(
         tiletopia_server::analysis_tiles::AnalysisEngines::new(),
         None,
@@ -459,7 +427,7 @@ async fn an_upload_past_the_default_body_limit_is_taken() {
 
 #[tokio::test]
 async fn a_viewer_may_read_the_list_but_not_upload_or_delete() {
-    let viewer = token("tileset-viewer", "viewer");
+    let viewer = common::token("tileset-viewer", "viewer");
     let state = common::build_state(
         tiletopia_server::analysis_tiles::AnalysisEngines::new(),
         None,
@@ -484,8 +452,8 @@ async fn a_viewer_may_read_the_list_but_not_upload_or_delete() {
 
 #[tokio::test]
 async fn another_editor_cannot_read_or_delete_someone_elses_tileset() {
-    let owner = token("tileset-owner", "editor");
-    let stranger = token("tileset-stranger", "editor");
+    let owner = common::token("tileset-owner", "editor");
+    let stranger = common::token("tileset-stranger", "editor");
     let state = common::build_state(
         tiletopia_server::analysis_tiles::AnalysisEngines::new(),
         None,
@@ -512,7 +480,7 @@ async fn another_editor_cannot_read_or_delete_someone_elses_tileset() {
 
 #[tokio::test]
 async fn the_tileset_routes_refuse_a_tokenless_request() {
-    signing_secret();
+    common::signing_secret();
     let state = common::build_state(
         tiletopia_server::analysis_tiles::AnalysisEngines::new(),
         None,
@@ -603,7 +571,7 @@ async fn a_build_a_restart_interrupted_finishes_when_it_is_queued_again() {
     if !tippecanoe_installed() {
         return;
     }
-    let editor = token("tileset-editor", "editor");
+    let editor = common::token("tileset-editor", "editor");
     let state = common::build_state(
         tiletopia_server::analysis_tiles::AnalysisEngines::new(),
         None,
@@ -688,7 +656,7 @@ async fn a_failed_build_takes_the_journal_with_it() {
 
 #[tokio::test]
 async fn deleting_a_tileset_takes_the_journal_with_it() {
-    let editor = token("tileset-editor", "editor");
+    let editor = common::token("tileset-editor", "editor");
     let state = common::build_state(
         tiletopia_server::analysis_tiles::AnalysisEngines::new(),
         None,
@@ -713,7 +681,7 @@ async fn deleting_a_tileset_takes_the_journal_with_it() {
 
 #[tokio::test]
 async fn a_name_past_the_cap_is_refused_and_never_stored() {
-    let editor = token("tileset-editor", "editor");
+    let editor = common::token("tileset-editor", "editor");
     let state = common::build_state(
         tiletopia_server::analysis_tiles::AnalysisEngines::new(),
         None,
@@ -755,9 +723,9 @@ async fn a_name_past_the_cap_is_refused_and_never_stored() {
 
 #[tokio::test]
 async fn the_catalog_shows_an_operator_archive_to_everyone_and_a_tileset_to_its_owner() {
-    let owner = token("catalog-owner", "editor");
-    let stranger = token("catalog-stranger", "editor");
-    let admin = token("catalog-admin", "admin");
+    let owner = common::token("catalog-owner", "editor");
+    let stranger = common::token("catalog-stranger", "editor");
+    let admin = common::token("catalog-admin", "admin");
     let state = common::build_state(
         tiletopia_server::analysis_tiles::AnalysisEngines::new(),
         None,
@@ -851,7 +819,7 @@ async fn await_running_build(state: &Arc<AppState>, id: uuid::Uuid) {
 
 #[tokio::test]
 async fn deleting_a_building_tileset_kills_the_build_instead_of_waiting_it_out() {
-    let editor = token("tileset-editor", "editor");
+    let editor = common::token("tileset-editor", "editor");
     let state = common::build_state(
         tiletopia_server::analysis_tiles::AnalysisEngines::new(),
         None,
@@ -883,7 +851,7 @@ async fn deleting_a_building_tileset_kills_the_build_instead_of_waiting_it_out()
 
 #[tokio::test]
 async fn deleting_a_tileset_that_is_not_building_leaves_the_running_build_alone() {
-    let editor = token("tileset-editor", "editor");
+    let editor = common::token("tileset-editor", "editor");
     let state = common::build_state(
         tiletopia_server::analysis_tiles::AnalysisEngines::new(),
         None,
@@ -934,7 +902,7 @@ async fn deleting_a_tileset_that_is_not_building_leaves_the_running_build_alone(
 
 #[tokio::test]
 async fn a_finished_build_leaves_the_slot_empty_so_a_later_delete_cancels_nothing() {
-    let editor = token("tileset-editor", "editor");
+    let editor = common::token("tileset-editor", "editor");
     let state = common::build_state(
         tiletopia_server::analysis_tiles::AnalysisEngines::new(),
         None,

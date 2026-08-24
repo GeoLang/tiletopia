@@ -16,51 +16,11 @@ use tiletopia_server::api_keys::{ApiKey, Permission, RateLimitTier, hash_present
 use tiletopia_server::{AppState, router};
 use tower::ServiceExt;
 
-const JWT_SECRET_ENV: &str = "TILETOPIA_JWT_SECRET";
-const TEST_SECRET: &str = "0123456789abcdef0123456789abcdef";
-
 /// A read route a key can reach: dataset metadata, no claims of its own.
 const READ_ROUTE: &str = "/api/v1/catalog";
 
 /// A route in the Analytics class, so a read-only key is refused there.
 const ANALYTICS_ROUTE: &str = "/api/v1/geostatistics/methods";
-
-/// Put the auth middleware into its enforcing state, once for the binary.
-fn signing_secret() -> &'static str {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // safe: the only writer in this test binary, before any request runs
-        unsafe {
-            std::env::set_var(JWT_SECRET_ENV, TEST_SECRET);
-            std::env::remove_var("TILETOPIA_AUTH_DISABLED");
-        }
-    });
-    TEST_SECRET
-}
-
-fn token(subject: &str, role: &str) -> String {
-    use jsonwebtoken::{EncodingKey, Header, encode};
-    let claims = serde_json::json!({
-        "sub": subject,
-        "exp": chrono::Utc::now().timestamp() + 300,
-        "role": role,
-    });
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(signing_secret().as_bytes()),
-    )
-    .unwrap()
-}
-
-async fn test_state() -> Arc<AppState> {
-    signing_secret();
-    common::build_state(
-        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
-        None,
-    )
-    .await
-}
 
 struct Answer {
     status: StatusCode,
@@ -122,7 +82,7 @@ async fn create_key(
             .uri("/api/v1/api-keys")
             .header(
                 "authorization",
-                format!("Bearer {}", token("root", "admin")),
+                format!("Bearer {}", common::token("root", "admin")),
             )
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
@@ -144,7 +104,7 @@ async fn create_read_key(state: &Arc<AppState>) -> String {
 
 #[tokio::test]
 async fn a_created_key_authenticates_a_read_route() {
-    let state = test_state().await;
+    let state = common::test_state().await;
     let key = create_read_key(&state).await;
 
     let answer = get_with_key(&state, READ_ROUTE, Some(&key)).await;
@@ -153,7 +113,7 @@ async fn a_created_key_authenticates_a_read_route() {
 
 #[tokio::test]
 async fn the_same_read_without_a_credential_is_unauthorized() {
-    let state = test_state().await;
+    let state = common::test_state().await;
     // the key exists, the request just does not carry it
     create_read_key(&state).await;
 
@@ -163,7 +123,7 @@ async fn the_same_read_without_a_credential_is_unauthorized() {
 
 #[tokio::test]
 async fn a_garbage_key_is_unauthorized() {
-    let state = test_state().await;
+    let state = common::test_state().await;
     let real = create_read_key(&state).await;
     let hex = real.strip_prefix("ttk_").unwrap();
 
@@ -190,7 +150,7 @@ async fn a_garbage_key_is_unauthorized() {
 
 #[tokio::test]
 async fn presenting_the_stored_hash_instead_of_the_key_is_unauthorized() {
-    let state = test_state().await;
+    let state = common::test_state().await;
     let key = create_read_key(&state).await;
     let hash = hash_presented_key(&key).unwrap();
 
@@ -201,7 +161,7 @@ async fn presenting_the_stored_hash_instead_of_the_key_is_unauthorized() {
 
 #[tokio::test]
 async fn a_revoked_key_is_unauthorized() {
-    let state = test_state().await;
+    let state = common::test_state().await;
     let (status, created) = create_key(
         &state,
         serde_json::json!({ "name": "doomed", "permissions": ["read"], "tier": "free" }),
@@ -223,7 +183,7 @@ async fn a_revoked_key_is_unauthorized() {
             .uri(format!("/api/v1/api-keys/{id}/revoke"))
             .header(
                 "authorization",
-                format!("Bearer {}", token("root", "admin")),
+                format!("Bearer {}", common::token("root", "admin")),
             )
             .body(Body::empty())
             .unwrap(),
@@ -238,7 +198,7 @@ async fn a_revoked_key_is_unauthorized() {
 
 #[tokio::test]
 async fn a_deleted_key_is_unauthorized() {
-    let state = test_state().await;
+    let state = common::test_state().await;
     let (status, created) = create_key(
         &state,
         serde_json::json!({ "name": "temporary", "permissions": ["read"], "tier": "free" }),
@@ -255,7 +215,7 @@ async fn a_deleted_key_is_unauthorized() {
             .uri(format!("/api/v1/api-keys/{id}"))
             .header(
                 "authorization",
-                format!("Bearer {}", token("root", "admin")),
+                format!("Bearer {}", common::token("root", "admin")),
             )
             .body(Body::empty())
             .unwrap(),
@@ -270,7 +230,7 @@ async fn a_deleted_key_is_unauthorized() {
 
 #[tokio::test]
 async fn an_expired_key_is_unauthorized() {
-    let state = test_state().await;
+    let state = common::test_state().await;
     let key = "ttk_".to_string() + &"ab".repeat(32);
     state
         .db
@@ -296,7 +256,7 @@ async fn an_expired_key_is_unauthorized() {
 
 #[tokio::test]
 async fn a_key_without_the_permission_for_a_route_class_is_forbidden() {
-    let state = test_state().await;
+    let state = common::test_state().await;
     let key = create_read_key(&state).await;
 
     let answer = get_with_key(&state, ANALYTICS_ROUTE, Some(&key)).await;
@@ -321,7 +281,7 @@ async fn a_key_without_the_permission_for_a_route_class_is_forbidden() {
 
 #[tokio::test]
 async fn no_key_reaches_an_admin_route_whatever_it_carries() {
-    let state = test_state().await;
+    let state = common::test_state().await;
     let (status, created) = create_key(
         &state,
         serde_json::json!({
@@ -348,7 +308,7 @@ async fn no_key_reaches_an_admin_route_whatever_it_carries() {
 
 #[tokio::test]
 async fn a_burst_past_the_per_second_bucket_answers_429_with_retry_timing() {
-    let state = test_state().await;
+    let state = common::test_state().await;
     let key = create_read_key(&state).await;
 
     // free tier is 10 requests a second and the bucket starts full
@@ -377,7 +337,7 @@ async fn a_burst_past_the_per_second_bucket_answers_429_with_retry_timing() {
 
 #[tokio::test]
 async fn the_stored_row_holds_a_hash_and_never_the_key() {
-    let state = test_state().await;
+    let state = common::test_state().await;
     let key = create_read_key(&state).await;
 
     let row = sqlx::query("SELECT * FROM api_keys")
@@ -405,11 +365,11 @@ async fn the_stored_row_holds_a_hash_and_never_the_key() {
 
 #[tokio::test]
 async fn the_listing_carries_no_key_and_no_hash() {
-    let state = test_state().await;
+    let state = common::test_state().await;
     let key = create_read_key(&state).await;
     let hash = hash_presented_key(&key).unwrap();
 
-    let answer = get_with_token(&state, "/api/v1/api-keys", &token("root", "admin")).await;
+    let answer = get_with_token(&state, "/api/v1/api-keys", &common::token("root", "admin")).await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.text);
     assert!(!answer.text.contains(&key), "{}", answer.text);
     assert!(!answer.text.contains(&hash), "{}", answer.text);
@@ -426,9 +386,9 @@ async fn the_listing_carries_no_key_and_no_hash() {
 
 #[tokio::test]
 async fn a_non_admin_token_cannot_manage_keys() {
-    let state = test_state().await;
-    let viewer = token("someone", "viewer");
-    let editor = token("someone", "editor");
+    let state = common::test_state().await;
+    let viewer = common::token("someone", "viewer");
+    let editor = common::token("someone", "editor");
 
     for bearer in [&viewer, &editor] {
         let listing = get_with_token(&state, "/api/v1/api-keys", bearer).await;
@@ -467,13 +427,13 @@ async fn a_non_admin_token_cannot_manage_keys() {
     }
 
     // and no key was minted along the way
-    let listing = get_with_token(&state, "/api/v1/api-keys", &token("root", "admin")).await;
+    let listing = get_with_token(&state, "/api/v1/api-keys", &common::token("root", "admin")).await;
     assert_eq!(listing.body["keys"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
 async fn an_unknown_permission_or_tier_is_refused_at_create() {
-    let state = test_state().await;
+    let state = common::test_state().await;
 
     for (body, expected) in [
         (
@@ -526,7 +486,7 @@ async fn an_unknown_permission_or_tier_is_refused_at_create() {
 
 #[tokio::test]
 async fn a_key_reads_its_own_usage_and_nobody_elses() {
-    let state = test_state().await;
+    let state = common::test_state().await;
     let mine = create_read_key(&state).await;
     let (status, other) = create_key(
         &state,
@@ -551,7 +511,12 @@ async fn a_key_reads_its_own_usage_and_nobody_elses() {
     assert_eq!(usage[0]["requests_per_second"], 10);
 
     // an admin sees every key, and the untouched one has no traffic
-    let all = get_with_token(&state, "/api/v1/api-keys/usage", &token("root", "admin")).await;
+    let all = get_with_token(
+        &state,
+        "/api/v1/api-keys/usage",
+        &common::token("root", "admin"),
+    )
+    .await;
     assert_eq!(all.status, StatusCode::OK, "{}", all.text);
     let usage = all.body["usage"].as_array().unwrap();
     assert_eq!(usage.len(), 2);
@@ -563,8 +528,12 @@ async fn a_key_reads_its_own_usage_and_nobody_elses() {
     assert_eq!(idle["resets_at"], serde_json::Value::Null);
 
     // a viewer is not allowed to read anyone's usage
-    let refused =
-        get_with_token(&state, "/api/v1/api-keys/usage", &token("nobody", "viewer")).await;
+    let refused = get_with_token(
+        &state,
+        "/api/v1/api-keys/usage",
+        &common::token("nobody", "viewer"),
+    )
+    .await;
     assert_eq!(refused.status, StatusCode::FORBIDDEN);
 }
 
@@ -573,9 +542,9 @@ async fn a_key_reads_its_own_usage_and_nobody_elses() {
 /// and a good key never inherits the token's reach.
 #[tokio::test]
 async fn a_key_is_the_credential_and_a_bearer_token_does_not_rescue_it() {
-    let state = test_state().await;
+    let state = common::test_state().await;
     let key = create_read_key(&state).await;
-    let admin = token("root", "admin");
+    let admin = common::token("root", "admin");
 
     let refused = send(
         &state,
@@ -607,7 +576,7 @@ async fn a_key_is_the_credential_and_a_bearer_token_does_not_rescue_it() {
 
 #[tokio::test]
 async fn public_reads_stay_public_with_no_credential_and_despite_a_bad_key() {
-    let state = test_state().await;
+    let state = common::test_state().await;
 
     for uri in ["/api/v1/terrain/layer.json", "/api/v1/tiles/sources"] {
         assert_eq!(
