@@ -1,13 +1,13 @@
 //! STAC catalog — SpatioTemporal Asset Catalog (OGC standard).
 //!
-//! The catalog root and the collection list describe what this server holds.
-//! Item search is a proxy: `TILETOPIA_STAC_API` names an upstream STAC API and
-//! [`search`] forwards bbox, datetime, collections and limit to its
-//! `/search`, answering the upstream FeatureCollection unchanged so every
-//! extension field a client reads survives. Unset, search refuses.
+//! The catalog root is this server's own. Everything under it is a proxy:
+//! `TILETOPIA_STAC_API` names an upstream STAC API, [`search`] forwards bbox,
+//! datetime, collections and limit to its `/search` and [`collections`] asks it
+//! for `/collections`, each answering the upstream body unchanged so every
+//! extension field a client reads survives. Unset, both refuse and the root
+//! advertises neither.
 
 use axum::http::StatusCode;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -26,41 +26,6 @@ pub struct StacCatalog {
     pub conforms_to: Vec<String>,
 }
 
-/// STAC Collection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StacCollection {
-    #[serde(rename = "type")]
-    pub collection_type: String, // "Collection"
-    pub id: String,
-    pub title: String,
-    pub description: String,
-    pub license: String,
-    pub extent: Extent,
-    pub providers: Vec<Provider>,
-    pub summaries: serde_json::Value,
-    pub links: Vec<StacLink>,
-    pub item_count: u32,
-}
-
-/// Spatial and temporal extent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Extent {
-    pub spatial: SpatialExtent,
-    pub temporal: TemporalExtent,
-}
-
-/// Spatial extent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpatialExtent {
-    pub bbox: Vec<[f64; 4]>,
-}
-
-/// Temporal extent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TemporalExtent {
-    pub interval: Vec<[Option<DateTime<Utc>>; 2]>,
-}
-
 /// STAC link.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StacLink {
@@ -71,156 +36,40 @@ pub struct StacLink {
     pub title: Option<String>,
 }
 
-/// Data provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Provider {
-    pub name: String,
-    pub roles: Vec<String>,
-    pub url: Option<String>,
-}
-
-/// Generate the TileTopia STAC catalog.
-pub fn root_catalog() -> StacCatalog {
+/// The catalog root. With no upstream configured neither the collection list
+/// nor item search can answer, so the root links to neither and claims only the
+/// core conformance class.
+///
+/// The collections class is never claimed: it asks for a `/collections/{id}`
+/// route this server does not have.
+pub fn root_catalog(has_upstream: bool) -> StacCatalog {
+    let link = |rel: &str, href: &str| StacLink {
+        rel: rel.into(),
+        href: href.into(),
+        link_type: Some("application/json".into()),
+        title: None,
+    };
+    let mut links = vec![link("self", "/api/v1/stac"), link("root", "/api/v1/stac")];
+    let mut conforms_to = vec!["https://api.stacspec.org/v1.0.0/core".to_string()];
+    if has_upstream {
+        links.push(link("data", "/api/v1/stac/collections"));
+        links.push(link("search", "/api/v1/stac/search"));
+        conforms_to.push("https://api.stacspec.org/v1.0.0/item-search".to_string());
+    }
     StacCatalog {
         catalog_type: "Catalog".into(),
         id: "tiletopia".into(),
         title: "TileTopia STAC Catalog".into(),
         description: "SpatioTemporal Asset Catalog for all managed geospatial datasets".into(),
         stac_version: "1.0.0".into(),
-        links: vec![
-            StacLink {
-                rel: "self".into(),
-                href: "/api/v1/stac".into(),
-                link_type: Some("application/json".into()),
-                title: None,
-            },
-            StacLink {
-                rel: "root".into(),
-                href: "/api/v1/stac".into(),
-                link_type: Some("application/json".into()),
-                title: None,
-            },
-            StacLink {
-                rel: "child".into(),
-                href: "/api/v1/stac/collections/point-clouds".into(),
-                link_type: Some("application/json".into()),
-                title: Some("Point Clouds".into()),
-            },
-            StacLink {
-                rel: "child".into(),
-                href: "/api/v1/stac/collections/terrain".into(),
-                link_type: Some("application/json".into()),
-                title: Some("Terrain DEMs".into()),
-            },
-            StacLink {
-                rel: "child".into(),
-                href: "/api/v1/stac/collections/bim-models".into(),
-                link_type: Some("application/json".into()),
-                title: Some("BIM Models".into()),
-            },
-        ],
-        conforms_to: vec![
-            "https://api.stacspec.org/v1.0.0/core".into(),
-            "https://api.stacspec.org/v1.0.0/collections".into(),
-            "https://api.stacspec.org/v1.0.0/item-search".into(),
-        ],
+        links,
+        conforms_to,
     }
 }
 
-/// Demo collections.
-pub fn collections() -> Vec<StacCollection> {
-    vec![
-        StacCollection {
-            collection_type: "Collection".into(),
-            id: "point-clouds".into(),
-            title: "Point Cloud Datasets".into(),
-            description: "LiDAR and photogrammetry point clouds managed in TileTopia".into(),
-            license: "proprietary".into(),
-            extent: Extent {
-                spatial: SpatialExtent {
-                    bbox: vec![[-180.0, -90.0, 180.0, 90.0]],
-                },
-                temporal: TemporalExtent {
-                    interval: vec![[Some(Utc::now() - chrono::Duration::days(365)), None]],
-                },
-            },
-            providers: vec![Provider {
-                name: "TileTopia".into(),
-                roles: vec!["host".into(), "processor".into()],
-                url: Some("https://tiletopia.dev".into()),
-            }],
-            summaries: serde_json::json!({
-                "pc:type": ["lidar", "photogrammetry"],
-                "pc:encoding": ["LAS", "LAZ"],
-                "pc:count": { "minimum": 1000000, "maximum": 500000000 }
-            }),
-            links: vec![],
-            item_count: 47,
-        },
-        StacCollection {
-            collection_type: "Collection".into(),
-            id: "terrain".into(),
-            title: "Terrain / DEM Datasets".into(),
-            description: "Digital Elevation Models and generated terrain tiles".into(),
-            license: "various".into(),
-            extent: Extent {
-                spatial: SpatialExtent {
-                    bbox: vec![[-180.0, -90.0, 180.0, 90.0]],
-                },
-                temporal: TemporalExtent {
-                    interval: vec![[Some(Utc::now() - chrono::Duration::days(730)), None]],
-                },
-            },
-            providers: vec![
-                Provider {
-                    name: "Copernicus".into(),
-                    roles: vec!["producer".into()],
-                    url: Some("https://spacedata.copernicus.eu".into()),
-                },
-                Provider {
-                    name: "TileTopia".into(),
-                    roles: vec!["host".into()],
-                    url: None,
-                },
-            ],
-            summaries: serde_json::json!({
-                "gsd": [30, 10, 1],
-                "eo:bands": [{"name": "elevation", "common_name": "dem"}]
-            }),
-            links: vec![],
-            item_count: 16,
-        },
-        StacCollection {
-            collection_type: "Collection".into(),
-            id: "bim-models".into(),
-            title: "BIM / 3D Models".into(),
-            description: "IFC, glTF, and CityGML models with construction metadata".into(),
-            license: "proprietary".into(),
-            extent: Extent {
-                spatial: SpatialExtent {
-                    bbox: vec![[-122.5, 37.7, -122.3, 37.9]],
-                },
-                temporal: TemporalExtent {
-                    interval: vec![[Some(Utc::now() - chrono::Duration::days(180)), None]],
-                },
-            },
-            providers: vec![Provider {
-                name: "TileTopia".into(),
-                roles: vec!["host".into()],
-                url: None,
-            }],
-            summaries: serde_json::json!({
-                "formats": ["IFC4", "glTF", "CityGML"],
-                "lod": [1, 2, 3, 4]
-            }),
-            links: vec![],
-            item_count: 23,
-        },
-    ]
-}
-
-/// Root of the STAC API item search is forwarded to, without a trailing slash,
-/// as in `https://example.org/stac/v1`. Unset, `/api/v1/stac/search` refuses.
+/// Root of the STAC API calls are forwarded to, without a trailing slash, as in
+/// `https://example.org/stac/v1`. Unset, `/api/v1/stac/search` and
+/// `/api/v1/stac/collections` refuse.
 pub const UPSTREAM_API_ENV: &str = "TILETOPIA_STAC_API";
 
 /// Items per page when the caller names no limit, matching the STAC API default.
@@ -326,9 +175,9 @@ fn parse_bbox(raw: &str) -> Result<[f64; 4], String> {
     Ok(bbox)
 }
 
-/// Why a search could not be answered.
+/// Why an upstream call could not be answered.
 #[derive(Debug, thiserror::Error)]
-pub enum SearchError {
+pub enum UpstreamError {
     #[error("no STAC upstream is configured, set {UPSTREAM_API_ENV} to a STAC API root")]
     NoUpstream,
     #[error("{0}")]
@@ -337,18 +186,22 @@ pub enum SearchError {
     Unreachable { api: String, reason: String },
     #[error("STAC upstream {api} answered {status}")]
     Rejected { api: String, status: u16 },
-    #[error("STAC upstream {api} answered no item collection: {reason}")]
-    Malformed { api: String, reason: String },
+    #[error("STAC upstream {api} answered no {expected}: {reason}")]
+    Malformed {
+        api: String,
+        expected: &'static str,
+        reason: String,
+    },
 }
 
-impl SearchError {
+impl UpstreamError {
     pub fn status(&self) -> StatusCode {
         match self {
-            SearchError::NoUpstream => StatusCode::SERVICE_UNAVAILABLE,
-            SearchError::BadRequest(_) => StatusCode::BAD_REQUEST,
-            SearchError::Unreachable { .. }
-            | SearchError::Rejected { .. }
-            | SearchError::Malformed { .. } => StatusCode::BAD_GATEWAY,
+            UpstreamError::NoUpstream => StatusCode::SERVICE_UNAVAILABLE,
+            UpstreamError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            UpstreamError::Unreachable { .. }
+            | UpstreamError::Rejected { .. }
+            | UpstreamError::Malformed { .. } => StatusCode::BAD_GATEWAY,
         }
     }
 }
@@ -372,47 +225,85 @@ fn client() -> &'static reqwest::Client {
     })
 }
 
-/// Forward an item search to the upstream STAC API and answer its item
-/// collection unchanged.
-pub async fn search(api: &str, params: &SearchParams) -> Result<serde_json::Value, SearchError> {
-    let unreachable = |reason: String| SearchError::Unreachable {
+/// One call this proxy makes on the upstream: what it asks for, and the array a
+/// client reads out of the answer.
+struct UpstreamCall {
+    /// Path under the API root, as in `/search`.
+    path: &'static str,
+    accept: &'static str,
+    array: &'static str,
+    /// What the answer is called in an error message.
+    expected: &'static str,
+}
+
+const ITEM_SEARCH: UpstreamCall = UpstreamCall {
+    path: "/search",
+    accept: "application/geo+json",
+    array: "features",
+    expected: "item collection",
+};
+
+const COLLECTION_LIST: UpstreamCall = UpstreamCall {
+    path: "/collections",
+    accept: "application/json",
+    array: "collections",
+    expected: "collection list",
+};
+
+async fn proxy(
+    api: &str,
+    call: &UpstreamCall,
+    query: &[(&'static str, String)],
+) -> Result<serde_json::Value, UpstreamError> {
+    let malformed = |reason: String| UpstreamError::Malformed {
         api: api.to_string(),
+        expected: call.expected,
         reason,
     };
     let response = client()
-        .get(format!("{api}/search"))
-        .query(&params.query())
-        .header(reqwest::header::ACCEPT, "application/geo+json")
+        .get(format!("{api}{}", call.path))
+        .query(query)
+        .header(reqwest::header::ACCEPT, call.accept)
         .send()
         .await
-        .map_err(|e| unreachable(e.to_string()))?;
+        .map_err(|e| UpstreamError::Unreachable {
+            api: api.to_string(),
+            reason: e.to_string(),
+        })?;
 
     let status = response.status();
     if !status.is_success() {
-        return Err(SearchError::Rejected {
+        return Err(UpstreamError::Rejected {
             api: api.to_string(),
             status: status.as_u16(),
         });
     }
 
-    let body: serde_json::Value = response.json().await.map_err(|e| SearchError::Malformed {
-        api: api.to_string(),
-        reason: e.to_string(),
-    })?;
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| malformed(e.to_string()))?;
 
     // a catalog behind a captive portal answers 200 and html, and passing that
-    // through as a FeatureCollection is what makes an empty map look like an
-    // empty search
+    // through is what makes an empty map look like an empty catalog
     if !body
-        .get("features")
+        .get(call.array)
         .is_some_and(serde_json::Value::is_array)
     {
-        return Err(SearchError::Malformed {
-            api: api.to_string(),
-            reason: "no features array".into(),
-        });
+        return Err(malformed(format!("no {} array", call.array)));
     }
     Ok(body)
+}
+
+/// Forward an item search to the upstream STAC API and answer its item
+/// collection unchanged.
+pub async fn search(api: &str, params: &SearchParams) -> Result<serde_json::Value, UpstreamError> {
+    proxy(api, &ITEM_SEARCH, &params.query()).await
+}
+
+/// Ask the upstream STAC API for its collections and answer the list unchanged.
+pub async fn collections(api: &str) -> Result<serde_json::Value, UpstreamError> {
+    proxy(api, &COLLECTION_LIST, &[]).await
 }
 
 #[cfg(test)]
@@ -423,8 +314,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
-    fn root_catalog_conforms_to_item_search() {
-        let catalog = root_catalog();
+    fn the_root_advertises_search_and_collections_with_an_upstream() {
+        let catalog = root_catalog(true);
         assert_eq!(catalog.stac_version, "1.0.0");
         assert!(
             catalog
@@ -432,13 +323,21 @@ mod tests {
                 .iter()
                 .any(|c| c.ends_with("/item-search"))
         );
+        let hrefs: Vec<&str> = catalog.links.iter().map(|l| l.href.as_str()).collect();
+        assert!(hrefs.contains(&"/api/v1/stac/collections"), "{hrefs:?}");
+        assert!(hrefs.contains(&"/api/v1/stac/search"), "{hrefs:?}");
     }
 
     #[test]
-    fn collections_are_listed() {
-        let colls = collections();
-        assert_eq!(colls.len(), 3);
-        assert!(colls.iter().any(|c| c.id == "point-clouds"));
+    fn the_root_advertises_only_core_without_an_upstream() {
+        let catalog = root_catalog(false);
+        assert_eq!(
+            catalog.conforms_to,
+            vec!["https://api.stacspec.org/v1.0.0/core".to_string()]
+        );
+        // no link to a list or a search that would refuse the click
+        let rels: Vec<&str> = catalog.links.iter().map(|l| l.rel.as_str()).collect();
+        assert_eq!(rels, vec!["self", "root"]);
     }
 
     #[test]
@@ -488,11 +387,11 @@ mod tests {
     #[test]
     fn no_upstream_configured_is_a_503() {
         assert_eq!(
-            SearchError::NoUpstream.status(),
+            UpstreamError::NoUpstream.status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert!(
-            SearchError::NoUpstream
+            UpstreamError::NoUpstream
                 .to_string()
                 .contains(UPSTREAM_API_ENV)
         );
@@ -502,12 +401,16 @@ mod tests {
     type SeenQueries = Arc<Mutex<Vec<String>>>;
 
     /// A STAC API on loopback that records the query string it was called with
-    /// and answers one item, so a search can be proven to reach the wire.
-    async fn upstream(body: serde_json::Value, status: StatusCode) -> (String, SeenQueries) {
+    /// and answers this body, so a call can be proven to reach the wire.
+    async fn upstream(
+        path: &'static str,
+        body: serde_json::Value,
+        status: StatusCode,
+    ) -> (String, SeenQueries) {
         let seen: SeenQueries = Arc::new(Mutex::new(Vec::new()));
         let recorder = Arc::clone(&seen);
         let app = Router::new().route(
-            "/search",
+            path,
             get(move |RawQuery(query): RawQuery| {
                 let recorder = Arc::clone(&recorder);
                 let body = body.clone();
@@ -536,9 +439,63 @@ mod tests {
         })
     }
 
+    fn two_collections() -> serde_json::Value {
+        serde_json::json!({
+            "collections": [
+                {
+                    "type": "Collection",
+                    "id": "sentinel-2-l2a",
+                    "stac_version": "1.0.0",
+                    "license": "proprietary",
+                    "summaries": { "eo:bands": [{ "name": "B04" }] }
+                },
+                { "type": "Collection", "id": "cop-dem-glo-30", "stac_version": "1.0.0" }
+            ],
+            "links": [{ "rel": "self", "href": "https://example.org/collections" }]
+        })
+    }
+
+    #[tokio::test]
+    async fn collections_answers_the_upstream_list_unchanged() {
+        let (api, seen) = upstream("/collections", two_collections(), StatusCode::OK).await;
+
+        let body = collections(&api).await.unwrap();
+
+        // no parameters, and the list reaches the caller whole: summaries,
+        // links and every id the upstream named
+        assert_eq!(seen.lock().unwrap()[0], "");
+        assert_eq!(body, two_collections());
+    }
+
+    #[tokio::test]
+    async fn an_upstream_collection_list_error_is_passed_on_as_a_bad_gateway() {
+        let (api, _) = upstream(
+            "/collections",
+            serde_json::json!({}),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+        let err = collections(&api).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_GATEWAY);
+        assert!(err.to_string().contains("500"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_upstream_that_answers_no_collection_list_is_not_passed_through() {
+        let (api, _) = upstream(
+            "/collections",
+            serde_json::json!({"message": "hello"}),
+            StatusCode::OK,
+        )
+        .await;
+        let err = collections(&api).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_GATEWAY);
+        assert!(err.to_string().contains("no collection list"), "{err}");
+    }
+
     #[tokio::test]
     async fn search_forwards_every_parameter_and_answers_the_upstream_collection() {
-        let (api, seen) = upstream(one_item_collection(), StatusCode::OK).await;
+        let (api, seen) = upstream("/search", one_item_collection(), StatusCode::OK).await;
         let params = SearchParams::from_query(
             Some("-122.5,37.7,-122.3,37.9"),
             Some("2026-08-01T00:00:00Z/.."),
@@ -566,7 +523,12 @@ mod tests {
 
     #[tokio::test]
     async fn an_upstream_error_is_passed_on_as_a_bad_gateway() {
-        let (api, _) = upstream(serde_json::json!({}), StatusCode::INTERNAL_SERVER_ERROR).await;
+        let (api, _) = upstream(
+            "/search",
+            serde_json::json!({}),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
         let err = search(&api, &SearchParams::default()).await.unwrap_err();
         assert_eq!(err.status(), StatusCode::BAD_GATEWAY);
         assert!(err.to_string().contains("500"), "{err}");
@@ -575,7 +537,12 @@ mod tests {
     #[tokio::test]
     async fn an_upstream_that_answers_no_items_is_not_passed_through() {
         // 200 and json, but not an item collection: an empty map would be a lie
-        let (api, _) = upstream(serde_json::json!({"message": "hello"}), StatusCode::OK).await;
+        let (api, _) = upstream(
+            "/search",
+            serde_json::json!({"message": "hello"}),
+            StatusCode::OK,
+        )
+        .await;
         let err = search(&api, &SearchParams::default()).await.unwrap_err();
         assert_eq!(err.status(), StatusCode::BAD_GATEWAY);
         assert!(err.to_string().contains("no item collection"), "{err}");

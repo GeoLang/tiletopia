@@ -701,8 +701,9 @@ async fn geocode_reverse(Query(params): Query<ReverseGeocodeQuery>) -> Json<serd
     }
 }
 
-/// Routes for STAC catalog.
-pub fn stac_routes() -> Router<Arc<AppState>> {
+/// Routes for STAC catalog. The root is this server's own, the collection list
+/// and item search are proxies of the configured upstream.
+pub fn stac_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
         .route("/api/v1/stac", get(stac_root))
         .route("/api/v1/stac/collections", get(stac_collections))
@@ -710,13 +711,34 @@ pub fn stac_routes() -> Router<Arc<AppState>> {
 }
 
 async fn stac_root() -> Json<serde_json::Value> {
-    let catalog = stac::root_catalog();
+    let catalog = stac::root_catalog(stac::upstream_api().is_some());
     Json(serde_json::json!(catalog))
 }
 
-async fn stac_collections() -> Json<serde_json::Value> {
-    let colls = stac::collections();
-    Json(serde_json::json!({ "collections": colls }))
+/// The upstream's answer, or its error as the status that error carries.
+fn stac_answer(what: &str, result: Result<serde_json::Value, stac::UpstreamError>) -> Response {
+    match result {
+        Ok(body) => Json(body).into_response(),
+        Err(e) => {
+            tracing::warn!("stac {what} refused: {e}");
+            (
+                e.status(),
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Ask the configured STAC upstream for its collections. With none configured
+/// this refuses, the way search does: a client cannot tell an invented
+/// collection from one a catalog holds.
+async fn stac_collections() -> Response {
+    let listed = async {
+        let api = stac::upstream_api().ok_or(stac::UpstreamError::NoUpstream)?;
+        stac::collections(&api).await
+    };
+    stac_answer("collections", listed.await)
 }
 
 #[derive(Deserialize)]
@@ -740,21 +762,11 @@ async fn stac_search(Query(params): Query<StacSearchQuery>) -> Response {
             params.collections.as_deref(),
             params.limit,
         )
-        .map_err(stac::SearchError::BadRequest)?;
-        let api = stac::upstream_api().ok_or(stac::SearchError::NoUpstream)?;
+        .map_err(stac::UpstreamError::BadRequest)?;
+        let api = stac::upstream_api().ok_or(stac::UpstreamError::NoUpstream)?;
         stac::search(&api, &params).await
     };
-    match searched.await {
-        Ok(body) => Json(body).into_response(),
-        Err(e) => {
-            tracing::warn!("stac search refused: {e}");
-            (
-                e.status(),
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response()
-        }
-    }
+    stac_answer("search", searched.await)
 }
 
 /// Routes for indoor mapping.
@@ -775,8 +787,8 @@ pub fn cog_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/cog/stats", get(cog_stats))
 }
 
-/// Read a pixel window out of a registered COG. The read opens the source and
-/// makes range requests, so it runs on a blocking thread.
+/// Read a pixel window out of a registered COG. The read makes range requests
+/// through the reader kept open on that source, so it runs on a blocking thread.
 async fn read_cog_window(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -802,14 +814,12 @@ async fn read_cog_window(
 }
 
 async fn list_cog_datasets(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let engine = &state.cog_engine;
-    let datasets = engine.list_datasets().to_vec();
+    let datasets = state.cog_engine.list_datasets();
     Json(serde_json::json!({ "datasets": datasets }))
 }
 
 async fn cog_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let engine = &state.cog_engine;
-    let datasets = engine.list_datasets();
+    let datasets = state.cog_engine.list_datasets();
     let total_bytes: u64 = datasets.iter().map(|d| d.file_size_bytes).sum();
     Json(serde_json::json!({
         "dataset_count": datasets.len(),
@@ -2995,5 +3005,70 @@ mod tests {
                     .content_type()
             );
         }
+    }
+
+    /// GET a path off the real STAC route table.
+    async fn stac_get(uri: &str) -> (StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+
+        let response = stac_routes::<()>()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    // nothing in this crate sets TILETOPIA_STAC_API, and it is read per request,
+    // so these routes see no upstream
+
+    #[tokio::test]
+    async fn stac_collections_refuses_with_no_upstream_configured_the_way_search_does() {
+        let (status, body) = stac_get("/api/v1/stac/collections").await;
+
+        // a list of invented collections is the bug: a client cannot tell one
+        // from a collection a catalog holds
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains(stac::UPSTREAM_API_ENV)
+        );
+        assert!(body.get("collections").is_none(), "{body}");
+
+        let (search_status, search_body) = stac_get("/api/v1/stac/search").await;
+        assert_eq!(status, search_status);
+        assert_eq!(body, search_body);
+    }
+
+    #[tokio::test]
+    async fn the_stac_root_advertises_nothing_it_cannot_answer() {
+        let (status, body) = stac_get("/api/v1/stac").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let rels: Vec<&str> = body["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|link| link["rel"].as_str().unwrap())
+            .collect();
+        assert_eq!(rels, ["self", "root"]);
+        let classes: Vec<&str> = body["conformsTo"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|class| class.as_str().unwrap())
+            .collect();
+        assert_eq!(classes, ["https://api.stacspec.org/v1.0.0/core"]);
     }
 }

@@ -78,7 +78,6 @@ Not implemented, whatever the code in the repository suggests:
 | DAE tiling | Neither the native tiler nor mago-3d-tiler takes DAE, so those jobs fail. Point clouds, meshes, vector files and IFC do tile |
 | Scheduler | `spawn()` has no callers. `create_job` ignores cron. `Scheduler::new()` seeds three fabricated jobs. No job has ever run |
 | Webhooks | HMAC delivery is written in `process_pending`, which nothing calls. Subscribe is read-only. Seeded with demo secrets |
-| STAC collections | The collection list is hardcoded beside the real `/stac/search` proxy |
 | Temporal versioning, CRDT, federation, CI/CD validation, multi-tenant isolation, leader election, priority queue / SLA, white-label, marketplace, geofencing, encryption, custom dashboards, AR/VR foveated rendering, cinematic flythrough, scripting, offline viewer export | `pub mod` lines with unit tests. No route, CLI or render loop calls them |
 
 The modules stay. Wiring or deleting them is a product call, recorded in `viewtopia/DESIGN_TODO.md`. Do not start from the scheduler or webhook facades.
@@ -253,24 +252,25 @@ dozen COGs over sequential range requests, which takes minutes today: only a
 tile already in the chunk cache comes back instantly. Treat the layer as batch
 until geoplumb reads composite items in parallel.
 
-### STAC search
+### STAC search and collections
 
 `GET /api/v1/stac/search` forwards an item search to an upstream STAC API and
 answers its item collection unchanged, so extension fields a client reads pass
 through. It takes `bbox=west,south,east,north` in degrees, `datetime` as a STAC
 instant or interval, `collections` as a comma-separated list, and `limit`, which
-is capped at 500 and defaults to 10.
+is capped at 500 and defaults to 10. `GET /api/v1/stac/collections` asks the same
+upstream for its `/collections` and answers that list unchanged.
 
 - `TILETOPIA_STAC_API` — upstream STAC API root, as in
   `https://example.org/stac/v1`. Any catalog with an item-search endpoint works,
   including the one `TILETOPIA_ANALYSIS_STAC_API` defaults to.
 
-Unset, the route answers 503 naming the variable. An upstream that cannot be
-reached or that refuses the search answers 502, and so does a 200 carrying no
-`features` array, since passing that through would draw an empty map over a
-catalog that is really there. `GET /api/v1/stac` and
-`GET /api/v1/stac/collections` still describe this server's own catalog and do
-not reach upstream.
+Unset, both routes answer 503 naming the variable. An upstream that cannot be
+reached or that refuses the call answers 502, and so does a 200 carrying no
+`features` or `collections` array, since passing that through would draw an empty
+map over a catalog that is really there. `GET /api/v1/stac` is this server's own
+catalog root, and with no upstream configured it links to neither route and
+claims only the core conformance class.
 
 ### COG reads
 

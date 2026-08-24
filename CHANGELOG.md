@@ -141,6 +141,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers real counts out of the rate limiter: today's requests, when they
   reset, and the tier's per-second and per-day budgets. A key sees its own row,
   an admin sees every key, anyone else is refused.
+- `GET /api/v1/stac/collections` asks the upstream named by `TILETOPIA_STAC_API`
+  for its `/collections` and answers that list unchanged, so a collection's
+  summaries, links and extension fields reach the client whole. Unset, it answers
+  the same 503 naming the variable that search answers. An upstream that cannot
+  be reached, that refuses the call, or that answers 200 with no `collections`
+  array is a 502.
 
 ### Removed
 
@@ -169,6 +175,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `require_editor` or `require_admin`, which read JWTs only, so neither
   permission reached a route: what a key may do is now exactly the four classes
   `route_access` lists.
+- The three fabricated STAC collections, point-clouds, terrain and bim-models,
+  with their item counts of 47, 16 and 23 and the extents, providers and
+  summaries around them. The catalog root's `child` links to them go too: there
+  was no `/stac/collections/{id}` route to follow, and the collections
+  conformance class goes with them for the same reason.
 - The rate limiter's upload-bytes and tile-request counters, and the
   `upload_bytes_per_day` and `tile_requests_per_day` limits beside them. Nothing
   fed them, and the tile reads they were meant to count are anonymous, so there
@@ -189,6 +200,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `AppState` carries an `api_key_rate_limiter` where it carried an
   `api_key_store`; the keys themselves live in the database. `auth_middleware` is
   layered with `from_fn_with_state` so it can reach both.
+- A COG window read goes through the `CogReader` its source was registered with
+  instead of reopening the source, so only startup pays for the header reads.
+  Each reader sits behind its own lock, and a local source holds its file handle
+  for as long as the server runs, one per entry in `TILETOPIA_COG_SOURCES`.
+- The STAC catalog root advertises only what the configured upstream lets it
+  answer. With `TILETOPIA_STAC_API` set it links to the collection list and the
+  search and claims item-search conformance; unset it carries `self` and `root`
+  and the core class alone, so nothing in it points at a route that would refuse.
 - A `CogDataset` is keyed by a string id rather than a per-boot UUID, and
   reports only what a COG header carries: `bounds` in the file's own CRS units
   replaces the old `bbox`, `band_count` replaces the per-band type, colour

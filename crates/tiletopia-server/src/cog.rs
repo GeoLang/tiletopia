@@ -6,12 +6,12 @@
 //! windowed `CogReader`: local files by seek, remote files by HTTP `Range`, so a
 //! window costs the internal tiles it touches rather than the whole file.
 //!
-//! Unset serves nothing. A reader is not kept open between requests, so a window
-//! pays for a few small header reads before its tiles.
+//! Unset serves nothing. The reader opened at startup stays open and every
+//! window reuses it, so no request pays for the header reads again.
 
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use terrano_core::{CogReader, Error as TerranoError, RangeRead};
 
 /// Hrefs to serve, comma separated, each a local path or an http(s) URL.
@@ -104,10 +104,32 @@ impl CogError {
     }
 }
 
+/// One registered COG: what its header declares, and the reader kept open on
+/// it. There is one entry per entry of `TILETOPIA_COG_SOURCES`, so a local
+/// source holds one file handle for as long as the server runs and a remote one
+/// holds parsed headers and no handle.
+///
+/// The reader is behind a lock because a window read needs `&mut` and fetches
+/// its tiles one range after another anyway.
+struct RegisteredCog {
+    dataset: CogDataset,
+    reader: Mutex<CogReader<RangeSource>>,
+}
+
 /// The COGs this server serves.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct CogEngine {
-    datasets: Vec<CogDataset>,
+    sources: Vec<RegisteredCog>,
+}
+
+// terrano's reader is not Debug, and what it was opened on is what a caller
+// wants printed anyway
+impl std::fmt::Debug for CogEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CogEngine")
+            .field("datasets", &self.list_datasets())
+            .finish()
+    }
 }
 
 impl CogEngine {
@@ -153,10 +175,10 @@ impl CogEngine {
                     "{SOURCES_ENV} names two sources called {id:?}, and a dataset id has to be unique"
                 ));
             }
-            match open_dataset(&id, href) {
-                Ok(dataset) => {
+            match open_source(&id, href) {
+                Ok(source) => {
                     tracing::info!("serving COG {id:?} from {href}");
-                    engine.datasets.push(dataset);
+                    engine.sources.push(source);
                 }
                 Err(e) if is_remote(href) => tracing::warn!("skipping COG source {href}: {e}"),
                 Err(e) => return Err(format!("{SOURCES_ENV}: {e}")),
@@ -165,26 +187,31 @@ impl CogEngine {
         Ok(engine)
     }
 
-    pub fn list_datasets(&self) -> &[CogDataset] {
-        &self.datasets
+    pub fn list_datasets(&self) -> Vec<&CogDataset> {
+        self.sources.iter().map(|s| &s.dataset).collect()
     }
 
     pub fn get_dataset(&self, id: &str) -> Option<&CogDataset> {
-        self.datasets.iter().find(|d| d.id == id)
+        self.source(id).map(|s| &s.dataset)
     }
 
-    /// Read a pixel window from one level of a registered dataset.
+    fn source(&self, id: &str) -> Option<&RegisteredCog> {
+        self.sources.iter().find(|s| s.dataset.id == id)
+    }
+
+    /// Read a pixel window from one level of a registered dataset, through the
+    /// reader that source was registered with.
     ///
-    /// This reopens the source and makes range requests, so it belongs on a
-    /// blocking thread.
+    /// This makes range requests, so it belongs on a blocking thread.
     pub fn read_window(
         &self,
         id: &str,
         request: &WindowRequest,
     ) -> Result<WindowResponse, CogError> {
-        let dataset = self
-            .get_dataset(id)
+        let source = self
+            .source(id)
             .ok_or_else(|| CogError::UnknownDataset { id: id.to_string() })?;
+        let dataset = &source.dataset;
         let pixels = request
             .cols
             .checked_mul(request.rows)
@@ -206,9 +233,12 @@ impl CogEngine {
             href: dataset.href.clone(),
             reason: e.to_string(),
         };
-        let mut source = RangeSource::open(&dataset.href)?;
-        let mut reader = CogReader::open(&mut source).map_err(read_failed)?;
-        let bands = reader
+        // every range read seeks from the start of the file, so a read that
+        // panicked left the reader nothing half-done
+        let bands = source
+            .reader
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
             .read_window_bands(
                 request.level,
                 request.col,
@@ -246,23 +276,23 @@ fn is_remote(href: &str) -> bool {
     href.starts_with("http://") || href.starts_with("https://")
 }
 
-/// Open an href and read the layout its header declares.
-fn open_dataset(id: &str, href: &str) -> Result<CogDataset, CogError> {
+/// Open an href, read the layout its header declares, and keep the reader.
+fn open_source(id: &str, href: &str) -> Result<RegisteredCog, CogError> {
     let open_failed = |reason: String| CogError::Open {
         href: href.to_string(),
         reason,
     };
-    let mut source = RangeSource::open(href)?;
-    // the reader borrows the source rather than taking it, so the size the range
-    // answers reported is still readable once the reader is done
-    let (levels, meta) = {
-        let reader = CogReader::open(&mut source).map_err(|e| open_failed(e.to_string()))?;
-        (reader.levels().to_vec(), reader.meta().clone())
-    };
-    let file_size_bytes = source.size().map_err(open_failed)?;
+    let (source, total_bytes) = RangeSource::open(href)?;
+    let reader = CogReader::open(source).map_err(|e| open_failed(e.to_string()))?;
+    let levels = reader.levels().to_vec();
+    let meta = reader.meta().clone();
+    let file_size_bytes = total_bytes
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .ok_or_else(|| open_failed("no Content-Range was seen".to_string()))?;
 
     let full = &levels[0];
-    Ok(CogDataset {
+    let dataset = CogDataset {
         id: id.to_string(),
         href: href.to_string(),
         file_size_bytes,
@@ -288,8 +318,18 @@ fn open_dataset(id: &str, href: &str) -> Result<CogDataset, CogError> {
                 pixel_size: [l.pixel_width, l.pixel_height],
             })
             .collect(),
+    };
+    Ok(RegisteredCog {
+        dataset,
+        reader: Mutex::new(reader),
     })
 }
+
+/// Size of a whole source, filled in as it becomes known: a local file's when it
+/// is opened, a remote one's out of the `Content-Range` of an answer. Shared,
+/// because the reader takes the source by value and registration still has to
+/// read the size.
+type TotalBytes = Arc<Mutex<Option<u64>>>;
 
 /// Byte-range access to a registered source: a local file by seek, a remote one
 /// by HTTP `Range` request.
@@ -297,39 +337,36 @@ enum RangeSource {
     File(std::fs::File),
     Http {
         url: String,
-        /// Total size, as the `Content-Range` of the last answer reported it.
-        total_bytes: Option<u64>,
+        total_bytes: TotalBytes,
     },
 }
 
 impl RangeSource {
-    fn open(href: &str) -> Result<Self, CogError> {
+    /// Open a source, answering it and the size it reports.
+    fn open(href: &str) -> Result<(Self, TotalBytes), CogError> {
+        let open_failed = |reason: String| CogError::Open {
+            href: href.to_string(),
+            reason,
+        };
         if is_remote(href) {
-            return Ok(RangeSource::Http {
+            let total_bytes: TotalBytes = Arc::new(Mutex::new(None));
+            let source = RangeSource::Http {
                 url: href.to_string(),
-                total_bytes: None,
-            });
+                total_bytes: Arc::clone(&total_bytes),
+            };
+            return Ok((source, total_bytes));
         }
-        std::fs::File::open(href)
-            .map(RangeSource::File)
-            .map_err(|e| CogError::Open {
-                href: href.to_string(),
-                reason: e.to_string(),
-            })
+        let file = std::fs::File::open(href).map_err(|e| open_failed(e.to_string()))?;
+        let size = file
+            .metadata()
+            .map_err(|e| open_failed(e.to_string()))?
+            .len();
+        Ok((RangeSource::File(file), Arc::new(Mutex::new(Some(size)))))
     }
+}
 
-    /// Size of the whole file. A remote source only knows it once it has read
-    /// something.
-    fn size(&self) -> Result<u64, String> {
-        match self {
-            RangeSource::File(file) => file.metadata().map(|m| m.len()).map_err(|e| e.to_string()),
-            RangeSource::Http { total_bytes, .. } => {
-                total_bytes.ok_or_else(|| "no Content-Range was seen".to_string())
-            }
-        }
-    }
-
-    fn fetch(&mut self, offset: u64, len: u64) -> Result<Vec<u8>, TerranoError> {
+impl RangeRead for RangeSource {
+    fn read_range(&mut self, offset: u64, len: u64) -> Result<Vec<u8>, TerranoError> {
         match self {
             RangeSource::File(file) => {
                 use std::io::{Read, Seek, SeekFrom};
@@ -340,18 +377,12 @@ impl RangeSource {
             }
             RangeSource::Http { url, total_bytes } => {
                 let (bytes, total) = fetch_range(url, offset, len)?;
-                *total_bytes = total.or(*total_bytes);
+                if let Some(total) = total {
+                    *total_bytes.lock().unwrap_or_else(PoisonError::into_inner) = Some(total);
+                }
                 Ok(bytes)
             }
         }
-    }
-}
-
-// the reader takes its source by value, so the impl is on the reference and
-// registration can still ask the source what it learned
-impl RangeRead for &mut RangeSource {
-    fn read_range(&mut self, offset: u64, len: u64) -> Result<Vec<u8>, TerranoError> {
-        self.fetch(offset, len)
     }
 }
 
@@ -698,6 +729,73 @@ mod tests {
             fetched < total,
             "fetched {fetched} bytes of a {total} byte file for a 4x4 window"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_window_reads_share_the_reader_opened_at_registration() {
+        let (bytes, raster) = sample_cog();
+        let (url, ranges) = serve_cog(bytes).await;
+
+        let engine = tokio::task::spawn_blocking({
+            let url = url.clone();
+            move || CogEngine::from_sources([url.as_str()])
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let request = WindowRequest {
+            level: 0,
+            col: 12,
+            row: 20,
+            cols: 4,
+            rows: 4,
+        };
+        let windows = tokio::task::spawn_blocking(move || {
+            [
+                engine.read_window("sample", &request).unwrap(),
+                engine.read_window("sample", &request).unwrap(),
+            ]
+        })
+        .await
+        .unwrap();
+
+        let pixels = raster.data();
+        let expected: Vec<f64> = (0..4)
+            .flat_map(|r| (0..4).map(move |c| pixels[(20 + r) * 96 + 12 + c]))
+            .collect();
+        assert_eq!(windows[0].bands[0], expected);
+        assert_eq!(windows[1].bands[0], expected);
+
+        // opening a reader reads the first 8 bytes, and that happened at
+        // registration: neither window reopened the file
+        let opens = ranges
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|&&range| range == (0, 8))
+            .count();
+        assert_eq!(opens, 1);
+    }
+
+    #[test]
+    fn a_second_local_window_read_answers_the_same_pixels() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = write_sample_cog(dir.path(), "ramp.tif");
+        let engine = CogEngine::from_sources([path.to_str().unwrap()]).unwrap();
+
+        let request = WindowRequest {
+            level: 1,
+            col: 4,
+            row: 6,
+            cols: 8,
+            rows: 8,
+        };
+        let first = engine.read_window("ramp", &request).unwrap();
+        let second = engine.read_window("ramp", &request).unwrap();
+        // the reader is reused, and the file handle it holds is left where the
+        // next read expects it
+        assert_eq!(first.bands, second.bands);
     }
 
     #[tokio::test(flavor = "multi_thread")]
