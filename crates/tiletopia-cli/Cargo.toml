@@ -16,7 +16,6 @@ martin = ["tiletopia-server/martin"]
 [dependencies]
 tiletopia-core = { path = "../tiletopia-core", default-features = false }
 tiletopia-server = { path = "../tiletopia-server" }
-tiletopia-worker = { path = "../tiletopia-worker" }
 tiletopia-ingest = { path = "../tiletopia-ingest" }
 tiletopia-terrain = { path = "../tiletopia-terrain" }
 tiletopia-store = { path = "../tiletopia-store" }

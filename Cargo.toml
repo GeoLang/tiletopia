@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/tiletopia-core",
     "crates/tiletopia-server",
-    "crates/tiletopia-worker",
     "crates/tiletopia-ingest",
     "crates/tiletopia-terrain",
     "crates/tiletopia-store",

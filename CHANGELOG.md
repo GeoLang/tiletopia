@@ -220,6 +220,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- The `tiletopia-worker` crate (2026-08-24). It was a second job runner over
+  `read_point_cloud`, `read_heightmap` and `read_mesh` that no code called:
+  `tiletopia-server` and `tiletopia-cli` listed it as a dependency and never
+  named `tiletopia_worker`. `JobQueue` does this work.
 - The inverse-variogram weighting that stood in for kriging. It solved no
   system, its weights were `sill / gamma` normalised to sum to one, its
   "variance" was those weights dotted with the same semivariances, and ordinary,

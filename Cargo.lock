@@ -9296,7 +9296,6 @@ dependencies = [
  "tiletopia-server",
  "tiletopia-store",
  "tiletopia-terrain",
- "tiletopia-worker",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -9404,7 +9403,6 @@ dependencies = [
  "tiletopia-ingest",
  "tiletopia-store",
  "tiletopia-terrain",
- "tiletopia-worker",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
@@ -9453,25 +9451,6 @@ dependencies = [
  "tiletopia-ingest",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "tiletopia-worker"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "rayon",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tiletopia-core",
- "tiletopia-ingest",
- "tiletopia-store",
- "tiletopia-terrain",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]

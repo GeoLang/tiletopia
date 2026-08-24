@@ -150,7 +150,6 @@ tiletopia/
 ├── crates/
 │   ├── tiletopia-core/       # Octree tiling engine, LOD, .pnts writer
 │   ├── tiletopia-server/     # Axum REST API, WebSocket, JWT auth
-│   ├── tiletopia-worker/     # Async tiling pipeline, job queue
 │   ├── tiletopia-ingest/     # LAS, GeoTIFF, glTF readers
 │   ├── tiletopia-terrain/    # Quantized mesh terrain generation
 │   ├── tiletopia-store/      # Storage: local + S3 + GCS + Azure
@@ -518,18 +517,17 @@ Price is not a capability. Ion is a hosted product. This is a binary you run.
 cargo test
 ```
 
-928 tests (903 Rust + 25 GUI) on default features, counted per crate:
+923 tests (898 Rust + 25 GUI) on default features, counted per crate:
 - Core (115): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
 - Server (701): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine (module only, no route reaches it), audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing (module only, no route reaches it), retention, encryption, dashboards, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduled jobs, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
 - Ingest (42): LAS/LAZ, E57, PLY, GeoTIFF, DTED, HGT, USGS DEM, glTF, OBJ, FBX, CityGML, CityJSON and IFC readers, CRS detection
 - Terrain (28): quantized mesh generation, global DEM terrain
 - Store (12): local filesystem CRUD, path traversal
-- Worker (5): background job processing
 
 GUI: `cd gui && pnpm run test:all` (10 vitest unit tests + 15 Playwright e2e).
 
 Feature-gated tests (`gpu`, `onnx`, `video`, `ml`, `martin`, `wasm-plugins`, cloud
-stores) are not in the 903 and need their feature enabled to run.
+stores) are not in the 898 and need their feature enabled to run.
 
 ---
 

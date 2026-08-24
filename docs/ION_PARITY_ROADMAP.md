@@ -39,8 +39,8 @@ Tiletopia has **real, working** code for:
 
 ### 1.4 Async job queue
 - **Current**: `job_queue::JobQueue` writes jobs to the `jobs` table and a background tokio task claims queued rows. Point cloud upload returns 201 with a `job_id` field, `POST /api/v1/assets/{id}/tile` returns 202 with the job record, and either id polls at `GET /api/v1/jobs/{id}`
-- **Need**: Progress between queued and done (it jumps 0.0 → 1.0), cancellation, requeue of rows left `running` by a crashed process, and more than one concurrent worker. `tiletopia-worker::run_job` is a second synchronous tiling path that no server route calls
-- **Work**: Progress callback through `tile_point_cloud`, notify instead of the 2 s poll, `cancelled` status, stale-job sweep at startup, fold or delete `tiletopia-worker`
+- **Need**: Progress between queued and done (it jumps 0.0 → 1.0), cancellation, requeue of rows left `running` by a crashed process, and more than one concurrent worker
+- **Work**: Progress callback through `tile_point_cloud`, notify instead of the 2 s poll, `cancelled` status, stale-job sweep at startup
 - **Impact**: Real progress bars and a queue that survives a restart mid-job
 
 ### 1.5 Wire TileStore into server

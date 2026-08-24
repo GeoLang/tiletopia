@@ -8,7 +8,6 @@ description = "REST API server — tile streaming, asset management, WebSocket r
 [dependencies]
 tiletopia-core = { path = "../tiletopia-core", default-features = false }
 tiletopia-terrain = { path = "../tiletopia-terrain" }
-tiletopia-worker = { path = "../tiletopia-worker" }
 tiletopia-store = { path = "../tiletopia-store" }
 tiletopia-ingest = { path = "../tiletopia-ingest" }
 itinera-core = { workspace = true }
