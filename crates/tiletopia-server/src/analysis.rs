@@ -422,8 +422,8 @@ fn day_of_year(date: &str) -> Option<u32> {
 ///
 /// Sun position: declination from day-of-year, altitude = 90 - |lat - decl|,
 /// azimuth due south. Surface incidence uses slope + aspect from terrano.
-/// terrano's aspect is 0=East measured counter-clockwise, so physical south is
-/// 270 degrees (verified empirically, not per its docstring).
+/// terrano's aspect is compass degrees (0=North, clockwise), so due south
+/// is 180.
 /// This is a clear-sky approximation: no atmospheric attenuation beyond a fixed
 /// 1000 W/m2 beam-normal constant, and no diffuse or shadow-casting term.
 fn solar_irradiance(dem: &Raster, latitude_deg: f64, day_of_year: u32) -> Raster {
@@ -434,7 +434,7 @@ fn solar_irradiance(dem: &Raster, latitude_deg: f64, day_of_year: u32) -> Raster
             .to_radians()
             .sin();
     let alt = (std::f64::consts::FRAC_PI_2 - (latitude_deg.to_radians() - decl).abs()).max(0.0);
-    let sun_az = 270.0_f64.to_radians(); // due south at noon in terrano aspect space
+    let sun_az = 180.0_f64.to_radians(); // due south at noon, compass degrees
     let beam = 1000.0;
     let mut out = Raster::new(dem.width(), dem.height(), dem.cell_size, dem.nodata);
     for row in 0..dem.height() {
@@ -877,8 +877,8 @@ mod tests {
     }
 
     fn facing_dem(south_facing: bool) -> Raster {
-        // south-facing: elevation high at north (row 0), low at south (terrano aspect 270).
-        // north-facing: the reverse (terrano aspect 90).
+        // south-facing: elevation high at north (row 0), low at south (compass aspect 180).
+        // north-facing: the reverse (compass aspect 0).
         let (w, h) = (5usize, 5usize);
         let mut data = vec![0.0; w * h];
         for row in 0..h {
@@ -913,8 +913,10 @@ mod tests {
         let doy = day_of_year("2026-06-21").unwrap();
         let south = solar_irradiance(&facing_dem(true), lat, doy);
         let north = solar_irradiance(&facing_dem(false), lat, doy);
+        // a wrong aspect convention makes the two sides equal up to rounding,
+        // so require a real gap
         assert!(
-            mean_irr(&south) > mean_irr(&north),
+            mean_irr(&south) > mean_irr(&north) + 100.0,
             "south {} vs north {}",
             mean_irr(&south),
             mean_irr(&north)
