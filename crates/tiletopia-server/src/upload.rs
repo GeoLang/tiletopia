@@ -169,12 +169,11 @@ async fn read_fields(
         let field_name = field.name().unwrap_or("").to_string();
         match field_name.as_str() {
             "name" => {
-                fields.name = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|_| bad_request("name is not text"))?,
-                );
+                let name = field
+                    .text()
+                    .await
+                    .map_err(|_| bad_request("name is not text"))?;
+                fields.name = Some(checked_file_name(&name)?);
             }
             "longitude" => fields.longitude = Some(read_degrees(field, "longitude").await?),
             "latitude" => fields.latitude = Some(read_degrees(field, "latitude").await?),
@@ -187,7 +186,7 @@ async fn read_fields(
                 );
             }
             "file" => {
-                let file_name = field.file_name().unwrap_or("upload").to_string();
+                let file_name = checked_file_name(field.file_name().unwrap_or("upload"))?;
                 if fields.name.is_none() {
                     fields.name = Some(file_name.clone());
                 }
@@ -202,6 +201,20 @@ async fn read_fields(
     }
 
     Ok(fields)
+}
+
+/// Both the multipart filename and the `name` field become a component of the
+/// path the upload writes to, so a name that is anything but one file name is
+/// refused rather than followed out of the asset directory.
+fn checked_file_name(name: &str) -> Result<String, UploadError> {
+    let is_one_component =
+        !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\']);
+    if !is_one_component {
+        return Err(bad_request(format!(
+            "{name}: a name is one file name, not a path"
+        )));
+    }
+    Ok(name.to_string())
 }
 
 /// Stream one multipart field to `path`. The whole point of an upload route is
@@ -329,6 +342,29 @@ mod tests {
     fn an_unknown_extension_is_no_asset_type_at_all() {
         assert_eq!(detect_asset_type("notes.txt"), None);
         assert_eq!(detect_asset_type("no-extension"), None);
+    }
+
+    #[test]
+    fn a_name_that_is_a_path_is_refused() {
+        for name in [
+            "../evil.glb",
+            "../../evil.glb",
+            "a/b.glb",
+            "..\\evil.glb",
+            "/etc/evil.glb",
+            "..",
+            ".",
+            "",
+        ] {
+            assert!(checked_file_name(name).is_err(), "{name} should be refused");
+        }
+    }
+
+    #[test]
+    fn a_plain_file_name_passes_through_unchanged() {
+        for name in ["site.glb", "a..b.glb", "...glb", "café tile.tif"] {
+            assert_eq!(checked_file_name(name).unwrap(), name);
+        }
     }
 
     #[test]

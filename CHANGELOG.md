@@ -52,7 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to disk and the route's body limit is the same 4 GiB the tileset upload
   takes, rather than axum's 2 MB default. A `name` field arriving after the
   file still names the asset, and a refused upload takes the streamed file with
-  it.
+  it. A multipart filename or `name` field that is a path rather than one file
+  name is refused with 400, so an upload can no longer write outside the
+  asset's own directory.
 - Martin tile responses carry `Content-Encoding` when the archive stores
   compressed tiles. tippecanoe writes gzipped MVT, and without the header no
   browser client could decode the body.

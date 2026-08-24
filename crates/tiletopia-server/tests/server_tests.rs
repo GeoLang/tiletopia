@@ -1801,6 +1801,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_traversing_filename_writes_nothing_outside_the_asset_directory() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "traversal-file-editor@example.com").await;
+
+        let (status, _) = upload_parts(
+            &state,
+            Some(&editor_token),
+            &[("file", Some("../../evil.glb"), b"glTF-bytes".to_vec())],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // input/../.. walks out of the asset directory into the data directory
+        assert!(!state.data_dir.join("evil.glb").exists());
+        assert!(asset_directories(&state).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_traversing_name_field_cannot_rename_out_of_the_asset_directory() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "traversal-name-editor@example.com").await;
+
+        let (status, _) = upload_parts(
+            &state,
+            Some(&editor_token),
+            &[
+                ("file", Some("sent.glb"), b"glTF-bytes".to_vec()),
+                ("name", None, b"../../evil.glb".to_vec()),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!state.data_dir.join("evil.glb").exists());
+        assert!(asset_directories(&state).is_empty());
+    }
+
+    #[tokio::test]
     async fn a_refused_extension_leaves_no_streamed_file_behind() {
         let state = test_state().await;
         let editor_token = bootstrap_editor(&state, "bad-extension-editor@example.com").await;
