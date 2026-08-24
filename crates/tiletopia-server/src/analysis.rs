@@ -270,7 +270,7 @@ fn cell_meters(bbox: [f64; 4], width: usize, height: usize) -> (f64, f64) {
 ///
 /// A box no DEM covers at all is a gap rather than a raster of holes: every op
 /// here would answer an empty image, which reads as flat ground.
-fn dem_over_bbox(
+pub(crate) fn dem_over_bbox(
     field: &ElevationField,
     bbox: [f64; 4],
     width: usize,

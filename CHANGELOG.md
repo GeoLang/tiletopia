@@ -57,6 +57,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cells. Duplicate sample locations are refused rather than averaged: two
   samples at one place give the matrix two identical rows, and averaging them
   would answer a question the caller did not ask.
+- Static maps answer image bytes (2026-08-24). `GET
+  /api/v1/static-map/render?bbox=west,south,east,north&width=&height=&format=`
+  and a `POST` of the same request as JSON, which also carries `markers` and
+  `overlays`, answer the rendered image with its own content type: `image/png`,
+  `image/jpeg`, `image/webp`, `image/svg+xml` or `application/pdf`. The route
+  used to answer JSON metadata with the image bytes marked `#[serde(skip)]`, so
+  no caller ever received an image; WebP was encoded as JPEG and PDF and SVG as
+  PNG. WebP is now the image crate's lossless WebP, the SVG is real markup with
+  a `<circle>` per marker, a `<polyline>` or `<polygon>` per overlay and the base
+  layer as a base64 PNG data URI so nothing is fetched from outside the
+  document, and the PDF is a one-page document placing the render as a
+  `/DCTDecode` image over the whole MediaBox, sized in points from the pixel
+  dimensions and the `dpi`.
+- The static map base layer is a hillshade of the DEM this server holds, from
+  the same stores the elevation and analysis routes read. Where no DEM covers
+  the box the image gets a flat background instead, and the
+  `x-static-map-base-layer` response header says which of the two it is. A DEM
+  that should be readable but is not is a 503, as elsewhere. The shading is
+  computed on at most 1024 DEM samples per side and scaled onto the canvas, so a
+  4096-pixel image costs the same DEM reads as a 1024-pixel one.
+- Polygon overlays are filled, by an even-odd scanline over `fill_color` blended
+  at `fill_opacity`, and `stroke_width` is drawn as a stroke that wide rather
+  than a one-pixel line. `GET /api/v1/static-map/formats` lists the five formats
+  with the content type each answers and the two base layers, and validation is
+  honest: a side of 0 or past 4096, a format nothing encodes, a box that is off
+  the globe or covers no ground, a `dpi` outside 72, 150 and 300, a colour that
+  is not six hex digits, and a request naming neither a box nor a center are
+  each a 400 saying what was wrong.
 
 - `GET /api/v1/stac/search` searches a real catalog. `TILETOPIA_STAC_API` names
   an upstream STAC API root and the route forwards `bbox`, `datetime`,
@@ -86,6 +114,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "variance" was those weights dotted with the same semivariances, and ordinary,
   simple and universal kriging all ran it, so `known_mean` was ignored and no
   drift was ever fitted.
+- The five static map basemap styles, Streets, Satellite, Terrain, Dark and
+  Blueprint. Nothing rendered them: they were a list of names carrying a fresh
+  UUID per call, and the image was a flat grey buffer. The request's `style_id`
+  goes with them, along with the `StaticMapResult` metadata shape, its per-call
+  UUID and its `render_time_ms`, since the route answers bytes now. A marker's
+  `label` is gone because no format drew text, and the `Circle` overlay type
+  because it drew the same open path as a polyline.
 - The demo STAC item and the two demo COG datasets, along with the local TIFF
   tag parsing that terrano's reader replaces. `/api/v1/stac/search` and
   `/api/v1/cog/datasets` answered invented data before this, and the COG tile

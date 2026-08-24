@@ -5,7 +5,7 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, Query, State},
+    extract::{FromRef, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
@@ -1070,10 +1070,30 @@ async fn map_match_demo() -> Json<serde_json::Value> {
     Json(serde_json::json!(result))
 }
 
+/// The DEM stores a static map draws its base layer from. Lets the render
+/// handlers take the sources as their state, so a test can drive the real route
+/// table with nothing but a DEM behind it.
+impl FromRef<Arc<AppState>> for elevation::ElevationSources {
+    fn from_ref(state: &Arc<AppState>) -> Self {
+        state.elevation_sources()
+    }
+}
+
+/// Names the base layer a render was drawn on, so a caller can tell a hillshade
+/// from the flat fallback without asking a second question.
+const BASE_LAYER_HEADER: &str = "x-static-map-base-layer";
+
 /// Routes for static map rendering.
-pub fn static_map_routes() -> Router<Arc<AppState>> {
+pub fn static_map_routes<S>() -> Router<S>
+where
+    elevation::ElevationSources: FromRef<S>,
+    S: Clone + Send + Sync + 'static,
+{
     Router::new()
-        .route("/api/v1/static-map/render", get(static_map_render))
+        .route(
+            "/api/v1/static-map/render",
+            get(static_map_render_query).post(static_map_render_body),
+        )
         .route("/api/v1/static-map/formats", get(static_map_formats))
 }
 
@@ -1082,50 +1102,133 @@ struct StaticMapQuery {
     lon: Option<f64>,
     lat: Option<f64>,
     zoom: Option<f64>,
+    /// `west,south,east,north` in degrees.
+    bbox: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
     format: Option<String>,
+    dpi: Option<u32>,
 }
 
-async fn static_map_render(Query(params): Query<StaticMapQuery>) -> Json<serde_json::Value> {
-    let format = match params.format.as_deref() {
-        Some("jpeg") | Some("jpg") => static_map::ImageFormat::Jpeg,
-        Some("webp") => static_map::ImageFormat::Webp,
-        Some("svg") => static_map::ImageFormat::Svg,
-        Some("pdf") => static_map::ImageFormat::Pdf,
-        _ => static_map::ImageFormat::Png,
-    };
-    let req = static_map::StaticMapRequest {
-        center: Some([
-            params.lon.unwrap_or(-122.4194),
-            params.lat.unwrap_or(37.7749),
-        ]),
-        zoom: Some(params.zoom.unwrap_or(14.0)),
-        bbox: None,
-        width: params.width.unwrap_or(800),
-        height: params.height.unwrap_or(600),
-        format,
-        style_id: None,
-        markers: vec![],
-        overlays: vec![],
-        dpi: 72,
-    };
-    let result = static_map::render_static_map(&req);
-    Json(serde_json::json!({
-        "width": result.width,
-        "height": result.height,
-        "format": format!("{:?}", result.format),
-        "size_bytes": result.size_bytes,
-        "bbox": result.bbox,
-        "render_time_ms": result.render_time_ms
-    }))
+/// Default image size for a GET that names no dimensions.
+const STATIC_MAP_DEFAULT_SIZE: (u32, u32) = (800, 600);
+
+impl StaticMapQuery {
+    fn into_request(self) -> Result<static_map::StaticMapRequest, Refusal> {
+        let format = match self.format.as_deref() {
+            None => static_map::ImageFormat::Png,
+            Some(name) => static_map::ImageFormat::from_name(name).ok_or_else(|| {
+                let known: Vec<&str> = static_map::FORMATS.iter().map(|f| f.name()).collect();
+                refuse_request(format!(
+                    "format {name:?} is not rendered, expected one of {}",
+                    known.join(", ")
+                ))
+            })?,
+        };
+        let bbox = match self.bbox.as_deref() {
+            None => None,
+            Some(text) => Some(parse_bbox(text)?),
+        };
+        let center = match (self.lon, self.lat) {
+            (Some(lon), Some(lat)) => Some([lon, lat]),
+            (None, None) => None,
+            _ => {
+                return Err(refuse_request(
+                    "give both lon and lat, or neither".to_string(),
+                ));
+            }
+        };
+        let (default_width, default_height) = STATIC_MAP_DEFAULT_SIZE;
+        Ok(static_map::StaticMapRequest {
+            center,
+            zoom: self.zoom,
+            bbox,
+            width: self.width.unwrap_or(default_width),
+            height: self.height.unwrap_or(default_height),
+            format,
+            markers: Vec::new(),
+            overlays: Vec::new(),
+            dpi: self.dpi.unwrap_or(static_map::ALLOWED_DPI[0]),
+        })
+    }
+}
+
+fn parse_bbox(text: &str) -> Result<[f64; 4], Refusal> {
+    let mut corners = [0.0; 4];
+    let mut parts = text.split(',');
+    for corner in corners.iter_mut() {
+        let part = parts
+            .next()
+            .and_then(|p| p.trim().parse::<f64>().ok())
+            .ok_or_else(|| {
+                refuse_request(format!(
+                    "bbox {text:?} must be west,south,east,north in degrees"
+                ))
+            })?;
+        *corner = part;
+    }
+    if parts.next().is_some() {
+        return Err(refuse_request(format!(
+            "bbox {text:?} has more than four numbers"
+        )));
+    }
+    Ok(corners)
+}
+
+async fn static_map_render_query(
+    State(sources): State<elevation::ElevationSources>,
+    Query(params): Query<StaticMapQuery>,
+) -> Result<Response, Refusal> {
+    static_map_answer(&sources, params.into_request()?).await
+}
+
+async fn static_map_render_body(
+    State(sources): State<elevation::ElevationSources>,
+    Json(request): Json<static_map::StaticMapRequest>,
+) -> Result<Response, Refusal> {
+    static_map_answer(&sources, request).await
+}
+
+/// The image bytes, with the content type of the format and the base layer the
+/// render was drawn on.
+async fn static_map_answer(
+    sources: &elevation::ElevationSources,
+    request: static_map::StaticMapRequest,
+) -> Result<Response, Refusal> {
+    let plan = request.plan().map_err(refuse_request)?;
+    let render = static_map::render(&plan, sources).await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, plan.format.content_type()),
+            (
+                axum::http::HeaderName::from_static(BASE_LAYER_HEADER),
+                render.base_layer.name(),
+            ),
+        ],
+        render.bytes,
+    )
+        .into_response())
 }
 
 async fn static_map_formats() -> Json<serde_json::Value> {
+    let formats: Vec<serde_json::Value> = static_map::FORMATS
+        .iter()
+        .map(|format| {
+            serde_json::json!({ "format": format.name(), "content_type": format.content_type() })
+        })
+        .collect();
+    let base_layers: Vec<serde_json::Value> = static_map::BASE_LAYERS
+        .iter()
+        .map(|layer| {
+            serde_json::json!({ "base_layer": layer.name(), "drawn_from": layer.drawn_from() })
+        })
+        .collect();
     Json(serde_json::json!({
-        "formats": ["PNG", "JPEG", "WebP", "SVG", "PDF"],
-        "max_width": 4096,
-        "max_height": 4096
+        "formats": formats,
+        "base_layers": base_layers,
+        "max_width": static_map::MAX_IMAGE_SIDE,
+        "max_height": static_map::MAX_IMAGE_SIDE,
+        "dpi": static_map::ALLOWED_DPI
     }))
 }
 
@@ -2247,5 +2350,437 @@ mod tests {
             demo["demo"].as_str().unwrap().contains("invented"),
             "the demo payload must say it is a demo: {body}"
         );
+    }
+
+    // ── static map ──────────────────────────────────────────────────────────
+
+    /// The box the static-map cases render, well inside [`ridged_dem`]'s grid so
+    /// every pixel has elevation to shade.
+    const STATIC_MAP_BBOX: &str = "7.0,43.0,7.5,43.5";
+
+    /// Elevation sources with no grid loaded, no staged tile and no SRTM
+    /// fallback, so a render falls back to the plain base layer.
+    fn no_dem() -> elevation::ElevationSources {
+        elevation::ElevationSources::new(
+            Arc::new(elevation::DemStore::new()),
+            std::env::temp_dir().join("tiletopia_static_map_no_dem"),
+            String::new(),
+        )
+    }
+
+    /// Sources holding one DEM grid: ground climbing north with north-south
+    /// ridges across it, so a hillshade over it is not one flat tone. It reaches
+    /// well past [`STATIC_MAP_BBOX`], since a grid interpolates only inside its
+    /// own cells.
+    fn ridged_dem() -> elevation::ElevationSources {
+        const SIDE: usize = 61;
+        let bounds = [6.0, 42.0, 9.0, 45.0];
+        let step = (bounds[2] - bounds[0]) / (SIDE - 1) as f64;
+        let mut elevations = vec![0.0; SIDE * SIDE];
+        for row in 0..SIDE {
+            for column in 0..SIDE {
+                let latitude = bounds[3] - row as f64 * step;
+                let longitude = bounds[0] + column as f64 * step;
+                elevations[row * SIDE + column] = 1000.0 * (latitude - bounds[1])
+                    + 400.0 * (4.0 * std::f64::consts::PI * (longitude - bounds[0])).sin();
+            }
+        }
+        let mut store = elevation::DemStore::new();
+        store.add_grid(elevation::DemGrid {
+            bounds,
+            width: SIDE,
+            height: SIDE,
+            cell_size_x: step,
+            cell_size_y: step,
+            elevations,
+            nodata: -9999.0,
+        });
+        elevation::ElevationSources::new(
+            Arc::new(store),
+            std::env::temp_dir().join("tiletopia_static_map_grid"),
+            String::new(),
+        )
+    }
+
+    struct StaticMapAnswer {
+        status: StatusCode,
+        content_type: String,
+        base_layer: String,
+        bytes: Vec<u8>,
+    }
+
+    impl StaticMapAnswer {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.bytes).into_owned()
+        }
+
+        /// The rendered raster, decoded back into pixels.
+        fn image(&self) -> image::RgbImage {
+            image::load_from_memory(&self.bytes)
+                .expect("the answer decodes as an image")
+                .to_rgb8()
+        }
+    }
+
+    /// Drive the real static-map route table with these sources behind it.
+    async fn static_map(
+        sources: elevation::ElevationSources,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> StaticMapAnswer {
+        use tower::ServiceExt;
+
+        let mut request = axum::http::Request::builder().method(method).uri(uri);
+        if body.is_some() {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+        }
+        let response = static_map_routes::<elevation::ElevationSources>()
+            .with_state(sources)
+            .oneshot(
+                request
+                    .body(
+                        body.map(|b| Body::from(b.to_string()))
+                            .unwrap_or_else(Body::empty),
+                    )
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let header_text = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .map(|value| value.to_str().unwrap().to_string())
+                .unwrap_or_default()
+        };
+        let content_type = header_text("content-type");
+        let base_layer = header_text(BASE_LAYER_HEADER);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        StaticMapAnswer {
+            status,
+            content_type,
+            base_layer,
+            bytes,
+        }
+    }
+
+    /// A GET render of [`STATIC_MAP_BBOX`] in this format, over no DEM.
+    async fn static_map_get(format: &str) -> StaticMapAnswer {
+        static_map(
+            no_dem(),
+            "GET",
+            &format!("/api/v1/static-map/render?bbox={STATIC_MAP_BBOX}&width=64&height=64&format={format}"),
+            None,
+        )
+        .await
+    }
+
+    fn static_map_body(format: &str, extra: serde_json::Value) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "bbox": [7.0, 43.0, 8.0, 44.0],
+            "width": 101,
+            "height": 101,
+            "format": format
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        body
+    }
+
+    #[tokio::test]
+    async fn static_map_png_answers_png_bytes() {
+        let answer = static_map_get("png").await;
+
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.text());
+        assert_eq!(answer.content_type, "image/png");
+        assert_eq!(
+            &answer.bytes[0..8],
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        );
+        assert_eq!(answer.image().dimensions(), (64, 64));
+    }
+
+    #[tokio::test]
+    async fn static_map_jpeg_answers_jpeg_bytes() {
+        let answer = static_map_get("jpeg").await;
+
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.text());
+        assert_eq!(answer.content_type, "image/jpeg");
+        assert_eq!(&answer.bytes[0..3], &[0xFF, 0xD8, 0xFF]);
+        assert_eq!(answer.image().dimensions(), (64, 64));
+    }
+
+    #[tokio::test]
+    async fn static_map_webp_answers_a_riff_webp_container() {
+        let answer = static_map_get("webp").await;
+
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.text());
+        assert_eq!(answer.content_type, "image/webp");
+        assert_eq!(&answer.bytes[0..4], b"RIFF");
+        assert_eq!(&answer.bytes[8..12], b"WEBP");
+        assert_eq!(answer.image().dimensions(), (64, 64));
+    }
+
+    #[tokio::test]
+    async fn static_map_pdf_embeds_the_render_as_a_jpeg_xobject() {
+        let answer = static_map_get("pdf").await;
+
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.text());
+        assert_eq!(answer.content_type, "application/pdf");
+        let text = String::from_utf8_lossy(&answer.bytes);
+        assert!(text.starts_with("%PDF-"), "{}", &text[..16]);
+        assert!(text.contains("/DCTDecode"));
+        assert!(text.contains("/MediaBox [0 0 64.00 64.00]"));
+        assert!(text.trim_end().ends_with("%%EOF"));
+    }
+
+    #[tokio::test]
+    async fn static_map_svg_is_vector_markup_with_a_circle_per_marker() {
+        use quick_xml::events::Event;
+        use quick_xml::reader::Reader;
+
+        let answer = static_map(
+            no_dem(),
+            "POST",
+            "/api/v1/static-map/render",
+            Some(static_map_body(
+                "svg",
+                serde_json::json!({
+                    "markers": [
+                        { "longitude": 7.25, "latitude": 43.25, "color": "#ff0000", "size": "small" },
+                        { "longitude": 7.75, "latitude": 43.75, "color": "#00ff00", "size": "large" }
+                    ],
+                    "overlays": [{
+                        "overlay_type": "polygon",
+                        "coordinates": [[7.2, 43.2], [7.8, 43.2], [7.8, 43.8]],
+                        "stroke_color": "#0000ff",
+                        "stroke_width": 2.0,
+                        "fill_color": "#cccccc",
+                        "fill_opacity": 0.5
+                    }]
+                }),
+            )),
+        )
+        .await;
+
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.text());
+        assert_eq!(answer.content_type, "image/svg+xml");
+
+        let markup = answer.text();
+        let mut reader = Reader::from_str(&markup);
+        let mut elements: Vec<String> = Vec::new();
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Eof => break,
+                Event::Start(element) | Event::Empty(element) => {
+                    elements.push(String::from_utf8_lossy(element.name().as_ref()).into_owned())
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(elements.iter().filter(|name| *name == "circle").count(), 2);
+        assert_eq!(elements.iter().filter(|name| *name == "polygon").count(), 1);
+        assert!(elements.contains(&"svg".to_string()));
+        // the base layer travels inside the document, nothing is fetched
+        assert!(markup.contains("href=\"data:image/png;base64,"));
+        assert!(!markup.contains("href=\"http"), "{markup:.400}");
+    }
+
+    #[tokio::test]
+    async fn static_map_without_dem_coverage_draws_a_plain_background() {
+        let answer = static_map_get("png").await;
+
+        assert_eq!(answer.base_layer, "plain");
+        let image = answer.image();
+        let first = image.get_pixel(0, 0);
+        assert!(
+            image.pixels().all(|pixel| pixel == first),
+            "a plain base layer is one tone"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_map_over_a_staged_dem_shades_the_terrain() {
+        let answer = static_map(
+            ridged_dem(),
+            "GET",
+            &format!("/api/v1/static-map/render?bbox={STATIC_MAP_BBOX}&width=64&height=64"),
+            None,
+        )
+        .await;
+
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.text());
+        assert_eq!(answer.base_layer, "hillshade");
+        let image = answer.image();
+        let tones: std::collections::BTreeSet<u8> =
+            image.pixels().map(|pixel| pixel.0[0]).collect();
+        assert!(
+            tones.len() > 8,
+            "a hillshade of ridged ground has many tones, got {tones:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_map_draws_a_marker_at_the_requested_point() {
+        let answer = static_map(
+            no_dem(),
+            "POST",
+            "/api/v1/static-map/render",
+            Some(static_map_body(
+                "png",
+                serde_json::json!({
+                    "markers": [
+                        { "longitude": 7.5, "latitude": 43.5, "color": "#ff0000", "size": "small" }
+                    ]
+                }),
+            )),
+        )
+        .await;
+
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.text());
+        let image = answer.image();
+        // the box centre on a 101 pixel side
+        assert_eq!(image.get_pixel(50, 50).0, [255, 0, 0]);
+        assert_ne!(image.get_pixel(0, 0).0, [255, 0, 0]);
+    }
+
+    #[tokio::test]
+    async fn static_map_fills_a_polygon_overlay() {
+        let answer = static_map(
+            no_dem(),
+            "POST",
+            "/api/v1/static-map/render",
+            Some(static_map_body(
+                "png",
+                serde_json::json!({
+                    "overlays": [{
+                        "overlay_type": "polygon",
+                        "coordinates": [[7.2, 43.2], [7.8, 43.2], [7.8, 43.8], [7.2, 43.8]],
+                        "stroke_color": "#000000",
+                        "stroke_width": 1.0,
+                        "fill_color": "#00ff00",
+                        "fill_opacity": 1.0
+                    }]
+                }),
+            )),
+        )
+        .await;
+
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.text());
+        let image = answer.image();
+        assert_eq!(image.get_pixel(50, 50).0, [0, 255, 0]);
+        assert_ne!(image.get_pixel(2, 2).0, [0, 255, 0]);
+    }
+
+    #[tokio::test]
+    async fn static_map_refuses_dimensions_past_the_cap() {
+        for size in ["width=0&height=64", "width=8000&height=64"] {
+            let answer = static_map(
+                no_dem(),
+                "GET",
+                &format!("/api/v1/static-map/render?bbox={STATIC_MAP_BBOX}&{size}"),
+                None,
+            )
+            .await;
+
+            assert_eq!(
+                answer.status,
+                StatusCode::BAD_REQUEST,
+                "{size} was accepted"
+            );
+            assert!(
+                answer.text().contains("width and height"),
+                "{}",
+                answer.text()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn static_map_refuses_a_format_nothing_encodes() {
+        let answer = static_map(
+            no_dem(),
+            "GET",
+            &format!("/api/v1/static-map/render?bbox={STATIC_MAP_BBOX}&format=tiff"),
+            None,
+        )
+        .await;
+
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+        assert!(answer.text().contains("tiff"), "{}", answer.text());
+    }
+
+    #[tokio::test]
+    async fn static_map_refuses_a_box_that_covers_no_ground() {
+        for bbox in ["8.0,43.0,7.0,44.0", "7.0,43.0,181.0,44.0", "7.0,43,8.0"] {
+            let answer = static_map(
+                no_dem(),
+                "GET",
+                &format!("/api/v1/static-map/render?bbox={bbox}&width=64&height=64"),
+                None,
+            )
+            .await;
+
+            assert_eq!(
+                answer.status,
+                StatusCode::BAD_REQUEST,
+                "bbox {bbox} was accepted"
+            );
+            assert!(answer.text().contains("bbox"), "{}", answer.text());
+        }
+    }
+
+    #[tokio::test]
+    async fn static_map_refuses_a_render_of_nowhere_in_particular() {
+        let answer = static_map(no_dem(), "GET", "/api/v1/static-map/render", None).await;
+
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+        assert!(answer.text().contains("bbox"), "{}", answer.text());
+    }
+
+    #[tokio::test]
+    async fn static_map_formats_lists_only_what_it_encodes() {
+        let answer = static_map(no_dem(), "GET", "/api/v1/static-map/formats", None).await;
+
+        assert_eq!(answer.status, StatusCode::OK);
+        let listed: serde_json::Value = serde_json::from_slice(&answer.bytes).unwrap();
+        let names: Vec<&str> = listed["formats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["format"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["png", "jpeg", "webp", "svg", "pdf"]);
+
+        let base_layers: Vec<&str> = listed["base_layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["base_layer"].as_str().unwrap())
+            .collect();
+        assert_eq!(base_layers, ["hillshade", "plain"]);
+        assert!(
+            listed.get("styles").is_none(),
+            "there are no basemap styles to list: {listed}"
+        );
+
+        // every listed format is one a render actually answers
+        for name in names {
+            let answer = static_map_get(name).await;
+            assert_eq!(answer.status, StatusCode::OK, "{name}: {}", answer.text());
+            assert_eq!(
+                answer.content_type,
+                static_map::ImageFormat::from_name(name)
+                    .unwrap()
+                    .content_type()
+            );
+        }
     }
 }
