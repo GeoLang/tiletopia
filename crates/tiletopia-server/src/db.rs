@@ -1,4 +1,5 @@
-//! Persistent SQLite database for assets, jobs, and API keys.
+//! Persistent SQLite database for assets, jobs, API keys and webhook
+//! subscriptions.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use uuid::Uuid;
 
 use crate::api_keys::{ApiKey, Permission, RateLimitTier};
 use crate::users::{Organization, User, UserRole};
+use crate::webhooks::{WebhookEvent, WebhookSubscription};
 use crate::{Asset, AssetStatus, AssetType};
 
 /// Where a model with local coordinates sits on the globe, and which CRS its
@@ -114,6 +116,8 @@ const JOB_COLUMNS: &str = "id, asset_id, status, progress, input_path, output_fo
 const TILESET_COLUMNS: &str = "id, name, status, source_id, object_key, original_filename, layer_name, argv, size_bytes, created_at, started_at, built_at, error, owner_id";
 
 const API_KEY_COLUMNS: &str = "id, name, key_hash, permissions, tier, created_by, created_at, expires_at, last_used_at, revoked";
+
+const WEBHOOK_COLUMNS: &str = "id, url, events, secret, created_by, active, created_at";
 
 fn enum_to_str<T: Serialize>(val: &T) -> String {
     serde_json::to_string(val)
@@ -299,6 +303,20 @@ impl Database {
                 expires_at TEXT,
                 last_used_at TEXT,
                 revoked INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+                id TEXT PRIMARY KEY,
+                url TEXT NOT NULL,
+                events TEXT NOT NULL DEFAULT '[]',
+                secret TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
             )",
         )
         .execute(&self.pool)
@@ -845,6 +863,92 @@ impl Database {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    // -- Webhook subscriptions --
+
+    pub async fn create_webhook_subscription(
+        &self,
+        subscription: &WebhookSubscription,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO webhook_subscriptions \
+             (id, url, events, secret, created_by, active, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(subscription.id.to_string())
+        .bind(&subscription.url)
+        .bind(webhook_events_to_json(&subscription.events))
+        .bind(&subscription.secret)
+        .bind(&subscription.created_by)
+        .bind(subscription.active as i64)
+        .bind(subscription.created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Every subscription the server holds, newest first. Both the listing route
+    /// and the delivery queue read this and filter it themselves: the route by
+    /// who is asking, the queue by event type.
+    pub async fn list_webhook_subscriptions(
+        &self,
+    ) -> Result<Vec<WebhookSubscription>, sqlx::Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {WEBHOOK_COLUMNS} FROM webhook_subscriptions ORDER BY created_at DESC"
+        ))
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.iter().map(row_to_webhook_subscription).collect())
+    }
+
+    pub async fn get_webhook_subscription(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<WebhookSubscription>, sqlx::Error> {
+        let row = sqlx::query(&format!(
+            "SELECT {WEBHOOK_COLUMNS} FROM webhook_subscriptions WHERE id = ?"
+        ))
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|row| row_to_webhook_subscription(&row)))
+    }
+
+    /// Point a subscription somewhere else, or at other events, or pause it. The
+    /// secret and the creator are not writable: a rotation is a new
+    /// subscription, and the creator is what scopes the listing. Returns the rows
+    /// changed.
+    pub async fn update_webhook_subscription(
+        &self,
+        id: Uuid,
+        url: &str,
+        events: &[WebhookEvent],
+        active: bool,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE webhook_subscriptions SET url = ?, events = ?, active = ? WHERE id = ?",
+        )
+        .bind(url)
+        .bind(webhook_events_to_json(events))
+        .bind(active as i64)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    pub async fn delete_webhook_subscription(&self, id: Uuid) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM webhook_subscriptions WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected())
     }
 
     // -- User management --
@@ -1459,6 +1563,33 @@ fn row_to_api_key(row: &sqlx::sqlite::SqliteRow) -> ApiKey {
         last_used_at: parse_optional_datetime(last_used_at),
         expires_at: parse_optional_datetime(expires_at),
         revoked: row.get::<i64, _>("revoked") != 0,
+    }
+}
+
+fn webhook_events_to_json(events: &[WebhookEvent]) -> String {
+    let names: Vec<&str> = events.iter().map(|event| event.name()).collect();
+    serde_json::to_string(&names).unwrap_or_else(|_| "[]".into())
+}
+
+/// A stored subscription. An unreadable event name is dropped, so a hand-edited
+/// row can only ever fire for fewer events than it says.
+fn row_to_webhook_subscription(row: &sqlx::sqlite::SqliteRow) -> WebhookSubscription {
+    let id_str: String = row.get("id");
+    let events_str: String = row.get("events");
+    let created_at_str: String = row.get("created_at");
+    let event_names: Vec<String> = serde_json::from_str(&events_str).unwrap_or_default();
+
+    WebhookSubscription {
+        id: Uuid::parse_str(&id_str).unwrap_or_default(),
+        url: row.get("url"),
+        events: event_names
+            .iter()
+            .filter_map(|name| WebhookEvent::from_name(name))
+            .collect(),
+        secret: row.get("secret"),
+        created_by: row.get("created_by"),
+        active: row.get::<i64, _>("active") != 0,
+        created_at: parse_datetime(&created_at_str),
     }
 }
 

@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Webhooks deliver real events (2026-08-24). One module is left: `webhook.rs`,
+  whose signature was a `DefaultHasher` of the payload and the secret, is
+  deleted, and `webhooks.rs` now holds subscriptions, delivery and the event
+  set. The two demo subscriptions carrying `whsec_demo_secret_1` and `_2` are
+  gone with it, as is the eight-name event list nothing emitted.
+- `POST /api/v1/webhooks` registers a target URL and an event set and answers a
+  freshly generated `whsec_` secret once, the way `POST /api/v1/api-keys` mints a
+  key; a caller cannot supply one. `PUT /api/v1/webhooks/{id}` points a
+  subscription elsewhere or pauses it and `DELETE /api/v1/webhooks/{id}` removes
+  it. All three take the Edit tier, and a subscription somebody else created is a
+  404 rather than a 403. `GET /api/v1/webhooks` answers the caller's own
+  subscriptions and an admin every one, out of the new
+  `webhook_subscriptions` table, and `GET /api/v1/webhooks/deliveries` answers
+  the deliveries this process has finished attempting. No listing carries the
+  signing secret. An unknown event name, an empty event list, a URL that is not
+  absolute http or https, and a URL carrying a username or password are each a
+  400 naming what was wrong.
+- `GET /api/v1/webhooks/events` lists the three events the server emits:
+  `job.completed` and `job.failed` when a tiling job settles in
+  `JobQueue::finish`, and `asset.deleted` when the delete route removes an
+  asset. The payload carries the job or asset it is about. A test subscribes to
+  every advertised event, drives all three paths for real, and fails if the
+  advertised set and the delivered set differ.
+- A delivery worker starts with the server and posts each queued event with
+  `X-TileTopia-Signature: sha256=<hex>`, the HMAC-SHA256 of the request body
+  under the subscription's secret, plus the event name and a delivery id that
+  stays the same across retries. A failed attempt is retried three times, 30
+  seconds apart and doubling, then dropped; the failure stays in the delivery
+  history the route reports. Deliveries do not follow redirects, so a receiver
+  cannot bounce a signed request at another host, and the response body is never
+  read. Subscriptions are in SQLite, pending deliveries are in process memory: a
+  restart drops what has not gone out.
 - Geoprocessing operates on real geometry (2026-08-24). Buffer, union,
   intersection and difference are the `geo` crate's offset and boolean overlay,
   so a buffered square gains rounded corners with the area of the analytic

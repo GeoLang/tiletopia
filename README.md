@@ -64,6 +64,13 @@ A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields 
 - TileJSON 3.0.0
 - Tile cache with TTL
 
+### Webhooks
+- `POST /api/v1/webhooks` registers a target URL and the events it wants, and answers a `whsec_` signing secret once. Editor or admin, and a subscription belongs to whoever created it
+- Three events, which are the three the server emits: `job.completed` and `job.failed` when a tiling job settles, `asset.deleted` when an asset is removed
+- Every delivery carries `X-TileTopia-Signature: sha256=<hex>`, the HMAC-SHA256 of the request body under that secret
+- A failed delivery is retried three times, 30 seconds apart and doubling, then dropped. `GET /api/v1/webhooks/deliveries` reports what happened
+- Pending deliveries live in the process: a restart drops what has not gone out yet
+
 ### Cesium Ion Compatibility
 - Ion REST compatibility for asset id and endpoint resolution
 - A terrain asset in that layer resolves to a prebuilt bundle named after the asset id
@@ -77,10 +84,9 @@ Not implemented, whatever the code in the repository suggests:
 |-----------|-------|
 | DAE tiling | Neither the native tiler nor mago-3d-tiler takes DAE, so those jobs fail. Point clouds, meshes, vector files and IFC do tile |
 | Scheduler | `spawn()` has no callers. `create_job` ignores cron. `Scheduler::new()` seeds three fabricated jobs. No job has ever run |
-| Webhooks | HMAC delivery is written in `process_pending`, which nothing calls. Subscribe is read-only. Seeded with demo secrets |
 | Temporal versioning, CRDT, federation, CI/CD validation, multi-tenant isolation, leader election, priority queue / SLA, white-label, marketplace, geofencing, encryption, custom dashboards, AR/VR foveated rendering, cinematic flythrough, scripting, offline viewer export | `pub mod` lines with unit tests. No route, CLI or render loop calls them |
 
-The modules stay. Wiring or deleting them is a product call, recorded in `viewtopia/DESIGN_TODO.md`. Do not start from the scheduler or webhook facades.
+The modules stay. Wiring or deleting them is a product call, recorded in `viewtopia/DESIGN_TODO.md`. Do not start from the scheduler facade.
 
 ---
 
@@ -406,7 +412,7 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `GET` | `/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` | Hillshade, slope or ndvi tiles, rendered on demand |
 | `GET` | `/metrics` | Prometheus metrics |
 
-Other `/api/v1/*` geospatial and premium routes are mounted and real: STAC search proxies `TILETOPIA_STAC_API`, COG windows read `TILETOPIA_COG_SOURCES` over range requests, static maps render the DEM to PNG/JPEG/WebP/SVG/PDF, geostatistics solves kriging systems, geoprocessing runs geo's boolean overlays, and API keys authenticate read routes (`X-Api-Key`, admin-minted, hashed at rest). The facades left are in the table above: scheduler and webhook workers have no callers, and the pub-mod-only modules have no routes.
+Other `/api/v1/*` geospatial and premium routes are mounted and real: STAC search proxies `TILETOPIA_STAC_API`, COG windows read `TILETOPIA_COG_SOURCES` over range requests, static maps render the DEM to PNG/JPEG/WebP/SVG/PDF, geostatistics solves kriging systems, geoprocessing runs geo's boolean overlays, webhooks deliver HMAC-signed job and asset events, and API keys authenticate read routes (`X-Api-Key`, admin-minted, hashed at rest). The facades left are in the table above: the scheduler worker has no callers, and the pub-mod-only modules have no routes.
 
 Tile data reads are anonymous: `tileset.json`, `tiles/{path}`, everything under
 `/api/v1/terrain/` (the generated quantized-mesh routes, the prebuilt bundles
@@ -494,7 +500,7 @@ What this server actually does, against Cesium Ion as a hosted 3D Tiles host.
 | Local filesystem storage | yes | no |
 | Open source | AGPL-3.0 | proprietary |
 | 3D model / BIM / vector tiling | yes | yes |
-| Temporal versioning, webhooks, scheduler | no | mixed |
+| Temporal versioning, scheduler | no | mixed |
 
 Price is not a capability. Ion is a hosted product. This is a binary you run.
 

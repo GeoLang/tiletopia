@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::AssetType;
 use crate::db::{Database, JobRecord, JobStatus, ModelPlacement};
+use crate::webhooks::{WebhookEvent, WebhookQueue};
 use tiletopia_store::TileStore;
 
 /// 3D Tiles version asked of the external tiler.
@@ -25,6 +26,7 @@ pub struct JobQueue {
     #[allow(dead_code)]
     store: Arc<dyn TileStore>,
     external_tiler_jar: Option<PathBuf>,
+    webhooks: Arc<WebhookQueue>,
 }
 
 impl JobQueue {
@@ -33,12 +35,14 @@ impl JobQueue {
         data_dir: PathBuf,
         store: Arc<dyn TileStore>,
         external_tiler_jar: Option<PathBuf>,
+        webhooks: Arc<WebhookQueue>,
     ) -> Self {
         Self {
             db,
             data_dir,
             store,
             external_tiler_jar,
+            webhooks,
         }
     }
 
@@ -126,22 +130,39 @@ impl JobQueue {
         self.finish(job, outcome).await;
     }
 
+    /// Write the settled job back and tell the subscribers. Every tiling job
+    /// ends here, so this is the one place the two job events are emitted from.
     async fn finish(&self, mut job: JobRecord, outcome: Result<u64, String>) {
         job.completed_at = Some(chrono::Utc::now());
-        match outcome {
+        let event = match outcome {
             Ok(tiles) => {
                 job.status = JobStatus::Done;
                 job.progress = 1.0;
                 job.tiles_written = tiles;
                 tracing::info!("Job {} completed: {} tiles", job.id, tiles);
+                WebhookEvent::JobCompleted
             }
             Err(error) => {
                 job.status = JobStatus::Failed;
                 tracing::error!("Job {} failed: {}", job.id, error);
                 job.error = Some(error);
+                WebhookEvent::JobFailed
             }
-        }
+        };
         let _ = self.db.update_job(&job).await;
+
+        self.webhooks
+            .emit(
+                event,
+                serde_json::json!({
+                    "job_id": job.id,
+                    "asset_id": job.asset_id,
+                    "completed_at": job.completed_at,
+                    "tiles_written": job.tiles_written,
+                    "error": job.error,
+                }),
+            )
+            .await;
     }
 
     /// Submit a new job.

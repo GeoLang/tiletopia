@@ -22,7 +22,7 @@ use crate::{
     map_matching, map_tiles, metering, mobile, multispectral, osm_buildings, routing,
     scan_registration, scheduler, stac, static_map, terrain_analysis,
     terrain_api::Refusal,
-    users,
+    users, webhooks,
 };
 
 /// API key management, and per-key usage.
@@ -65,14 +65,14 @@ const MAX_KEY_NAME_CHARS: usize = 120;
 
 /// A refusal carrying the reason as JSON, the same shape the credential path in
 /// [`crate::auth`] answers with.
-fn refuse_key_request(status: StatusCode, reason: String) -> Refusal {
+fn refuse_as_json(status: StatusCode, reason: String) -> Refusal {
     (status, Json(serde_json::json!({ "error": reason })))
         .into_response()
         .into()
 }
 
-fn bad_key_request(reason: String) -> Refusal {
-    refuse_key_request(StatusCode::BAD_REQUEST, reason)
+fn bad_json_request(reason: String) -> Refusal {
+    refuse_as_json(StatusCode::BAD_REQUEST, reason)
 }
 
 /// The request as the fields a key is built from, or the refusal. Unknown
@@ -83,7 +83,7 @@ fn parse_create_request(
 ) -> Result<(Vec<api_keys::Permission>, api_keys::RateLimitTier), Refusal> {
     let name = request.name.trim();
     if name.is_empty() || name.chars().count() > MAX_KEY_NAME_CHARS {
-        return Err(bad_key_request(format!(
+        return Err(bad_json_request(format!(
             "name must be 1 to {MAX_KEY_NAME_CHARS} characters"
         )));
     }
@@ -93,7 +93,7 @@ fn parse_create_request(
             .iter()
             .map(|tier| tier.name())
             .collect();
-        bad_key_request(format!(
+        bad_json_request(format!(
             "unknown tier '{}' (expected {})",
             request.tier,
             known.join(", ")
@@ -101,7 +101,7 @@ fn parse_create_request(
     })?;
 
     if request.permissions.is_empty() {
-        return Err(bad_key_request(
+        return Err(bad_json_request(
             "a key needs at least one permission".into(),
         ));
     }
@@ -112,7 +112,7 @@ fn parse_create_request(
                 .iter()
                 .map(|permission| permission.name())
                 .collect();
-            bad_key_request(format!(
+            bad_json_request(format!(
                 "unknown permission '{name}' (expected {})",
                 known.join(", ")
             ))
@@ -125,7 +125,7 @@ fn parse_create_request(
     if let Some(expires_at) = request.expires_at
         && expires_at <= chrono::Utc::now()
     {
-        return Err(bad_key_request("expires_at is in the past".into()));
+        return Err(bad_json_request("expires_at is in the past".into()));
     }
 
     Ok((permissions, tier))
@@ -197,10 +197,7 @@ async fn revoke_api_key_route(
         .await
         .map_err(|error| write_failed("revoking", error))?;
     if revoked == 0 {
-        return Err(refuse_key_request(
-            StatusCode::NOT_FOUND,
-            "no such key".into(),
-        ));
+        return Err(refuse_as_json(StatusCode::NOT_FOUND, "no such key".into()));
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -217,17 +214,14 @@ async fn delete_api_key_route(
         .await
         .map_err(|error| write_failed("deleting", error))?;
     if deleted == 0 {
-        return Err(refuse_key_request(
-            StatusCode::NOT_FOUND,
-            "no such key".into(),
-        ));
+        return Err(refuse_as_json(StatusCode::NOT_FOUND, "no such key".into()));
     }
     Ok(StatusCode::NO_CONTENT)
 }
 
 fn read_failed(error: sqlx::Error) -> Refusal {
     tracing::error!("reading api keys failed: {error}");
-    refuse_key_request(
+    refuse_as_json(
         StatusCode::INTERNAL_SERVER_ERROR,
         "reading the keys failed".into(),
     )
@@ -235,7 +229,7 @@ fn read_failed(error: sqlx::Error) -> Refusal {
 
 fn write_failed(what: &str, error: sqlx::Error) -> Refusal {
     tracing::error!("{what} an api key failed: {error}");
-    refuse_key_request(
+    refuse_as_json(
         StatusCode::INTERNAL_SERVER_ERROR,
         format!("{what} the key failed"),
     )
@@ -255,10 +249,7 @@ async fn get_usage(
             let claims = users::claims_from_headers(&headers)
                 .map_err(|status| Refusal::from(status.into_response()))?;
             if !claims.can_admin() {
-                return Err(refuse_key_request(
-                    StatusCode::FORBIDDEN,
-                    "admin only".into(),
-                ));
+                return Err(refuse_as_json(StatusCode::FORBIDDEN, "admin only".into()));
             }
             state.db.list_api_keys().await.map_err(read_failed)?
         }
@@ -306,30 +297,276 @@ async fn pricing_tiers() -> Json<serde_json::Value> {
     }))
 }
 
-/// Routes for webhooks.
+/// Webhook subscriptions and their delivery history.
+///
+/// Creating, changing and deleting one is a write, so it takes the Edit tier
+/// like an asset write, plus the creator-or-admin check the handlers do. The
+/// reads need a valid token because the answer depends on who is asking: a
+/// caller sees its own subscriptions and their deliveries, an admin sees every
+/// one, the same stance the asset listing takes.
 pub fn webhook_routes() -> Router<Arc<AppState>> {
+    let write_routes = Router::new()
+        .route("/api/v1/webhooks", post(create_webhook))
+        .route(
+            "/api/v1/webhooks/{id}",
+            axum::routing::put(update_webhook).delete(delete_webhook),
+        )
+        .layer(middleware::from_fn(users::require_editor));
+
     Router::new()
         .route("/api/v1/webhooks", get(list_webhooks))
         .route("/api/v1/webhooks/events", get(webhook_event_types))
+        .route("/api/v1/webhooks/deliveries", get(list_webhook_deliveries))
+        .merge(write_routes)
 }
 
-async fn list_webhooks(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let engine = &state.webhook_engine;
-    let subs = engine.list_subscriptions(None).await;
-    Json(serde_json::json!({
-        "subscriptions": subs,
-        "pending_deliveries": engine.pending_count().await
-    }))
+/// Longest target URL accepted, so a URL cannot be used as bulk storage.
+const MAX_WEBHOOK_URL_CHARS: usize = 2048;
+
+/// Finished deliveries the history route answers with.
+const WEBHOOK_DELIVERY_PAGE: usize = 50;
+
+#[derive(Debug, Deserialize)]
+pub struct WebhookSubscriptionRequest {
+    pub url: String,
+    pub events: Vec<String>,
+    /// Absent means active. A paused subscription keeps its row and its secret
+    /// and is skipped by delivery.
+    #[serde(default = "active_by_default")]
+    pub active: bool,
 }
 
+fn active_by_default() -> bool {
+    true
+}
+
+/// The request as the fields a subscription is built from, or the refusal. An
+/// unknown event name is named back to the caller, never dropped: a subscription
+/// that silently wants fewer events than it asked for is worse than a refusal.
+fn parse_webhook_request(
+    request: &WebhookSubscriptionRequest,
+) -> Result<(String, Vec<webhooks::WebhookEvent>), Refusal> {
+    let url = request.url.trim();
+    if url.chars().count() > MAX_WEBHOOK_URL_CHARS {
+        return Err(bad_json_request(format!(
+            "url must be at most {MAX_WEBHOOK_URL_CHARS} characters"
+        )));
+    }
+    // absolute http(s) only: a relative target has nothing to send to, and any
+    // other scheme would ask reqwest for something it does not speak. Userinfo
+    // is refused so a subscription cannot smuggle credentials into the request
+    // this server makes.
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|error| bad_json_request(format!("url is not a URL: {error}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(bad_json_request(format!(
+            "url scheme '{}' is not http or https",
+            parsed.scheme()
+        )));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(bad_json_request(
+            "url must not carry a username or password".into(),
+        ));
+    }
+
+    if request.events.is_empty() {
+        return Err(bad_json_request(
+            "a subscription needs at least one event".into(),
+        ));
+    }
+    let mut events = Vec::new();
+    for name in &request.events {
+        let event = webhooks::WebhookEvent::from_name(name).ok_or_else(|| {
+            let known: Vec<&str> = webhooks::WebhookEvent::ALL
+                .iter()
+                .map(|event| event.name())
+                .collect();
+            bad_json_request(format!(
+                "unknown event '{name}' (expected {})",
+                known.join(", ")
+            ))
+        })?;
+        if !events.contains(&event) {
+            events.push(event);
+        }
+    }
+
+    Ok((url.to_string(), events))
+}
+
+fn webhook_read_failed(error: sqlx::Error) -> Refusal {
+    tracing::error!("reading webhook subscriptions failed: {error}");
+    refuse_as_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "reading the subscriptions failed".into(),
+    )
+}
+
+fn webhook_write_failed(what: &str, error: sqlx::Error) -> Refusal {
+    tracing::error!("{what} a webhook subscription failed: {error}");
+    refuse_as_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("{what} the subscription failed"),
+    )
+}
+
+/// The subscription this caller may change, or the refusal. Behind
+/// `require_editor`, so a valid token is always present and only the per-row
+/// creator-or-admin rule is left to check. A subscription somebody else created
+/// is a 404, not a 403: an editor has no business learning that it exists.
+async fn writable_subscription(
+    state: &AppState,
+    id: Uuid,
+    headers: &HeaderMap,
+) -> Result<webhooks::WebhookSubscription, Refusal> {
+    let claims = users::claims_from_headers(headers)
+        .map_err(|status| Refusal::from(status.into_response()))?;
+    let subscription = state
+        .db
+        .get_webhook_subscription(id)
+        .await
+        .map_err(webhook_read_failed)?
+        .filter(|subscription| claims.can_admin() || subscription.created_by == claims.sub)
+        .ok_or_else(|| refuse_as_json(StatusCode::NOT_FOUND, "no such subscription".into()))?;
+    Ok(subscription)
+}
+
+/// Register a subscription. The secret is in this response and nowhere else:
+/// signing needs it, so it is stored as it is, but no listing hands it back and
+/// a lost one is replaced by a new subscription.
+async fn create_webhook(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<WebhookSubscriptionRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), Refusal> {
+    // behind require_editor, so a valid token is always present
+    let created_by = users::claims_from_headers(&headers)
+        .map_err(|status| Refusal::from(status.into_response()))?
+        .sub;
+    let (url, events) = parse_webhook_request(&request)?;
+
+    let subscription = webhooks::WebhookSubscription {
+        id: Uuid::new_v4(),
+        url,
+        events,
+        secret: webhooks::generate_secret(),
+        created_by,
+        active: request.active,
+        created_at: chrono::Utc::now(),
+    };
+    state
+        .db
+        .create_webhook_subscription(&subscription)
+        .await
+        .map_err(|error| webhook_write_failed("storing", error))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "secret": subscription.secret,
+            "warning": "this is the only time the secret is shown",
+            "signature_header": webhooks::SIGNATURE_HEADER,
+            "subscription": subscription,
+        })),
+    ))
+}
+
+async fn update_webhook(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<WebhookSubscriptionRequest>,
+) -> Result<Json<serde_json::Value>, Refusal> {
+    let mut subscription = writable_subscription(&state, id, &headers).await?;
+    let (url, events) = parse_webhook_request(&request)?;
+
+    state
+        .db
+        .update_webhook_subscription(id, &url, &events, request.active)
+        .await
+        .map_err(|error| webhook_write_failed("updating", error))?;
+
+    subscription.url = url;
+    subscription.events = events;
+    subscription.active = request.active;
+    Ok(Json(serde_json::json!({ "subscription": subscription })))
+}
+
+async fn delete_webhook(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<StatusCode, Refusal> {
+    writable_subscription(&state, id, &headers).await?;
+    state
+        .db
+        .delete_webhook_subscription(id)
+        .await
+        .map_err(|error| webhook_write_failed("deleting", error))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The caller's subscriptions, or every one for an admin, and how many
+/// deliveries are waiting for an attempt.
+async fn list_webhooks(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Refusal> {
+    let claims = users::claims_from_headers(&headers)
+        .map_err(|status| Refusal::from(status.into_response()))?;
+    let subscriptions: Vec<webhooks::WebhookSubscription> = state
+        .db
+        .list_webhook_subscriptions()
+        .await
+        .map_err(webhook_read_failed)?
+        .into_iter()
+        .filter(|subscription| claims.can_admin() || subscription.created_by == claims.sub)
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "subscriptions": subscriptions,
+        "pending_deliveries": state.webhooks.pending_count().await,
+    })))
+}
+
+/// Deliveries this server has finished attempting, newest first, for the
+/// caller's own subscriptions or for every one when an admin asks.
+async fn list_webhook_deliveries(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, Refusal> {
+    let claims = users::claims_from_headers(&headers)
+        .map_err(|status| Refusal::from(status.into_response()))?;
+    let mine: Vec<Uuid> = state
+        .db
+        .list_webhook_subscriptions()
+        .await
+        .map_err(webhook_read_failed)?
+        .into_iter()
+        .filter(|subscription| claims.can_admin() || subscription.created_by == claims.sub)
+        .map(|subscription| subscription.id)
+        .collect();
+
+    let deliveries: Vec<webhooks::WebhookDelivery> = state
+        .webhooks
+        .recent_deliveries(WEBHOOK_DELIVERY_PAGE)
+        .await
+        .into_iter()
+        .filter(|delivery| mine.contains(&delivery.subscription_id))
+        .collect();
+
+    Ok(Json(serde_json::json!({ "deliveries": deliveries })))
+}
+
+/// Every event a subscription can ask for, which is every event the server
+/// emits.
 async fn webhook_event_types() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "event_types": [
-            "asset_processed", "anomaly_detected", "export_ready",
-            "upload_complete", "terrain_generated", "clash_detected",
-            "job_completed", "rate_limit_warning"
-        ]
-    }))
+    let names: Vec<&str> = webhooks::WebhookEvent::ALL
+        .iter()
+        .map(|event| event.name())
+        .collect();
+    Json(serde_json::json!({ "event_types": names }))
 }
 
 /// Routes for workspaces/organizations.

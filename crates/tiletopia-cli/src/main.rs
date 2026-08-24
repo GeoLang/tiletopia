@@ -183,11 +183,17 @@ async fn main() -> anyhow::Result<()> {
                 .ok()
                 .map(std::path::PathBuf::from);
 
+            let webhooks = Arc::new(tiletopia_server::webhooks::WebhookQueue::new(Arc::clone(
+                &db,
+            )));
+            Arc::clone(&webhooks).start();
+
             let job_queue = Arc::new(tiletopia_server::job_queue::JobQueue::new(
                 Arc::clone(&db),
                 data_dir.clone(),
                 Arc::clone(&store),
                 external_tiler_jar,
+                Arc::clone(&webhooks),
             ));
             Arc::clone(&job_queue).start().await;
 
@@ -241,7 +247,7 @@ async fn main() -> anyhow::Result<()> {
                 started_at: std::time::Instant::now(),
                 api_key_rate_limiter: tiletopia_server::api_keys::RateLimiter::new(),
                 metering_store: tiletopia_server::metering::MeteringStore::new(),
-                webhook_engine: tiletopia_server::webhooks::WebhookEngine::new(),
+                webhooks,
                 workspace_store: tiletopia_server::workspaces::WorkspaceStore::new(),
                 export_engine: tiletopia_server::export::ExportEngine::new(),
                 scheduler: tiletopia_server::scheduler::Scheduler::new(),

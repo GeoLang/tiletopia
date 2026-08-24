@@ -80,7 +80,6 @@ pub mod tilesets;
 pub mod upload;
 pub mod users;
 pub mod versioning;
-pub mod webhook;
 pub mod webhooks;
 pub mod whitelabel;
 pub mod workspaces;
@@ -116,7 +115,9 @@ pub struct AppState {
     /// [`auth::auth_middleware`]; the keys themselves live in the database.
     pub api_key_rate_limiter: api_keys::RateLimiter,
     pub metering_store: metering::MeteringStore,
-    pub webhook_engine: webhooks::WebhookEngine,
+    /// Queues and delivers webhook events. Shared with [`job_queue::JobQueue`],
+    /// which emits the job lifecycle events.
+    pub webhooks: Arc<webhooks::WebhookQueue>,
     pub workspace_store: workspaces::WorkspaceStore,
     pub export_engine: export::ExportEngine,
     pub scheduler: scheduler::Scheduler,
@@ -505,6 +506,18 @@ async fn delete_asset(
     // Remove asset directory
     let asset_dir = state.data_dir.join(id.to_string());
     let _ = tokio::fs::remove_dir_all(&asset_dir).await;
+
+    state
+        .webhooks
+        .emit(
+            webhooks::WebhookEvent::AssetDeleted,
+            serde_json::json!({
+                "asset_id": id,
+                "name": asset.name,
+                "deleted_by": claims.sub,
+            }),
+        )
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }

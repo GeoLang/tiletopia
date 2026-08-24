@@ -1,6 +1,9 @@
 use std::sync::Arc;
 use tiletopia_server::AppState;
 
+/// Delay before a failed webhook delivery's second attempt in the test state.
+pub const WEBHOOK_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// The one-degree cell the terrain and analysis cases query, off Monaco.
 const FIXTURE_TILE: (i32, i32) = (43, 7);
 
@@ -83,11 +86,19 @@ pub async fn build_state(
     #[cfg(feature = "martin")]
     std::fs::create_dir_all(&tileset_dir).ok();
 
+    // a short retry base, so a case that exhausts the delivery retries takes
+    // milliseconds rather than minutes
+    let webhooks = Arc::new(tiletopia_server::webhooks::WebhookQueue::with_retry_base(
+        Arc::clone(&db),
+        WEBHOOK_RETRY_BASE,
+    ));
+
     let job_queue = Arc::new(tiletopia_server::job_queue::JobQueue::new(
         Arc::clone(&db),
         dir.clone(),
         Arc::clone(&store),
         external_tiler_jar,
+        Arc::clone(&webhooks),
     ));
 
     Arc::new(AppState {
@@ -104,7 +115,7 @@ pub async fn build_state(
         started_at: std::time::Instant::now(),
         api_key_rate_limiter: tiletopia_server::api_keys::RateLimiter::new(),
         metering_store: tiletopia_server::metering::MeteringStore::new(),
-        webhook_engine: tiletopia_server::webhooks::WebhookEngine::new(),
+        webhooks,
         workspace_store: tiletopia_server::workspaces::WorkspaceStore::new(),
         export_engine: tiletopia_server::export::ExportEngine::new(),
         scheduler: tiletopia_server::scheduler::Scheduler::new(),
