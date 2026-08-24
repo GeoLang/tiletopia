@@ -413,7 +413,7 @@ fn content_range_total(header: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use terrano_core::{CogParams, Raster, write_cog};
+    use terrano_core::{CogParams, Raster, SampleFormat, write_cog};
 
     /// A 96-square ramp written as a real deflate COG with 32-pixel internal
     /// tiles and two overviews, so a window read has tiles to pick between.
@@ -431,6 +431,8 @@ mod tests {
             pixel_width: 10.0,
             pixel_height: 10.0,
             deflate: true,
+            format: SampleFormat::F64,
+            nodata: None,
         };
         let mut bytes = std::io::Cursor::new(Vec::new());
         write_cog(&raster, &params, &mut bytes).unwrap();
