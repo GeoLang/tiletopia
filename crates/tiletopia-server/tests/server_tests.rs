@@ -4216,4 +4216,73 @@ END-ISO-10303-21;
         let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(listed["exports"].as_array().unwrap().len(), 0);
     }
+
+    // -- STAC search and COG reads --
+
+    async fn get_json(
+        state: &Arc<AppState>,
+        uri: &str,
+        token: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let (status, _, body) = get_export(state, uri, token).await;
+        let value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    // TILETOPIA_STAC_API is not set anywhere in this suite, so the route sees no
+    // upstream here
+    #[tokio::test]
+    async fn stac_search_refuses_with_no_upstream_configured() {
+        let state = test_state().await;
+        let (token, _) = signup(&state, "stac-search@example.com").await;
+        let (status, body) = get_json(&state, "/api/v1/stac/search?limit=5", &token).await;
+        // a FeatureCollection of invented items is the bug: a viewer cannot tell
+        // it from a catalog's answer
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("TILETOPIA_STAC_API")
+        );
+        assert!(body.get("features").is_none());
+    }
+
+    #[tokio::test]
+    async fn stac_search_refuses_a_malformed_bbox() {
+        let state = test_state().await;
+        let (token, _) = signup(&state, "stac-bbox@example.com").await;
+        let (status, body) = get_json(&state, "/api/v1/stac/search?bbox=1,2,3", &token).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().starts_with("bbox "));
+    }
+
+    #[tokio::test]
+    async fn cog_routes_answer_an_empty_registry() {
+        let state = test_state().await;
+        let (token, _) = signup(&state, "cog-empty@example.com").await;
+
+        let (status, body) = get_json(&state, "/api/v1/cog/datasets", &token).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["datasets"].as_array().unwrap().len(), 0);
+
+        let (status, body) = get_json(&state, "/api/v1/cog/stats", &token).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["dataset_count"], 0);
+        assert_eq!(body["total_size_bytes"], 0);
+    }
+
+    #[tokio::test]
+    async fn cog_window_of_an_unregistered_dataset_is_a_404() {
+        let state = test_state().await;
+        let (token, _) = signup(&state, "cog-window@example.com").await;
+        let (status, body) = get_json(
+            &state,
+            "/api/v1/cog/datasets/ramp/window?col=0&row=0&cols=4&rows=4",
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body["error"].as_str().unwrap().contains("ramp"));
+    }
 }

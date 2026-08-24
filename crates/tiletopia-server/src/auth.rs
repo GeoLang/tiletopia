@@ -569,6 +569,14 @@ mod tests {
         assert!(!is_public_read(&Method::GET, "/api/v1/assets/abc/jobs"));
         // the realtime websocket needs a token like any other non-tile route
         assert!(!is_public_read(&Method::GET, "/api/v1/realtime/room-1"));
+        // a stac search reaches an upstream catalog, and a cog window streams
+        // range requests at an operator's source: neither is anonymous
+        assert!(!is_public_read(&Method::GET, "/api/v1/stac/search"));
+        assert!(!is_public_read(&Method::GET, "/api/v1/cog/datasets"));
+        assert!(!is_public_read(
+            &Method::GET,
+            "/api/v1/cog/datasets/ramp/window"
+        ));
     }
 
     /// Cache hit rates and size are operational telemetry, not map data. The

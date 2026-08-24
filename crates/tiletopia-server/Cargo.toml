@@ -36,7 +36,9 @@ jsonwebtoken = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 bytes = { workspace = true }
-reqwest = { workspace = true }
+# the COG reader is synchronous, so its range requests go through the blocking
+# client on a blocking thread
+reqwest = { workspace = true, features = ["blocking"] }
 image = { workspace = true }
 aes-gcm = { workspace = true }
 rand = { workspace = true }

@@ -258,6 +258,46 @@ dozen COGs over sequential range requests, which takes minutes today: only a
 tile already in the chunk cache comes back instantly. Treat the layer as batch
 until geoplumb reads composite items in parallel.
 
+### STAC search
+
+`GET /api/v1/stac/search` forwards an item search to an upstream STAC API and
+answers its item collection unchanged, so extension fields a client reads pass
+through. It takes `bbox=west,south,east,north` in degrees, `datetime` as a STAC
+instant or interval, `collections` as a comma-separated list, and `limit`, which
+is capped at 500 and defaults to 10.
+
+- `TILETOPIA_STAC_API` — upstream STAC API root, as in
+  `https://example.org/stac/v1`. Any catalog with an item-search endpoint works,
+  including the one `TILETOPIA_ANALYSIS_STAC_API` defaults to.
+
+Unset, the route answers 503 naming the variable. An upstream that cannot be
+reached or that refuses the search answers 502, and so does a 200 carrying no
+`features` array, since passing that through would draw an empty map over a
+catalog that is really there. `GET /api/v1/stac` and
+`GET /api/v1/stac/collections` still describe this server's own catalog and do
+not reach upstream.
+
+### COG reads
+
+- `TILETOPIA_COG_SOURCES` — the COGs to serve, one href per comma-separated
+  entry, each a local path or an http(s) URL. Each is keyed under its filename
+  stem, so `/data/ramp.tif` and `https://example.org/cog/ramp.tif` both answer
+  as `ramp`. Unset serves nothing.
+
+Every entry is opened at startup and `GET /api/v1/cog/datasets` reports what its
+header declares: size, dimensions, band count, EPSG, bounds in the file's own
+CRS units, internal tile size and overview levels. A local path that cannot be
+opened refuses startup, the way an unreadable `TILETOPIA_PMTILES_DIR` does. A
+remote href that cannot be opened is logged and skipped, and so is a host that
+answers 200 to a `Range` request: reading tiles off one would pull the whole file
+per tile.
+
+`GET /api/v1/cog/datasets/{id}/window?level=0&col=&row=&cols=&rows=` reads
+pixels out of one resolution level, in that level's own pixel coordinates,
+answering one row-major plane per band with nodata and pixels past the edge as
+null. Local sources are read by seek and remote ones by HTTP `Range`, so a window
+costs the internal tiles it touches. A window is capped at 512x512 pixels.
+
 The `/api/v1/terrain/` routes read DEM files under `<data-dir>/dem` first and
 fall back to SRTM tiles downloaded from `https://elevation-tiles-prod.s3.amazonaws.com/skadi`,
 which `TILETOPIA_SRTM_BASE_URL` overrides. A download that fails answers 503
