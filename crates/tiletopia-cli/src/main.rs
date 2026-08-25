@@ -265,7 +265,6 @@ async fn main() -> anyhow::Result<()> {
                 ),
                 model_registry: tiletopia_server::model_registry::ModelRegistry::new(),
                 collaboration_engine: tiletopia_server::collaboration::CollaborationEngine::new(),
-                versioning_engine: tiletopia_server::versioning::VersioningEngine::new(),
                 bim4d_engine: tiletopia_server::bim4d::Bim4DEngine::new(),
                 cog_engine,
                 routing_engine: tiletopia_server::routing::RoutingEngine::new(),

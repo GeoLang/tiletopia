@@ -1088,17 +1088,6 @@ async fn list_collaboration_sessions(
     Json(serde_json::json!({ "sessions": sessions }))
 }
 
-/// Routes for asset versioning.
-pub fn versioning_routes() -> Router<Arc<AppState>> {
-    Router::new().route("/api/v1/versioning/assets", get(list_versioned_assets))
-}
-
-async fn list_versioned_assets(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let engine = &state.versioning_engine;
-    let assets = engine.list_assets().await;
-    Json(serde_json::json!({ "assets": assets }))
-}
-
 /// Routes for BIM 4D scheduling.
 pub fn bim4d_routes() -> Router<Arc<AppState>> {
     Router::new().route("/api/v1/bim4d/projects", get(list_bim4d_projects))

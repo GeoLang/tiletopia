@@ -20,7 +20,6 @@ pub mod cluster;
 pub mod cog;
 pub mod collaboration;
 pub mod crdt;
-pub mod dashboard;
 pub mod db;
 pub mod demo;
 pub mod dynamic_raster;
@@ -79,7 +78,6 @@ pub mod terrain_rgb;
 pub mod tilesets;
 pub mod upload;
 pub mod users;
-pub mod versioning;
 pub mod webhooks;
 pub mod whitelabel;
 pub mod workspaces;
@@ -129,7 +127,6 @@ pub struct AppState {
     pub classification_engine: classification::ClassificationEngine,
     pub model_registry: model_registry::ModelRegistry,
     pub collaboration_engine: collaboration::CollaborationEngine,
-    pub versioning_engine: versioning::VersioningEngine,
     pub bim4d_engine: bim4d::Bim4DEngine,
     pub cog_engine: cog::CogEngine,
     pub routing_engine: routing::RoutingEngine,
@@ -343,7 +340,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::classification_routes())
         .merge(model_registry::model_registry_routes())
         .merge(premium_routes::collaboration_routes())
-        .merge(premium_routes::versioning_routes())
         .merge(premium_routes::bim4d_routes())
         .merge(premium_routes::geocoding_routes())
         .merge(premium_routes::stac_routes())
