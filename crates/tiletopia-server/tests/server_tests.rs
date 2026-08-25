@@ -3811,6 +3811,59 @@ END-ISO-10303-21;
         assert_eq!(&tile[..4], b"glTF", "tile content is not a glb");
     }
 
+    /// The ingest crate's twelve-box fixture, each box with its own GlobalId.
+    const TWIN_BOXES_IFC: &str =
+        include_str!("../../tiletopia-ingest/tests/fixtures/twin_boxes.ifc");
+
+    /// A tiled IFC serves tiles a viewer can pick an asset id out of.
+    #[tokio::test]
+    async fn ifc_tiles_carry_the_element_ids_as_feature_metadata() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "twin-boxes-editor@example.com").await;
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "twin_boxes.ifc",
+            TWIN_BOXES_IFC,
+            &[("longitude", "10"), ("latitude", "20")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(
+            settled.status,
+            JobStatus::Done,
+            "error: {:?}",
+            settled.error
+        );
+
+        let (status, tile) = get_with_token(
+            &state,
+            &format!("/api/v1/assets/{asset_id}/tiles/root.glb"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&tile[..4], b"glTF", "tile content is not a glb");
+
+        let glb = gltf::Glb::from_slice(&tile).expect("a parseable GLB");
+        let json: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+        assert!(
+            json["extensions"]["EXT_structural_metadata"].is_object(),
+            "the served tile carries no asset metadata"
+        );
+        assert_eq!(
+            json["extensions"]["EXT_structural_metadata"]["propertyTables"][0]["count"],
+            12
+        );
+    }
+
     /// A model at the ECEF origin is not a success, so an IFC with neither an
     /// upload placement nor site coordinates fails saying what to send.
     #[tokio::test]
