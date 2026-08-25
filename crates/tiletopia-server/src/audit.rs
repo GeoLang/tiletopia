@@ -428,6 +428,50 @@ static AUDITED_ROUTES: &[AuditedRoute] = &[
         action: AuditAction::Delete,
         resource_type: "api_key",
     },
+    AuditedRoute {
+        method: "POST",
+        template: "/api/v1/stories",
+        action: AuditAction::Create,
+        resource_type: "story",
+    },
+    AuditedRoute {
+        method: "PUT",
+        template: "/api/v1/stories/{id}",
+        action: AuditAction::Update,
+        resource_type: "story",
+    },
+    AuditedRoute {
+        method: "DELETE",
+        template: "/api/v1/stories/{id}",
+        action: AuditAction::Delete,
+        resource_type: "story",
+    },
+    AuditedRoute {
+        method: "POST",
+        template: "/api/v1/portal/items",
+        action: AuditAction::Create,
+        resource_type: "portal_item",
+    },
+    AuditedRoute {
+        method: "DELETE",
+        template: "/api/v1/portal/items/{id}",
+        action: AuditAction::Delete,
+        resource_type: "portal_item",
+    },
+    // the row names the catalog dataset that was copied in, which the path
+    // carries; the asset it created is in the body
+    AuditedRoute {
+        method: "POST",
+        template: "/api/v1/catalog/{dataset_id}/add",
+        action: AuditAction::Create,
+        resource_type: "catalog_entry",
+    },
+    AuditedRoute {
+        method: "PUT",
+        template: CALLER_IS_THE_RESOURCE,
+        action: AuditAction::Update,
+        resource_type: "user",
+    },
     // the Ion facade reaches the same asset table and mints the same kind of
     // bearer credential, so leaving it out would be a way to mutate unaudited
     AuditedRoute {
@@ -443,6 +487,10 @@ static AUDITED_ROUTES: &[AuditedRoute] = &[
         resource_type: "token",
     },
 ];
+
+/// The one audited route whose path names no id: it acts on whoever is calling,
+/// so the row names them.
+const CALLER_IS_THE_RESOURCE: &str = "/api/v1/users/me";
 
 /// Everything the row needs, taken off the request before the handler consumes
 /// it.
@@ -483,11 +531,16 @@ fn pending(request: &Request) -> Option<Pending> {
         .map(|claims| claims.sub)
         .unwrap_or_else(|_| UNIDENTIFIED_USER.to_owned());
 
+    let resource_id = match template {
+        CALLER_IS_THE_RESOURCE => user_id.clone(),
+        _ => resource_id(template, request.uri().path()),
+    };
+
     Some(Pending {
         user_id,
         action: route.action.clone(),
         resource_type: route.resource_type,
-        resource_id: resource_id(template, request.uri().path()),
+        resource_id,
         method: route.method,
         path: request.uri().path().to_owned(),
         // the direct peer, which is the proxy when one fronts the server

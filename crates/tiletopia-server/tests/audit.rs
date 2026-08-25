@@ -358,6 +358,19 @@ async fn a_create_records_the_id_the_handler_chose() {
     assert_eq!(uploaded.status, StatusCode::CREATED);
     let asset_id = uploaded.body["id"].as_str().unwrap().to_owned();
 
+    let story = send(
+        &state,
+        json_request(
+            "POST",
+            "/api/v1/stories",
+            &admin,
+            serde_json::json!({"title": "a walk", "description": "", "slides": [], "is_public": false}),
+        ),
+    )
+    .await;
+    assert_eq!(story.status, StatusCode::CREATED);
+    let story_id = story.body["id"].as_str().unwrap().to_owned();
+
     let key = send(
         &state,
         json_request(
@@ -384,6 +397,7 @@ async fn a_create_records_the_id_the_handler_chose() {
     };
 
     assert_eq!(recorded("asset").await.resource_id, asset_id);
+    assert_eq!(recorded("story").await.resource_id, story_id);
     assert_eq!(recorded("api_key").await.resource_id, key_id);
 }
 
@@ -433,6 +447,217 @@ async fn the_row_carries_the_peer_address() {
     assert_eq!(addresses, vec![None, Some("203.0.113.7".to_owned())]);
 }
 
+/// Writing a story is a write to shared content, so each of the three lands a
+/// row naming the story, and a call the handler refused lands nothing.
+#[tokio::test]
+async fn story_writes_land_rows() {
+    let state = common::test_state().await;
+    let editor = common::token("editor-1", "editor");
+
+    let created = send(
+        &state,
+        json_request(
+            "POST",
+            "/api/v1/stories",
+            &editor,
+            serde_json::json!({"title": "a walk", "description": "", "slides": [], "is_public": false}),
+        ),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let story_id = created.body["id"].as_str().unwrap().to_owned();
+
+    let updated = send(
+        &state,
+        json_request(
+            "PUT",
+            &format!("/api/v1/stories/{story_id}"),
+            &editor,
+            serde_json::json!({"title": "a longer walk"}),
+        ),
+    )
+    .await;
+    assert_eq!(updated.status, StatusCode::OK);
+
+    let deleted = send(
+        &state,
+        empty_request("DELETE", &format!("/api/v1/stories/{story_id}"), &editor),
+    )
+    .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+
+    let missing = send(
+        &state,
+        json_request(
+            "PUT",
+            &format!("/api/v1/stories/{}", Uuid::new_v4()),
+            &editor,
+            serde_json::json!({"title": "nowhere"}),
+        ),
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+
+    let entries = all_entries(&state).await;
+    assert_eq!(entries.len(), 3, "{entries:?}");
+    let actions: Vec<AuditAction> = entries.iter().map(|entry| entry.action.clone()).collect();
+    assert_eq!(
+        actions,
+        vec![
+            AuditAction::Delete,
+            AuditAction::Update,
+            AuditAction::Create
+        ]
+    );
+    assert!(entries.iter().all(|entry| entry.resource_type == "story"));
+    assert!(entries.iter().all(|entry| entry.resource_id == story_id));
+    assert!(entries.iter().all(|entry| entry.user_id == "editor-1"));
+}
+
+/// A portal item is a shared listing of someone's work, so creating and
+/// deleting one is recorded. Deleting another owner's item is refused and lands
+/// nothing.
+#[tokio::test]
+async fn portal_writes_land_rows() {
+    let state = common::test_state().await;
+    let owner_id = Uuid::new_v4();
+    let owner = common::token(&owner_id.to_string(), "editor");
+    let stranger = common::token(&Uuid::new_v4().to_string(), "editor");
+
+    let created = send(
+        &state,
+        json_request(
+            "POST",
+            "/api/v1/portal/items",
+            &owner,
+            serde_json::json!({"title": "the survey", "type": "Feature Service"}),
+        ),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let item_id = created.body["id"].as_str().unwrap().to_owned();
+
+    let refused = send(
+        &state,
+        empty_request(
+            "DELETE",
+            &format!("/api/v1/portal/items/{item_id}"),
+            &stranger,
+        ),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+
+    let deleted = send(
+        &state,
+        empty_request("DELETE", &format!("/api/v1/portal/items/{item_id}"), &owner),
+    )
+    .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+
+    let entries = all_entries(&state).await;
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.resource_type == "portal_item")
+    );
+    assert!(entries.iter().all(|entry| entry.resource_id == item_id));
+    assert_eq!(entries[0].action, AuditAction::Delete);
+    assert_eq!(entries[1].action, AuditAction::Create);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.user_id == owner_id.to_string())
+    );
+}
+
+/// Copying a catalog dataset in creates an asset and queues a job, so the row
+/// names the dataset that was copied. A viewer is refused and lands nothing.
+#[tokio::test]
+async fn adding_a_catalog_dataset_lands_a_row() {
+    let state = common::test_state().await;
+    let dataset_id = "srtm-90m";
+    let body = serde_json::json!({
+        "name": "the valley",
+        "bounds": {"west": 7.4, "south": 43.7, "east": 7.5, "north": 43.8},
+    });
+
+    let refused = send(
+        &state,
+        json_request(
+            "POST",
+            &format!("/api/v1/catalog/{dataset_id}/add"),
+            &common::token("viewer-1", "viewer"),
+            body.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    assert_eq!(state.audit_log.count().await.unwrap(), 0);
+
+    let added = send(
+        &state,
+        json_request(
+            "POST",
+            &format!("/api/v1/catalog/{dataset_id}/add"),
+            &common::token("editor-1", "editor"),
+            body,
+        ),
+    )
+    .await;
+    assert_eq!(added.status, StatusCode::CREATED);
+
+    let entries = all_entries(&state).await;
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0].action, AuditAction::Create);
+    assert_eq!(entries[0].resource_type, "catalog_entry");
+    assert_eq!(entries[0].resource_id, dataset_id);
+    assert_eq!(entries[0].user_id, "editor-1");
+}
+
+/// `/api/v1/users/me` names no id in its path, so the row names the caller, and
+/// it names the token's subject rather than anything in the body.
+#[tokio::test]
+async fn updating_the_caller_lands_a_row() {
+    let state = common::test_state().await;
+    let user_id = Uuid::new_v4();
+    let caller = common::token(&user_id.to_string(), "viewer");
+    seed_user(&state, user_id).await;
+
+    let updated = send(
+        &state,
+        json_request(
+            "PUT",
+            "/api/v1/users/me",
+            &caller,
+            serde_json::json!({"name": "the surveyor"}),
+        ),
+    )
+    .await;
+    assert_eq!(updated.status, StatusCode::OK);
+
+    // a caller with no user row is refused past the gate
+    let unknown = send(
+        &state,
+        json_request(
+            "PUT",
+            "/api/v1/users/me",
+            &common::token(&Uuid::new_v4().to_string(), "viewer"),
+            serde_json::json!({"name": "nobody"}),
+        ),
+    )
+    .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+
+    let entries = all_entries(&state).await;
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0].action, AuditAction::Update);
+    assert_eq!(entries[0].resource_type, "user");
+    assert_eq!(entries[0].resource_id, user_id.to_string());
+    assert_eq!(entries[0].user_id, user_id.to_string());
+}
+
 /// A multipart upload of one tiny file, which is what `POST /api/v1/assets`
 /// takes.
 fn upload_request(bearer: &str, filename: &str) -> Request<Body> {
@@ -451,4 +676,21 @@ fn upload_request(bearer: &str, filename: &str) -> Request<Body> {
         )
         .body(Body::from(body))
         .unwrap()
+}
+
+async fn seed_user(state: &Arc<AppState>, id: Uuid) {
+    let user = tiletopia_server::users::User {
+        id,
+        email: format!("{id}@example.invalid"),
+        name: "the caller".into(),
+        role: tiletopia_server::users::UserRole::Viewer,
+        org_id: None,
+        created_at: Utc::now(),
+        last_login: None,
+    };
+    state
+        .db
+        .create_user(&user, "not-a-real-hash")
+        .await
+        .unwrap();
 }
