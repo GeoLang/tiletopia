@@ -72,22 +72,25 @@ A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields 
 - Pending deliveries live in the process: a restart drops what has not gone out yet
 
 ### Exports
-- `POST /api/v1/exports` takes an `asset_id` and a `format`, answers 202 with a queued job, and encodes off the request. Editor or admin. `GET /api/v1/exports/{id}` polls it, and `GET /api/v1/exports/download/{id}` pulls the file down once the job reads `Ready`. A job id belonging to another caller answers 404
+- `POST /api/v1/exports` takes an `asset_id` and a `format`, answers 202 with a queued job, and encodes off the request. Editor or admin. `GET /api/v1/exports/{id}` polls it, and `GET /api/v1/exports/download/{id}` pulls the file down while the job reads `Ready`. A job id belonging to another caller answers 404
 - `GET /api/v1/exports/formats` lists what `format` takes: `3dtiles_zip`, `las`, `laz`, `terrain_bundle`, `geojson`, `png`, `citygml`, `obj`, `glb`, `offline_viewer`
 - `offline_viewer` zips the asset's tileset together with a CesiumJS page over it and a `serve.py` that serves the directory over HTTP. The original upload the tiles were built from stays out of the bundle
 - The bundle carries CesiumJS itself only when `TILETOPIA_CESIUM_DIR` names a `Build/Cesium` directory to copy in, and nothing in this repository ships one: the dashboard pulls CesiumJS from npm at build time and `gui/dist` is not checked in. Without it the page loads CesiumJS from cesium.com, needs the network the first time it opens, and says so on screen. `pnpm --dir gui build` then `TILETOPIA_CESIUM_DIR=gui/dist/cesium` gives a bundle that opens with no network at all
-- Job records live in the process, so a restart loses them and leaves the files. The `prune_export_files` scheduled action is what removes those
+- A finished export is downloadable for 7 days. Past that the job reads `Expired`, in the listing as well as on `GET /api/v1/exports/{id}`, and the download answers 410 with the time it expired rather than 404
+- The `prune_export_files` scheduled action removes the directories of expired jobs, and separately the directories whose newest file is older than the age it was configured with. The age rule is what retires files no job record covers any more: those records live in the process, so a restart loses them and leaves the files behind
 
 ### Scheduled Jobs
 - `POST /api/v1/scheduler/jobs` stores a job: a name, an action, a schedule, and whether it is enabled. Editor or admin, and a job belongs to whoever created it
-- Three actions, which are the three the worker runs: `retile_asset` puts an asset back on the tiling queue with the placement its last job carried, `prune_export_files` removes finished export directories past an age, `prune_finished_jobs` removes settled rows from the `jobs` table past an age
+- Three actions, which are the three the worker runs: `retile_asset` puts an asset back on the tiling queue with the placement its last job carried, `prune_export_files` removes the directories of expired exports and of exports past an age, `prune_finished_jobs` removes settled rows from the `jobs` table past an age
 - Three schedules: `interval` in seconds, `cron` as five standard fields (minute hour day-of-month month day-of-week, at second 0, UTC), and `one_shot` at a time in the future
 - A worker wakes every second, runs what is due, and writes the outcome to the row: `last_run`, `last_outcome`, and a `run_count` that counts finished runs only. A one-shot disables itself once it has run
 - A failed run keeps its error on the row and is retried on the next tick. Three failures in a row disable the job
 
 ### Audit Trail
-- Every mutation that passed a role gate and answered 2xx lands one row in SQLite: asset create, delete and re-tile, annotation writes, export start, tileset create and delete, plugin install, uninstall, config and enable/disable, webhook and scheduled job writes, org create, admin user delete and role change, API key mint, revoke and delete, and the Ion-compat asset create and token mint
-- A row names who (the JWT `sub`), what (a `Create`, `Delete`, `PermissionChange` and so on), the resource type and id, and the method, path and status. Refusals are not recorded: the log says what happened to the data, and recording refusals would let a caller fill the table by being refused in a loop
+- Every mutation that passed a role gate and answered 2xx lands one row in SQLite: asset create, delete and re-tile, annotation writes, export start, tileset create and delete, plugin install, uninstall, config and enable/disable, webhook and scheduled job writes, org create, admin user delete and role change, API key mint, revoke and delete, story create, update and delete, portal item create and delete, adding a catalog dataset, a caller updating their own profile at `PUT /api/v1/users/me`, and the Ion-compat asset create and token mint
+- A row names who (the JWT `sub`), what (a `Create`, `Delete`, `PermissionChange` and so on), the resource type and id, the method, path and status, and the address the request came from. Refusals are not recorded: the log says what happened to the data, and recording refusals would let a caller fill the table by being refused in a loop
+- The address is the direct peer off the socket, which is the proxy when one fronts the server. No proxy header is read: a caller can set `X-Forwarded-For` to whatever it likes
+- A create's path names no id, so the handler hands back the id it chose and the row carries that. `PUT /api/v1/users/me` names the caller
 - `GET /api/v1/audit` reads it back, instance-admin only, filtered by `user_id`, `action`, `resource_type`, `from`, `to` and `limit` (100 rows by default, 1000 at most). Newest first
 - `TILETOPIA_AUDIT_RETENTION_DAYS` — how long a row is kept, 30 by default. A sweep runs hourly. `0`, a negative number, or anything that is not a whole number of days turns the sweep off and keeps everything
 

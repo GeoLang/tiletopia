@@ -5,9 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2026-08-24
+## [Unreleased] - 2026-08-25
 
 ### Added
+
+- Audit rows carry the address and the created id (2026-08-25). The server is
+  served with connect info, so a row records the direct peer's IP, which is the
+  proxy when one fronts the server. No proxy header is read: `X-Forwarded-For`
+  is caller-controlled. Every create handler returns the id it chose as an
+  `AuditedResource` response extension, which the middleware uses when the path
+  names no id, so a create no longer records an empty `resource_id`. Newly
+  audited: story create, update and delete, portal item create and delete,
+  `POST /api/v1/catalog/{dataset_id}/add`, and `PUT /api/v1/users/me`, whose row
+  names the caller since its path names nothing. `org_id` stays empty, since no
+  token this server issues carries an organization.
+- Export expiry is real (2026-08-25). A finished export is downloadable for 7
+  days; past that `ExportStatus::Expired` is what `GET /api/v1/exports` and
+  `GET /api/v1/exports/{id}` report, and the download answers 410 naming the
+  time it expired rather than 404. The `prune_export_files` scheduled action
+  retires expired jobs' directories whatever their files' age, alongside the
+  age rule that catches files no job record covers any more, and its outcome
+  message counts both.
 
 - The audit log is real (2026-08-24). `audit_middleware` records successful
   mutations that pass the editor/admin gates into a SQLite `audit_entries`

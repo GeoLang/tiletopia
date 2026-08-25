@@ -118,6 +118,10 @@ pub const EXPORT_FORMATS: &[FormatInfo] = &[
 /// says on screen that it needs the network.
 const CESIUM_BUILD_DIR_VAR: &str = "TILETOPIA_CESIUM_DIR";
 
+/// How long a finished export stays downloadable. Past it the job reads
+/// `Expired`, the download answers 410, and the scheduled sweep takes the files.
+pub const EXPORT_LIFETIME_DAYS: i64 = 7;
+
 impl ExportFormat {
     /// Resolve one of the ids advertised by [`EXPORT_FORMATS`].
     pub fn from_id(id: &str) -> Option<Self> {
@@ -192,15 +196,40 @@ impl ExportEngine {
             download_url: None,
             created_at: Utc::now(),
             completed_at: None,
-            expires_at: Some(Utc::now() + chrono::Duration::days(7)),
+            expires_at: Some(Utc::now() + chrono::Duration::days(EXPORT_LIFETIME_DAYS)),
             bounds,
         };
         self.jobs.write().await.push(job.clone());
         job
     }
 
+    /// Retire every ready job whose `expires_at` has passed. Both reads run this
+    /// first, so a job that expired while the process sat idle never reads back
+    /// as `Ready`.
+    pub async fn expire_due(&self, now: DateTime<Utc>) {
+        let mut jobs = self.jobs.write().await;
+        for job in jobs.iter_mut() {
+            if job.status != ExportStatus::Ready {
+                continue;
+            }
+            if job.expires_at.is_some_and(|at| at <= now) {
+                job.status = ExportStatus::Expired;
+            }
+        }
+    }
+
+    /// Move a job's expiry. Nothing on a route path calls this: it is how a test
+    /// reaches the expired paths without waiting a week.
+    pub async fn set_expires_at(&self, id: Uuid, at: DateTime<Utc>) {
+        let mut jobs = self.jobs.write().await;
+        if let Some(job) = jobs.iter_mut().find(|job| job.id == id) {
+            job.expires_at = Some(at);
+        }
+    }
+
     /// List export jobs for a tenant.
     pub async fn list_exports(&self, tenant_id: Option<Uuid>) -> Vec<ExportJob> {
+        self.expire_due(Utc::now()).await;
         let jobs = self.jobs.read().await;
         match tenant_id {
             Some(id) => jobs.iter().filter(|j| j.tenant_id == id).cloned().collect(),
@@ -210,6 +239,7 @@ impl ExportEngine {
 
     /// Get export job by ID.
     pub async fn get_export(&self, id: Uuid) -> Option<ExportJob> {
+        self.expire_due(Utc::now()).await;
         self.jobs.read().await.iter().find(|j| j.id == id).cloned()
     }
 
@@ -1010,5 +1040,52 @@ mod tests {
 
         let updated = engine.get_export(job.id).await.unwrap();
         assert!(matches!(updated.status, ExportStatus::Failed(_)));
+    }
+
+    /// A finished export stops being downloadable once its `expires_at` passes,
+    /// and both reads report that without anything having swept in between.
+    #[tokio::test]
+    async fn a_ready_export_past_its_expiry_reads_back_expired() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let tenant = Uuid::new_v4();
+        let engine = ExportEngine::new();
+        let job = engine
+            .create_export(tenant, Uuid::new_v4(), ExportFormat::GeoJson, None)
+            .await;
+        engine.execute_export(job.id, tmp.path()).await.unwrap();
+        assert_eq!(
+            engine.get_export(job.id).await.unwrap().status,
+            ExportStatus::Ready
+        );
+
+        engine
+            .set_expires_at(job.id, Utc::now() - chrono::Duration::seconds(1))
+            .await;
+
+        assert_eq!(
+            engine.get_export(job.id).await.unwrap().status,
+            ExportStatus::Expired
+        );
+        let listed = engine.list_exports(Some(tenant)).await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, ExportStatus::Expired);
+    }
+
+    /// Nothing but a finished export expires: a job still encoding when its
+    /// expiry passes keeps running rather than reading as retired.
+    #[tokio::test]
+    async fn expiry_leaves_a_job_that_never_finished_alone() {
+        let engine = ExportEngine::new();
+        let job = engine
+            .create_export(Uuid::new_v4(), Uuid::new_v4(), ExportFormat::GeoJson, None)
+            .await;
+        engine
+            .set_expires_at(job.id, Utc::now() - chrono::Duration::days(1))
+            .await;
+
+        assert_eq!(
+            engine.get_export(job.id).await.unwrap().status,
+            ExportStatus::Queued
+        );
     }
 }

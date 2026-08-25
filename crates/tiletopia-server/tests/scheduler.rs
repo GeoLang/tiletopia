@@ -177,6 +177,7 @@ fn restarted_scheduler(state: &Arc<AppState>) -> Scheduler {
         Arc::clone(&state.db),
         state.data_dir.clone(),
         Arc::clone(&state.job_queue),
+        Arc::clone(&state.export_engine),
     )
 }
 

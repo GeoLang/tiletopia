@@ -197,10 +197,13 @@ async fn main() -> anyhow::Result<()> {
             ));
             Arc::clone(&job_queue).start().await;
 
+            let export_engine = Arc::new(tiletopia_server::export::ExportEngine::new());
+
             let scheduler = Arc::new(tiletopia_server::scheduler::Scheduler::new(
                 Arc::clone(&db),
                 data_dir.clone(),
                 Arc::clone(&job_queue),
+                Arc::clone(&export_engine),
             ));
             Arc::clone(&scheduler).start();
 
@@ -264,7 +267,7 @@ async fn main() -> anyhow::Result<()> {
                 metering_store: tiletopia_server::metering::MeteringStore::new(),
                 webhooks,
                 workspace_store: tiletopia_server::workspaces::WorkspaceStore::new(),
-                export_engine: tiletopia_server::export::ExportEngine::new(),
+                export_engine,
                 scheduler,
                 plugin_registry: tiletopia_server::plugins::PluginRegistry::new(),
                 photogrammetry_engine: tiletopia_server::photogrammetry::PhotogrammetryEngine::new(

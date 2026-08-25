@@ -735,6 +735,21 @@ async fn download_export(
     Path(id): Path<Uuid>,
 ) -> Result<Response, StatusCode> {
     let job = owned_job(&state, &headers, id).await?;
+    // an expired job says so rather than reading as one that never finished:
+    // only expire_due sets Expired, and it needs an expires_at to compare
+    if let Some(expired_at) = job
+        .expires_at
+        .filter(|_| job.status == ExportStatus::Expired)
+    {
+        return Ok((
+            StatusCode::GONE,
+            Json(serde_json::json!({
+                "error": "this export has expired and its files have been retired",
+                "expired_at": expired_at.to_rfc3339(),
+            })),
+        )
+            .into_response());
+    }
     if job.status != ExportStatus::Ready {
         return Err(StatusCode::NOT_FOUND);
     }

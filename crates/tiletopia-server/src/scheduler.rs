@@ -275,14 +275,21 @@ pub struct Scheduler {
     db: Arc<Database>,
     data_dir: PathBuf,
     job_queue: Arc<JobQueue>,
+    export_engine: Arc<crate::export::ExportEngine>,
 }
 
 impl Scheduler {
-    pub fn new(db: Arc<Database>, data_dir: PathBuf, job_queue: Arc<JobQueue>) -> Self {
+    pub fn new(
+        db: Arc<Database>,
+        data_dir: PathBuf,
+        job_queue: Arc<JobQueue>,
+        export_engine: Arc<crate::export::ExportEngine>,
+    ) -> Self {
         Self {
             db,
             data_dir,
             job_queue,
+            export_engine,
         }
     }
 
@@ -361,7 +368,7 @@ impl Scheduler {
         match action {
             ScheduledAction::RetileAsset { asset_id } => self.retile_asset(*asset_id).await,
             ScheduledAction::PruneExportFiles { older_than_days } => {
-                prune_export_files(&self.data_dir, *older_than_days).await
+                prune_export_files(&self.data_dir, &self.export_engine, *older_than_days).await
             }
             ScheduledAction::PruneFinishedJobs { older_than_days } => {
                 let cutoff = Utc::now() - chrono::Duration::days(*older_than_days as i64);
@@ -423,13 +430,27 @@ async fn input_file(data_dir: &Path, asset_id: Uuid) -> Option<String> {
     Some(entry.path().to_string_lossy().into_owned())
 }
 
-/// Remove export directories whose newest file is older than `older_than_days`.
-/// An export's job record is process memory, so a restart leaves the files with
-/// nothing that would ever delete them.
+/// Remove the directories of expired exports, and of exports whose newest file
+/// is older than `older_than_days`. The age rule is what retires the files an
+/// export's job record no longer covers: those records are process memory, so a
+/// restart leaves them with nothing that would ever delete them.
 ///
 /// Only directories named by a job id are considered, and one holding no file is
 /// an export still being encoded, so it is left alone.
-async fn prune_export_files(data_dir: &Path, older_than_days: u32) -> Result<String, String> {
+async fn prune_export_files(
+    data_dir: &Path,
+    export_engine: &crate::export::ExportEngine,
+    older_than_days: u32,
+) -> Result<String, String> {
+    export_engine.expire_due(Utc::now()).await;
+    let expired: Vec<Uuid> = export_engine
+        .list_exports(None)
+        .await
+        .into_iter()
+        .filter(|job| job.status == crate::export::ExportStatus::Expired)
+        .map(|job| job.id)
+        .collect();
+
     let exports = crate::export::exports_dir(data_dir);
     let read_failed =
         |error: std::io::Error| format!("reading {} failed: {error}", exports.display());
@@ -448,31 +469,44 @@ async fn prune_export_files(data_dir: &Path, older_than_days: u32) -> Result<Str
         ))
         .ok_or_else(|| format!("{older_than_days} days is further back than the clock goes"))?;
 
-    let mut removed = 0;
+    let mut removed_expired = 0;
+    let mut removed_aged = 0;
     while let Some(entry) = entries.next_entry().await.map_err(read_failed)? {
         let path = entry.path();
-        let named_by_a_job = path
+        let job_id = path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| Uuid::parse_str(name).is_ok());
-        if !named_by_a_job {
+            .and_then(|name| Uuid::parse_str(name).ok());
+        let Some(job_id) = job_id else {
+            continue;
+        };
+        if !path.is_dir() {
             continue;
         }
-        if !entry.path().is_dir() {
+
+        if expired.contains(&job_id) {
+            remove_export_dir(&path).await?;
+            removed_expired += 1;
             continue;
         }
         match newest_file_time(&path).await? {
             Some(written) if written < cutoff => {
-                tokio::fs::remove_dir_all(&path)
-                    .await
-                    .map_err(|error| format!("removing {} failed: {error}", path.display()))?;
-                removed += 1;
+                remove_export_dir(&path).await?;
+                removed_aged += 1;
             }
             _ => continue,
         }
     }
 
-    Ok(format!("removed {removed} expired export directories"))
+    Ok(format!(
+        "removed {removed_expired} expired and {removed_aged} aged export directories"
+    ))
+}
+
+async fn remove_export_dir(path: &Path) -> Result<(), String> {
+    tokio::fs::remove_dir_all(path)
+        .await
+        .map_err(|error| format!("removing {} failed: {error}", path.display()))
 }
 
 /// When the newest file directly in `dir` was written, or `None` when it holds
@@ -797,8 +831,9 @@ mod tests {
         let not_a_job = exports.join("scratch");
         std::fs::create_dir_all(&not_a_job).unwrap();
 
-        let detail = prune_export_files(&dir, 1).await.unwrap();
-        assert_eq!(detail, "removed 1 expired export directories");
+        let engine = crate::export::ExportEngine::new();
+        let detail = prune_export_files(&dir, &engine, 1).await.unwrap();
+        assert_eq!(detail, "removed 0 expired and 1 aged export directories");
         assert!(!stale.exists());
         assert!(fresh.exists());
         assert!(encoding.exists());
@@ -838,8 +873,8 @@ mod tests {
             .set_modified(three_days_ago)
             .unwrap();
 
-        let detail = prune_export_files(&dir, 1).await.unwrap();
-        assert_eq!(detail, "removed 1 expired export directories");
+        let detail = prune_export_files(&dir, &engine, 1).await.unwrap();
+        assert_eq!(detail, "removed 0 expired and 1 aged export directories");
         assert!(!bundle.exists());
         // the asset's own tiles are not an export, so they stay
         assert!(asset_dir.join("tileset.json").exists());
@@ -851,10 +886,47 @@ mod tests {
     async fn pruning_export_files_on_a_server_that_has_exported_nothing_is_not_a_failure() {
         let dir = std::env::temp_dir().join(format!("tiletopia_prune_{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
+        let engine = crate::export::ExportEngine::new();
         assert_eq!(
-            prune_export_files(&dir, 7).await.unwrap(),
+            prune_export_files(&dir, &engine, 7).await.unwrap(),
             "nothing has been exported"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A job past its `expires_at` is retired whatever its files' age, which is
+    /// what stops a download the routes already answer 410 for from leaving its
+    /// bytes on disk for another week.
+    #[tokio::test]
+    async fn pruning_export_files_removes_an_expired_job_with_fresh_files() {
+        let dir = std::env::temp_dir().join(format!("tiletopia_prune_{}", Uuid::new_v4()));
+        let asset_id = Uuid::new_v4();
+        let asset_dir = dir.join(asset_id.to_string());
+        std::fs::create_dir_all(asset_dir.join("input")).unwrap();
+
+        let engine = crate::export::ExportEngine::new();
+        let job = engine
+            .create_export(
+                Uuid::new_v4(),
+                asset_id,
+                crate::export::ExportFormat::GeoJson,
+                None,
+            )
+            .await;
+        let export = engine.execute_export(job.id, &dir).await.unwrap();
+        engine
+            .set_expires_at(job.id, Utc::now() - chrono::Duration::minutes(1))
+            .await;
+
+        // the file was written a moment ago, so the age rule alone would keep it
+        let detail = prune_export_files(&dir, &engine, 1).await.unwrap();
+        assert_eq!(detail, "removed 1 expired and 0 aged export directories");
+        assert!(!export.exists());
+        assert_eq!(
+            engine.get_export(job.id).await.unwrap().status,
+            crate::export::ExportStatus::Expired
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -121,7 +121,9 @@ pub struct AppState {
     /// which emits the job lifecycle events.
     pub webhooks: Arc<webhooks::WebhookQueue>,
     pub workspace_store: workspaces::WorkspaceStore,
-    pub export_engine: export::ExportEngine,
+    /// Shared with [`scheduler::Scheduler`], whose `prune_export_files` action
+    /// reads the same job records the export routes do.
+    pub export_engine: Arc<export::ExportEngine>,
     /// Runs the scheduled jobs that are due. Shares the database and
     /// [`job_queue::JobQueue`] the routes use, so a scheduled re-tile lands on
     /// the same queue an uploader's does.

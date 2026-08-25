@@ -4144,6 +4144,49 @@ END-ISO-10303-21;
         assert_eq!(status, StatusCode::OK);
     }
 
+    /// Past its expiry an export is gone rather than missing, so a caller
+    /// holding an old download link is told why it stopped working.
+    #[tokio::test]
+    async fn export_download_after_expiry_is_gone() {
+        let state = test_state().await;
+        let (token, uid) = bootstrap_editor_with_id(&state, "export-expired@example.com").await;
+
+        let job = state
+            .export_engine
+            .create_export(
+                uuid::Uuid::parse_str(&uid).unwrap(),
+                uuid::Uuid::new_v4(),
+                tiletopia_server::export::ExportFormat::GeoJson,
+                None,
+            )
+            .await;
+        state
+            .export_engine
+            .execute_export(job.id, &state.data_dir)
+            .await
+            .unwrap();
+        state
+            .export_engine
+            .set_expires_at(job.id, chrono::Utc::now() - chrono::Duration::seconds(1))
+            .await;
+
+        let (status, _, body) = get_export(
+            &state,
+            &format!("/api/v1/exports/download/{}", job.id),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE);
+        let refusal: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(refusal["expired_at"].is_string(), "{refusal}");
+
+        // and the listing says so too, rather than still offering it
+        let (status, _, body) = get_export(&state, "/api/v1/exports", &token).await;
+        assert_eq!(status, StatusCode::OK);
+        let listing: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(listing["exports"][0]["status"], "Expired", "{listing}");
+    }
+
     /// Stage the tiles a finished tiling job leaves, beside the upload they were
     /// built from.
     fn seed_tiled_asset(data_dir: &std::path::Path, asset_id: &str) {
