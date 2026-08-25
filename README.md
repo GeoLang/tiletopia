@@ -78,6 +78,12 @@ A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields 
 - A worker wakes every second, runs what is due, and writes the outcome to the row: `last_run`, `last_outcome`, and a `run_count` that counts finished runs only. A one-shot disables itself once it has run
 - A failed run keeps its error on the row and is retried on the next tick. Three failures in a row disable the job
 
+### Audit Trail
+- Every mutation that passed a role gate and answered 2xx lands one row in SQLite: asset create, delete and re-tile, annotation writes, tileset create and delete, plugin install, uninstall, config and enable/disable, webhook and scheduled job writes, org create, admin user delete and role change, API key mint, revoke and delete, and the Ion-compat asset create and token mint
+- A row names who (the JWT `sub`), what (a `Create`, `Delete`, `PermissionChange` and so on), the resource type and id, and the method, path and status. Refusals are not recorded: the log says what happened to the data, and recording refusals would let a caller fill the table by being refused in a loop
+- `GET /api/v1/audit` reads it back, instance-admin only, filtered by `user_id`, `action`, `resource_type`, `from`, `to` and `limit` (100 rows by default, 1000 at most). Newest first
+- `TILETOPIA_AUDIT_RETENTION_DAYS` — how long a row is kept, 30 by default. A sweep runs hourly. `0`, a negative number, or anything that is not a whole number of days turns the sweep off and keeps everything
+
 ### Cesium Ion Compatibility
 - Ion REST compatibility for asset id and endpoint resolution
 - A terrain asset in that layer resolves to a prebuilt bundle named after the asset id
@@ -416,6 +422,7 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `GET` | `/api/v1/tiles/sources` | List 2D tile sources (OSM, etc.) |
 | `GET` | `/api/v1/tiles/styles` | MapLibre GL style JSON |
 | `GET` | `/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` | Hillshade, slope or ndvi tiles, rendered on demand |
+| `GET` | `/api/v1/audit` | The audit trail, newest first. Instance-admin only |
 | `GET` | `/metrics` | Prometheus metrics |
 
 Other `/api/v1/*` geospatial and premium routes are mounted and real: STAC search proxies `TILETOPIA_STAC_API`, COG windows read `TILETOPIA_COG_SOURCES` over range requests, static maps render the DEM to PNG/JPEG/WebP/SVG/PDF, geostatistics solves kriging systems, geoprocessing runs geo's boolean overlays, webhooks deliver HMAC-signed job and asset events, the scheduler runs the jobs it stores, and API keys authenticate read routes (`X-Api-Key`, admin-minted, hashed at rest). The facades left are in the table above: the pub-mod-only modules have no routes.

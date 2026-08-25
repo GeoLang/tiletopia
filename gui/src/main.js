@@ -338,10 +338,12 @@ async function loadAdmin() {
   panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading...</p></div>';
   try {
     const [auditRes, rbacRes] = await Promise.all([
-      fetch(`${API}/demo/audit`),
+      fetch(`${API}/audit`),
       fetch(`${API}/demo/rbac`),
     ]);
-    const audit = await auditRes.json();
+    // the real trail is admin-only, so a viewer or an unauthenticated page gets
+    // an empty table rather than a broken panel
+    const audit = auditRes.ok ? await auditRes.json() : [];
     const rbac = await rbacRes.json();
     panel.innerHTML = `<div class="feature-panel">
       <h2>🔒 Enterprise Admin</h2>

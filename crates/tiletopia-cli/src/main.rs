@@ -204,6 +204,13 @@ async fn main() -> anyhow::Result<()> {
             ));
             Arc::clone(&scheduler).start();
 
+            let audit_log = Arc::new(tiletopia_server::audit::AuditLog::new(Arc::clone(&db)));
+            if Arc::clone(&audit_log).start().is_none() {
+                tracing::info!(
+                    "TILETOPIA_AUDIT_RETENTION_DAYS turns the sweep off, audit entries are kept forever"
+                );
+            }
+
             #[cfg(feature = "martin")]
             let current_tileset_build = tiletopia_server::tilesets::CurrentBuild::new();
 
@@ -249,6 +256,7 @@ async fn main() -> anyhow::Result<()> {
                 srtm_base_url: tiletopia_terrain::dem_cache::srtm_base_url_from_env(),
                 job_queue,
                 realtime: tiletopia_server::realtime::RealtimeState::new(),
+                audit_log,
                 demo: tiletopia_server::demo::DemoState::new(),
                 catalog: tiletopia_server::catalog::OpenDataCatalog::new(),
                 started_at: std::time::Instant::now(),

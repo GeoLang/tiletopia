@@ -8,12 +8,10 @@ use serde::Serialize;
 use std::sync::Arc;
 
 use crate::AppState;
-use crate::audit::{AuditAction, AuditLog, AuditQuery};
 use crate::stories::{CameraPosition, Slide, Story, StorySettings, StoryStore, TransitionType};
 
 /// Demo state held alongside AppState.
 pub struct DemoState {
-    pub audit_log: AuditLog,
     pub story_store: StoryStore,
 }
 
@@ -26,66 +24,7 @@ impl Default for DemoState {
 impl DemoState {
     /// Create and seed demo state with sample data.
     pub fn new() -> Self {
-        let audit_log = AuditLog::new(1000);
         let mut story_store = StoryStore::new();
-
-        // Seed audit entries
-        audit_log.log_action(
-            "admin@company.com",
-            AuditAction::Upload,
-            "asset",
-            "site_scan_v3",
-            "Uploaded site_scan_v3.las (2.4 GB)",
-            true,
-        );
-        audit_log.log_action(
-            "sarah@company.com",
-            AuditAction::Read,
-            "tileset",
-            "building-A",
-            "Viewed tileset/building-A",
-            true,
-        );
-        audit_log.log_action(
-            "admin@company.com",
-            AuditAction::PermissionChange,
-            "user",
-            "sarah@company.com",
-            "Granted Editor role to sarah@company.com",
-            true,
-        );
-        audit_log.log_action(
-            "client@external.io",
-            AuditAction::Delete,
-            "tileset",
-            "old-scan",
-            "Attempted to delete tileset/old — DENIED",
-            false,
-        );
-        audit_log.log_action(
-            "client@external.io",
-            AuditAction::Read,
-            "tileset",
-            "building-A",
-            "Viewed tileset/building-A",
-            true,
-        );
-        audit_log.log_action(
-            "admin@company.com",
-            AuditAction::Export,
-            "audit",
-            "log",
-            "Exported audit_log_2026-05.json",
-            true,
-        );
-        audit_log.log_action(
-            "sarah@company.com",
-            AuditAction::Login,
-            "session",
-            "session-847",
-            "Login via OIDC (auth0)",
-            true,
-        );
 
         // Seed a story
         let story = Story {
@@ -176,10 +115,7 @@ impl DemoState {
         };
         story_store.create(story);
 
-        Self {
-            audit_log,
-            story_store,
-        }
+        Self { story_store }
     }
 }
 
@@ -189,7 +125,6 @@ pub fn demo_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/demo/measurement", get(measurement_handler))
         .route("/api/v1/demo/anomaly", get(anomaly_handler))
         .route("/api/v1/demo/clash", get(clash_handler))
-        .route("/api/v1/demo/audit", get(audit_handler))
         .route("/api/v1/demo/rbac", get(rbac_handler))
         .route("/api/v1/demo/stories", get(stories_handler))
 }
@@ -522,43 +457,6 @@ async fn clash_handler() -> Json<ClashResult> {
         hard_count,
         soft_count,
     })
-}
-
-// ─── Audit Log ───────────────────────────────────────────────────────────────
-
-#[derive(serde::Deserialize, Default)]
-struct AuditParams {
-    user_id: Option<String>,
-    action: Option<String>,
-    resource_type: Option<String>,
-    limit: Option<usize>,
-}
-
-async fn audit_handler(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<AuditParams>,
-) -> Json<Vec<crate::audit::AuditEntry>> {
-    let action = params.action.and_then(|a| match a.as_str() {
-        "Create" => Some(AuditAction::Create),
-        "Read" => Some(AuditAction::Read),
-        "Update" => Some(AuditAction::Update),
-        "Delete" => Some(AuditAction::Delete),
-        "Upload" => Some(AuditAction::Upload),
-        "Download" => Some(AuditAction::Download),
-        "Login" => Some(AuditAction::Login),
-        "Logout" => Some(AuditAction::Logout),
-        "PermissionChange" => Some(AuditAction::PermissionChange),
-        "Export" => Some(AuditAction::Export),
-        _ => None,
-    });
-    let entries = state.demo.audit_log.query(&AuditQuery {
-        user_id: params.user_id,
-        action,
-        resource_type: params.resource_type,
-        limit: Some(params.limit.unwrap_or(20)),
-        ..Default::default()
-    });
-    Json(entries)
 }
 
 // ─── RBAC ────────────────────────────────────────────────────────────────────

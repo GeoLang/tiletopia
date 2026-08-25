@@ -150,6 +150,10 @@ pub async fn build_state(
         Arc::clone(&job_queue),
     ));
 
+    // no sweep task: a case that wants one runs it itself, so nothing deletes
+    // rows under a case that is still reading them
+    let audit_log = Arc::new(tiletopia_server::audit::AuditLog::new(Arc::clone(&db)));
+
     Arc::new(AppState {
         db,
         store,
@@ -159,6 +163,7 @@ pub async fn build_state(
         srtm_base_url: String::new(),
         job_queue,
         realtime: tiletopia_server::realtime::RealtimeState::new(),
+        audit_log,
         demo: tiletopia_server::demo::DemoState::new(),
         catalog: tiletopia_server::catalog::OpenDataCatalog::new(),
         started_at: std::time::Instant::now(),

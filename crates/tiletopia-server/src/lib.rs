@@ -106,6 +106,9 @@ pub struct AppState {
     pub srtm_base_url: String,
     pub job_queue: Arc<job_queue::JobQueue>,
     pub realtime: realtime::RealtimeState,
+    /// Records the mutations that answered 2xx, written by
+    /// [`audit::audit_middleware`] and read by `GET /api/v1/audit`.
+    pub audit_log: Arc<audit::AuditLog>,
     pub demo: demo::DemoState,
     pub catalog: catalog::OpenDataCatalog,
     pub started_at: Instant,
@@ -324,6 +327,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/health", get(health))
         .route("/metrics", get(metrics::metrics_handler))
         .merge(demo::demo_routes())
+        .merge(audit::audit_routes())
         .merge(catalog::catalog_routes())
         .merge(terrain_api::terrain_routes())
         .merge(terrain_bundle::terrain_bundle_routes())
@@ -405,7 +409,14 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .layer(middleware::from_fn(users::require_editor)),
         );
 
+    // inside the auth layer, so a request with a bad token is refused before it
+    // can leave a row. The role gates are per-router and sit further in still;
+    // what keeps a refusal out of the trail is that only a 2xx is recorded.
     app.layer(middleware::from_fn_with_state(
+        Arc::clone(&state),
+        audit::audit_middleware,
+    ))
+    .layer(middleware::from_fn_with_state(
         Arc::clone(&state),
         auth::auth_middleware,
     ))

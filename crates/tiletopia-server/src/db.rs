@@ -8,6 +8,7 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::api_keys::{ApiKey, Permission, RateLimitTier};
+use crate::audit::{AuditAction, AuditEntry, AuditQuery};
 use crate::scheduler::{Outcome, RunOutcome, Schedule, ScheduledAction, ScheduledJob};
 use crate::users::{Organization, User, UserRole};
 use crate::webhooks::{WebhookEvent, WebhookSubscription};
@@ -121,6 +122,8 @@ const API_KEY_COLUMNS: &str = "id, name, key_hash, permissions, tier, created_by
 const WEBHOOK_COLUMNS: &str = "id, url, events, secret, created_by, active, created_at";
 
 const SCHEDULED_JOB_COLUMNS: &str = "id, name, action, schedule, enabled, created_by, created_at, next_run, last_run, last_outcome, last_detail, run_count, consecutive_failures";
+
+const AUDIT_COLUMNS: &str = "id, timestamp, user_id, action, resource_type, resource_id, details, ip_address, org_id, success";
 
 fn enum_to_str<T: Serialize>(val: &T) -> String {
     serde_json::to_string(val)
@@ -427,6 +430,30 @@ impl Database {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS audit_entries (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                details TEXT NOT NULL,
+                ip_address TEXT,
+                org_id TEXT,
+                success INTEGER NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // both the read route and the retention sweep work on this column
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS audit_entries_timestamp ON audit_entries(timestamp)",
         )
         .execute(&self.pool)
         .await?;
@@ -1100,6 +1127,105 @@ impl Database {
              AND completed_at IS NOT NULL AND completed_at < ?",
         )
         .bind(cutoff.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    // -- Audit trail --
+
+    pub async fn create_audit_entry(&self, entry: &AuditEntry) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO audit_entries \
+             (id, timestamp, user_id, action, resource_type, resource_id, details, \
+              ip_address, org_id, success) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&entry.id)
+        .bind(entry.timestamp.to_rfc3339())
+        .bind(&entry.user_id)
+        .bind(entry.action.name())
+        .bind(&entry.resource_type)
+        .bind(&entry.resource_id)
+        .bind(&entry.details)
+        .bind(entry.ip_address.as_deref())
+        .bind(entry.org_id.as_deref())
+        .bind(entry.success as i64)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Matching audit entries, newest first. Every filter is a bind, never
+    /// interpolated text, and the row count is capped by
+    /// [`AuditQuery::effective_limit`].
+    pub async fn query_audit_entries(
+        &self,
+        filter: &AuditQuery,
+    ) -> Result<Vec<AuditEntry>, sqlx::Error> {
+        let mut sql = format!("SELECT {AUDIT_COLUMNS} FROM audit_entries WHERE 1 = 1");
+        if filter.user_id.is_some() {
+            sql.push_str(" AND user_id = ?");
+        }
+        if filter.action.is_some() {
+            sql.push_str(" AND action = ?");
+        }
+        if filter.resource_type.is_some() {
+            sql.push_str(" AND resource_type = ?");
+        }
+        if filter.from.is_some() {
+            sql.push_str(" AND timestamp >= ?");
+        }
+        if filter.to.is_some() {
+            sql.push_str(" AND timestamp <= ?");
+        }
+        sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
+
+        let mut query = sqlx::query(&sql);
+        if let Some(user_id) = &filter.user_id {
+            query = query.bind(user_id.clone());
+        }
+        if let Some(action) = &filter.action {
+            query = query.bind(action.name());
+        }
+        if let Some(resource_type) = &filter.resource_type {
+            query = query.bind(resource_type.clone());
+        }
+        if let Some(from) = filter.from {
+            query = query.bind(from.to_rfc3339());
+        }
+        if let Some(to) = filter.to {
+            query = query.bind(to.to_rfc3339());
+        }
+        let rows = query
+            .bind(filter.effective_limit())
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.iter().map(row_to_audit_entry).collect()
+    }
+
+    pub async fn count_audit_entries(&self) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_entries")
+            .fetch_one(&self.pool)
+            .await
+    }
+
+    /// Remove up to `batch` audit entries older than `cutoff`. Returns the rows
+    /// removed, which is short of `batch` when there is no more to take.
+    pub async fn delete_audit_entries_before(
+        &self,
+        cutoff: DateTime<Utc>,
+        batch: i64,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "DELETE FROM audit_entries WHERE id IN \
+             (SELECT id FROM audit_entries WHERE timestamp < ? LIMIT ?)",
+        )
+        .bind(cutoff.to_rfc3339())
+        .bind(batch)
         .execute(&self.pool)
         .await?;
 
@@ -1786,6 +1912,29 @@ fn row_to_scheduled_job(row: &sqlx::sqlite::SqliteRow) -> Result<ScheduledJob, s
             }),
         run_count: row.get::<i64, _>("run_count") as u64,
         consecutive_failures: row.get::<i64, _>("consecutive_failures") as u32,
+    })
+}
+
+/// A stored audit entry. An action name this build cannot read is a decode
+/// error rather than a row quietly dropped from the trail: only this code writes
+/// that column, so an unreadable one means the database was edited by hand.
+fn row_to_audit_entry(row: &sqlx::sqlite::SqliteRow) -> Result<AuditEntry, sqlx::Error> {
+    let action_name: String = row.get("action");
+    let action = AuditAction::from_name(&action_name).ok_or_else(|| {
+        sqlx::Error::Decode(format!("unknown audit action {action_name:?}").into())
+    })?;
+
+    Ok(AuditEntry {
+        id: row.get("id"),
+        timestamp: parse_datetime(&row.get::<String, _>("timestamp")),
+        user_id: row.get("user_id"),
+        action,
+        resource_type: row.get("resource_type"),
+        resource_id: row.get("resource_id"),
+        details: row.get("details"),
+        ip_address: row.get("ip_address"),
+        org_id: row.get("org_id"),
+        success: row.get::<i64, _>("success") != 0,
     })
 }
 
