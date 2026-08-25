@@ -3,7 +3,7 @@
 //! Stores stories in SQLite, supports public sharing via share tokens.
 
 use axum::{
-    Router,
+    Extension, Router,
     extract::{Path, State},
     http::StatusCode,
     response::Json,
@@ -15,6 +15,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::audit::AuditedResource;
 
 /// A persistent story (narrated 3D presentation).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,7 +115,7 @@ async fn list_stories(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Sto
 async fn create_story(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateStoryRequest>,
-) -> Result<(StatusCode, Json<Story>), StatusCode> {
+) -> Result<(StatusCode, Extension<AuditedResource>, Json<Story>), StatusCode> {
     let share_token = if req.is_public {
         Some(Uuid::new_v4().to_string().replace('-', ""))
     } else {
@@ -140,7 +141,11 @@ async fn create_story(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok((StatusCode::CREATED, Json(story)))
+    Ok((
+        StatusCode::CREATED,
+        Extension(AuditedResource(story.id.to_string())),
+        Json(story),
+    ))
 }
 
 async fn get_story(

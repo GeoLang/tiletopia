@@ -4,6 +4,7 @@ use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use axum::{
+    Extension,
     extract::{Request, State},
     http::StatusCode,
     middleware::Next,
@@ -18,6 +19,7 @@ use std::sync::{Arc, LazyLock};
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::audit::AuditedResource;
 use crate::auth::Claims;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -381,7 +383,7 @@ pub async fn list_orgs(
 pub async fn create_org(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateOrgRequest>,
-) -> Result<(StatusCode, Json<Organization>), StatusCode> {
+) -> Result<(StatusCode, Extension<AuditedResource>, Json<Organization>), StatusCode> {
     let org = Organization {
         id: Uuid::new_v4(),
         name: req.name,
@@ -396,7 +398,11 @@ pub async fn create_org(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok((StatusCode::CREATED, Json(org)))
+    Ok((
+        StatusCode::CREATED,
+        Extension(AuditedResource(org.id.to_string())),
+        Json(org),
+    ))
 }
 
 #[cfg(test)]

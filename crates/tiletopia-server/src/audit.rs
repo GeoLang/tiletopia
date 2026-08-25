@@ -20,7 +20,7 @@
 
 use axum::{
     Router,
-    extract::{MatchedPath, Query, Request, State},
+    extract::{ConnectInfo, MatchedPath, Query, Request, State},
     http::StatusCode,
     middleware::Next,
     response::{Json, Response},
@@ -28,6 +28,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::AppState;
@@ -73,6 +74,15 @@ pub struct AuditEntry {
     pub org_id: Option<String>,
     pub success: bool,
 }
+
+/// The id a create handler picked, returned on its response so the row can name
+/// what was created. A handler is the only thing that can set it: nothing on the
+/// wire becomes a response extension.
+///
+/// Return it beside the body, for example
+/// `(StatusCode::CREATED, Extension(AuditedResource(id.to_string())), Json(job))`.
+#[derive(Clone)]
+pub struct AuditedResource(pub String);
 
 /// Types of auditable actions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -443,6 +453,7 @@ struct Pending {
     resource_id: String,
     method: &'static str,
     path: String,
+    ip_address: Option<String>,
 }
 
 /// The last template parameter's value, which is the thing the route acts on:
@@ -479,6 +490,11 @@ fn pending(request: &Request) -> Option<Pending> {
         resource_id: resource_id(template, request.uri().path()),
         method: route.method,
         path: request.uri().path().to_owned(),
+        // the direct peer, which is the proxy when one fronts the server
+        ip_address: request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(peer)| peer.ip().to_string()),
     })
 }
 
@@ -505,6 +521,16 @@ pub async fn audit_middleware(
     })
     .to_string();
 
+    // a create's path names no id, so the handler hands one back
+    let resource_id = match pending.resource_id.is_empty() {
+        false => pending.resource_id,
+        true => response
+            .extensions()
+            .get::<AuditedResource>()
+            .map(|created| created.0.clone())
+            .unwrap_or_default(),
+    };
+
     state
         .audit_log
         .record(AuditEntry {
@@ -513,11 +539,9 @@ pub async fn audit_middleware(
             user_id: pending.user_id,
             action: pending.action,
             resource_type: pending.resource_type.to_owned(),
-            resource_id: pending.resource_id,
+            resource_id,
             details,
-            // the server is served without ConnectInfo, so there is no peer
-            // address to read and a proxy header would be caller-controlled
-            ip_address: None,
+            ip_address: pending.ip_address,
             // no token this server issues carries an organization
             org_id: None,
             // only a 2xx gets this far

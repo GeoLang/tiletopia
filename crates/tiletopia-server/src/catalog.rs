@@ -3,11 +3,12 @@
 //! Provides one-click access to global terrain, 3D buildings, satellite imagery,
 //! and community datasets without requiring any paid service subscriptions.
 
-use axum::{Router, extract::State, middleware, response::Json, routing::get};
+use axum::{Extension, Router, extract::State, middleware, response::Json, routing::get};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::AppState;
+use crate::audit::AuditedResource;
 
 /// A dataset available in the open catalog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -430,7 +431,14 @@ async fn add_dataset(
     axum::extract::Path(dataset_id): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
     Json(req): Json<AddDatasetRequest>,
-) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), axum::http::StatusCode> {
+) -> Result<
+    (
+        axum::http::StatusCode,
+        Extension<AuditedResource>,
+        Json<serde_json::Value>,
+    ),
+    axum::http::StatusCode,
+> {
     // the route sits behind require_editor, so a valid token is always present
     let owner_id = crate::users::claims_from_headers(&headers)?.sub;
 
@@ -498,6 +506,7 @@ async fn add_dataset(
 
     Ok((
         axum::http::StatusCode::CREATED,
+        Extension(AuditedResource(asset_id.to_string())),
         Json(serde_json::json!({
             "asset_id": asset_id,
             "job_id": job_id,

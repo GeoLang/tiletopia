@@ -346,3 +346,109 @@ async fn the_sweep_deletes_rows_past_the_window() {
         "{left:?}"
     );
 }
+
+/// A create names no id in its path, so the handler hands the id it chose back
+/// on the response and the row carries that.
+#[tokio::test]
+async fn a_create_records_the_id_the_handler_chose() {
+    let state = common::test_state().await;
+    let admin = common::token("admin-1", "admin");
+
+    let uploaded = send(&state, upload_request(&admin, "scan.glb")).await;
+    assert_eq!(uploaded.status, StatusCode::CREATED);
+    let asset_id = uploaded.body["id"].as_str().unwrap().to_owned();
+
+    let key = send(
+        &state,
+        json_request(
+            "POST",
+            "/api/v1/api-keys",
+            &admin,
+            serde_json::json!({"name": "reader", "permissions": ["read"], "tier": "free"}),
+        ),
+    )
+    .await;
+    assert_eq!(key.status, StatusCode::CREATED);
+    let key_id = key.body["api_key"]["id"].as_str().unwrap().to_owned();
+
+    let recorded = |resource_type: &str| {
+        let entries = &state;
+        let resource_type = resource_type.to_owned();
+        async move {
+            all_entries(entries)
+                .await
+                .into_iter()
+                .find(|entry| entry.resource_type == resource_type)
+                .unwrap_or_else(|| panic!("no {resource_type} row"))
+        }
+    };
+
+    assert_eq!(recorded("asset").await.resource_id, asset_id);
+    assert_eq!(recorded("api_key").await.resource_id, key_id);
+}
+
+/// The address is the direct peer off the socket, never a header, so a caller
+/// cannot write it. A request that arrived without connect info records none
+/// rather than a guess.
+#[tokio::test]
+async fn the_row_carries_the_peer_address() {
+    let state = common::test_state().await;
+    let editor = common::token("editor-1", "editor");
+    let asset_id = seed_asset(&state, "editor-1").await;
+
+    let annotation = |longitude: f64| {
+        json_request(
+            "POST",
+            &format!("/api/v1/assets/{asset_id}/annotations"),
+            &editor,
+            serde_json::json!({"text": "here", "longitude": longitude, "latitude": 43.7}),
+        )
+    };
+
+    let mut with_peer = annotation(7.4);
+    with_peer
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [203, 0, 113, 7],
+            51234,
+        ))));
+    // a forged header must not reach the row
+    with_peer
+        .headers_mut()
+        .insert("x-forwarded-for", "10.0.0.1".parse().unwrap());
+    assert_eq!(send(&state, with_peer).await.status, StatusCode::CREATED);
+
+    assert_eq!(
+        send(&state, annotation(7.5)).await.status,
+        StatusCode::CREATED
+    );
+
+    let entries = all_entries(&state).await;
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    let addresses: Vec<Option<String>> = entries
+        .iter()
+        .map(|entry| entry.ip_address.clone())
+        .collect();
+    // newest first, so the one with no connect info comes back first
+    assert_eq!(addresses, vec![None, Some("203.0.113.7".to_owned())]);
+}
+
+/// A multipart upload of one tiny file, which is what `POST /api/v1/assets`
+/// takes.
+fn upload_request(bearer: &str, filename: &str) -> Request<Body> {
+    const BOUNDARY: &str = "tiletopiaauditboundary";
+    let body = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+         filename=\"{filename}\"\r\n\r\nglTF-bytes\r\n--{BOUNDARY}--\r\n"
+    );
+    Request::builder()
+        .method("POST")
+        .uri("/api/v1/assets")
+        .header("authorization", format!("Bearer {bearer}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body))
+        .unwrap()
+}

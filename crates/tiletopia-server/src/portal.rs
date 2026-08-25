@@ -4,7 +4,7 @@
 //! items plus any shared as public or org. Only the owner may delete.
 
 use axum::{
-    Router,
+    Extension, Router,
     extract::{Path, Request, State},
     http::StatusCode,
     response::Json,
@@ -16,6 +16,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::audit::AuditedResource;
 
 /// A catalog item as exchanged with the viewer. `owner_id` is the authz key and
 /// is never serialized; the viewer sees only the display `owner` name.
@@ -98,7 +99,7 @@ async fn list_items(
 async fn create_item(
     State(state): State<Arc<AppState>>,
     request: Request,
-) -> Result<(StatusCode, Json<PortalItem>), StatusCode> {
+) -> Result<(StatusCode, Extension<AuditedResource>, Json<PortalItem>), StatusCode> {
     let claims = crate::users::extract_claims(&request)?;
     let owner_id = Uuid::parse_str(&claims.sub).map_err(|_| StatusCode::UNAUTHORIZED)?;
 
@@ -141,7 +142,11 @@ async fn create_item(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok((StatusCode::CREATED, Json(item)))
+    Ok((
+        StatusCode::CREATED,
+        Extension(AuditedResource(item.id.to_string())),
+        Json(item),
+    ))
 }
 
 async fn delete_item(

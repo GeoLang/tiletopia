@@ -3,7 +3,7 @@
 //! Manages installed plugins with CRUD operations and enable/disable toggles.
 
 use axum::{
-    Router,
+    Extension, Router,
     extract::{Path, State},
     http::StatusCode,
     middleware,
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::AppState;
+use crate::audit::AuditedResource;
 
 /// Plugin manifest describing a plugin's identity and capabilities.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,7 +116,14 @@ async fn list_plugins(
 async fn install_plugin(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InstallPluginRequest>,
-) -> Result<(StatusCode, Json<InstalledPlugin>), StatusCode> {
+) -> Result<
+    (
+        StatusCode,
+        Extension<AuditedResource>,
+        Json<InstalledPlugin>,
+    ),
+    StatusCode,
+> {
     let plugin = InstalledPlugin {
         manifest: req.manifest,
         installed_at: Utc::now(),
@@ -129,7 +137,11 @@ async fn install_plugin(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok((StatusCode::CREATED, Json(plugin)))
+    Ok((
+        StatusCode::CREATED,
+        Extension(AuditedResource(plugin.manifest.id.clone())),
+        Json(plugin),
+    ))
 }
 
 async fn get_plugin(

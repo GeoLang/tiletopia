@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::Extension;
 use axum::extract::{Multipart, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
@@ -17,6 +18,7 @@ use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::audit::AuditedResource;
 use crate::db::{Database, TilesetRecord, TilesetStatus};
 use crate::map_tiles::martin_backend::MartinTileBackend;
 use crate::{AppState, auth, users};
@@ -571,7 +573,7 @@ pub async fn upload_tileset(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<UploadResponse>), RouteError> {
+) -> Result<(StatusCode, Extension<AuditedResource>, Json<UploadResponse>), RouteError> {
     // the route sits behind require_editor, so a valid token is always present
     let owner_id = users::claims_from_headers(&headers)
         .map_err(|status| (status, String::new()))?
@@ -650,6 +652,7 @@ pub async fn upload_tileset(
 
     Ok((
         StatusCode::ACCEPTED,
+        Extension(AuditedResource(tileset.id.to_string())),
         Json(UploadResponse {
             job_id: id,
             tileset,

@@ -3,7 +3,7 @@
 //! Wires up all premium modules into axum routers.
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Body,
     extract::{FromRef, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
@@ -16,7 +16,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{
-    AppState, api_keys, classification, cog, elevation,
+    AppState, api_keys,
+    audit::AuditedResource,
+    classification, cog, elevation,
     export::{EXPORT_FORMATS, ExportFormat, ExportJob, ExportStatus},
     feature_service, flight_planning, geocoding, geoprocessing, geostatistics, indoor, isochrone,
     map_matching, map_tiles, metering, mobile, multispectral, osm_buildings, routing,
@@ -137,7 +139,14 @@ async fn create_api_key_route(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(request): Json<CreateApiKeyRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), Refusal> {
+) -> Result<
+    (
+        StatusCode,
+        Extension<AuditedResource>,
+        Json<serde_json::Value>,
+    ),
+    Refusal,
+> {
     // behind require_admin, so a valid admin token is always present
     let created_by = users::claims_from_headers(&headers)
         .map_err(|status| Refusal::from(status.into_response()))?
@@ -168,6 +177,7 @@ async fn create_api_key_route(
 
     Ok((
         StatusCode::CREATED,
+        Extension(AuditedResource(key.id.to_string())),
         Json(serde_json::json!({
             "key": plaintext,
             "warning": "this is the only time the key is shown",
@@ -439,7 +449,14 @@ async fn create_webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(request): Json<WebhookSubscriptionRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), Refusal> {
+) -> Result<
+    (
+        StatusCode,
+        Extension<AuditedResource>,
+        Json<serde_json::Value>,
+    ),
+    Refusal,
+> {
     // behind require_editor, so a valid token is always present
     let created_by = users::claims_from_headers(&headers)
         .map_err(|status| Refusal::from(status.into_response()))?
@@ -463,6 +480,7 @@ async fn create_webhook(
 
     Ok((
         StatusCode::CREATED,
+        Extension(AuditedResource(subscription.id.to_string())),
         Json(serde_json::json!({
             "secret": subscription.secret,
             "warning": "this is the only time the secret is shown",
@@ -675,7 +693,7 @@ async fn create_export(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<CreateExportRequest>,
-) -> Result<(StatusCode, Json<ExportJob>), StatusCode> {
+) -> Result<(StatusCode, Extension<AuditedResource>, Json<ExportJob>), StatusCode> {
     let tenant_id = tenant_from_headers(&headers)?;
     let format = ExportFormat::from_id(&req.format).ok_or(StatusCode::BAD_REQUEST)?;
     let job = state
@@ -696,7 +714,11 @@ async fn create_export(
         }
     });
 
-    Ok((StatusCode::ACCEPTED, Json(job)))
+    Ok((
+        StatusCode::ACCEPTED,
+        Extension(AuditedResource(job_id.to_string())),
+        Json(job),
+    ))
 }
 
 async fn get_export(
@@ -863,7 +885,14 @@ async fn create_scheduled_job(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(request): Json<CreateScheduledJobRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), Refusal> {
+) -> Result<
+    (
+        StatusCode,
+        Extension<AuditedResource>,
+        Json<serde_json::Value>,
+    ),
+    Refusal,
+> {
     // behind require_editor, so a valid token is always present
     let created_by = users::claims_from_headers(&headers)
         .map_err(|status| Refusal::from(status.into_response()))?
@@ -894,7 +923,11 @@ async fn create_scheduled_job(
         .await
         .map_err(|error| scheduled_job_write_failed("storing", error))?;
 
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "job": job }))))
+    Ok((
+        StatusCode::CREATED,
+        Extension(AuditedResource(job.id.to_string())),
+        Json(serde_json::json!({ "job": job })),
+    ))
 }
 
 /// Enable or disable a job. Enabling one recomputes the next run from now, so a

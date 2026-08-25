@@ -4,7 +4,7 @@
 //! using `Cesium.IonResource` can point at Tiletopia instead.
 
 use axum::{
-    Router,
+    Extension, Router,
     extract::{Path, State},
     http::StatusCode,
     middleware,
@@ -16,6 +16,7 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::audit::AuditedResource;
 use crate::{AppState, AssetType, terrain_bundle, users};
 
 // ─── Ion-format response types ───────────────────────────────────────────────
@@ -205,7 +206,7 @@ async fn create_asset(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     Json(req): Json<CreateIonAssetRequest>,
-) -> Result<(StatusCode, Json<IonAsset>), StatusCode> {
+) -> Result<(StatusCode, Extension<AuditedResource>, Json<IonAsset>), StatusCode> {
     // the route sits behind require_editor, so a valid token is always present
     let owner_id = users::claims_from_headers(&headers)?.sub;
 
@@ -235,7 +236,13 @@ async fn create_asset(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok((StatusCode::CREATED, Json(to_ion_asset(&asset, ion_id))))
+    // the internal asset id, so a row names the same key whichever create route
+    // made the asset
+    Ok((
+        StatusCode::CREATED,
+        Extension(AuditedResource(asset.id.to_string())),
+        Json(to_ion_asset(&asset, ion_id)),
+    ))
 }
 
 /// Status plus a message, because the only thing a CesiumJS developer sees when
@@ -307,7 +314,9 @@ async fn list_tokens() -> Json<Vec<IonToken>> {
     }])
 }
 
-async fn create_token(Json(req): Json<CreateIonTokenRequest>) -> (StatusCode, Json<IonToken>) {
+async fn create_token(
+    Json(req): Json<CreateIonTokenRequest>,
+) -> (StatusCode, Extension<AuditedResource>, Json<IonToken>) {
     let token = IonToken {
         id: Uuid::new_v4().to_string(),
         name: req.name,
@@ -322,5 +331,9 @@ async fn create_token(Json(req): Json<CreateIonTokenRequest>) -> (StatusCode, Js
             req.scopes
         },
     };
-    (StatusCode::CREATED, Json(token))
+    (
+        StatusCode::CREATED,
+        Extension(AuditedResource(token.id.clone())),
+        Json(token),
+    )
 }

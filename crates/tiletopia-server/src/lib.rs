@@ -82,8 +82,9 @@ pub mod webhooks;
 pub mod whitelabel;
 pub mod workspaces;
 
+use audit::AuditedResource;
 use axum::{
-    Router,
+    Extension, Router,
     extract::{Path, State},
     http::StatusCode,
     middleware,
@@ -703,7 +704,14 @@ async fn create_annotation(
     Path(asset_id): Path<Uuid>,
     headers: axum::http::HeaderMap,
     Json(body): Json<CreateAnnotation>,
-) -> Result<(StatusCode, Json<db::AnnotationRecord>), StatusCode> {
+) -> Result<
+    (
+        StatusCode,
+        Extension<AuditedResource>,
+        Json<db::AnnotationRecord>,
+    ),
+    StatusCode,
+> {
     let author = annotation_writer(&state, asset_id, &headers).await?.sub;
 
     let ann = db::AnnotationRecord {
@@ -724,7 +732,11 @@ async fn create_annotation(
         .create_annotation(&ann)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok((StatusCode::CREATED, Json(ann)))
+    Ok((
+        StatusCode::CREATED,
+        Extension(AuditedResource(ann.id.to_string())),
+        Json(ann),
+    ))
 }
 
 async fn delete_annotation(

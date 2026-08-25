@@ -1,6 +1,7 @@
 //! File upload handler (multipart).
 
 use axum::{
+    Extension,
     extract::{Multipart, State},
     http::{HeaderMap, StatusCode},
     response::Json,
@@ -10,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::audit::AuditedResource;
 use crate::db::ModelPlacement;
 use crate::{AppState, Asset, AssetStatus, AssetType, users};
 
@@ -46,7 +48,7 @@ pub async fn upload_asset(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<UploadResponse>), UploadError> {
+) -> Result<(StatusCode, Extension<AuditedResource>, Json<UploadResponse>), UploadError> {
     // the route sits behind require_editor, so a valid token is always present
     let owner_id = users::claims_from_headers(&headers)
         .map_err(|status| (status, String::new()))?
@@ -137,7 +139,11 @@ pub async fn upload_asset(
     tracing::info!("Uploaded asset {} ({} bytes)", asset.id, size_bytes);
     tracing::info!("metric: assets_uploaded");
 
-    Ok((StatusCode::CREATED, Json(UploadResponse { asset, job_id })))
+    Ok((
+        StatusCode::CREATED,
+        Extension(AuditedResource(asset.id.to_string())),
+        Json(UploadResponse { asset, job_id }),
+    ))
 }
 
 /// The upload's fields, with the file itself already streamed to disk.
