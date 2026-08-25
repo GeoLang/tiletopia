@@ -855,6 +855,110 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// One triangle per asset, far enough apart that the split puts them in
+    /// different leaves.
+    fn triangle_at(x: f32, asset_id: Option<&str>) -> MeshData {
+        MeshData {
+            positions: vec![[x, 0.0, 0.0], [x + 1.0, 0.0, 0.0], [x, 1.0, 0.0]],
+            normals: Vec::new(),
+            texcoords: Vec::new(),
+            indices: vec![0, 1, 2],
+            name: "triangle".into(),
+            asset_id: asset_id.map(str::to_string),
+            base_color_factor: None,
+            texture: None,
+        }
+    }
+
+    fn collect_leaves<'a>(node: &'a MeshTileNode, found: &mut Vec<&'a GlbMesh>) {
+        match node {
+            MeshTileNode::Leaf { mesh, .. } => found.push(mesh),
+            MeshTileNode::Internal { children, .. } => {
+                for child in children {
+                    collect_leaves(child, found);
+                }
+            }
+        }
+    }
+
+    /// The feature ids a leaf's triangles actually reach.
+    fn referenced_feature_ids(mesh: &GlbMesh) -> Vec<u32> {
+        let feature_ids = mesh.feature_ids.as_ref().expect("feature ids on the leaf");
+        let mut reached: Vec<u32> = mesh
+            .indices
+            .as_ref()
+            .expect("indices on the leaf")
+            .iter()
+            .map(|index| feature_ids[*index as usize])
+            .collect();
+        reached.sort_unstable();
+        reached.dedup();
+        reached
+    }
+
+    #[test]
+    fn a_split_keeps_every_vertex_with_its_own_asset() {
+        let meshes = [
+            triangle_at(0.0, Some("asset-a")),
+            triangle_at(10.0, Some("asset-b")),
+        ];
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 1,
+            ..Default::default()
+        };
+
+        let tree = build_mesh_tree(&meshes, &config);
+        let mut leaves = Vec::new();
+        collect_leaves(&tree, &mut leaves);
+        assert_eq!(leaves.len(), 2, "the two triangles should split apart");
+
+        let reached: Vec<Vec<u32>> = leaves.iter().map(|mesh| referenced_feature_ids(mesh)).collect();
+        assert_eq!(reached, vec![vec![0], vec![1]]);
+
+        for leaf in &leaves {
+            let metadata = leaf.metadata.as_ref().expect("a property table");
+            assert_eq!(metadata.class_name, "asset");
+            let MetadataValues::String(asset_ids) = &metadata.properties[0].values else {
+                panic!("asset_id should be a string property");
+            };
+            assert_eq!(metadata.properties[0].name, "asset_id");
+            assert_eq!(asset_ids, &["asset-a".to_string(), "asset-b".to_string()]);
+        }
+    }
+
+    #[test]
+    fn a_mesh_without_an_asset_id_still_gets_a_feature_id() {
+        let meshes = [triangle_at(0.0, Some("asset-a")), triangle_at(10.0, None)];
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 1,
+            ..Default::default()
+        };
+
+        let tree = build_mesh_tree(&meshes, &config);
+        let mut leaves = Vec::new();
+        collect_leaves(&tree, &mut leaves);
+
+        let metadata = leaves[1].metadata.as_ref().expect("a property table");
+        let MetadataValues::String(asset_ids) = &metadata.properties[0].values else {
+            panic!("asset_id should be a string property");
+        };
+        assert_eq!(asset_ids, &["asset-a".to_string(), String::new()]);
+        assert_eq!(referenced_feature_ids(leaves[1]), vec![1]);
+    }
+
+    #[test]
+    fn tiles_without_any_asset_id_carry_no_feature_ids() {
+        let config = MeshTilingConfig::default();
+        let tree = build_mesh_tree(&[cube_mesh()], &config);
+        let mut leaves = Vec::new();
+        collect_leaves(&tree, &mut leaves);
+
+        for leaf in leaves {
+            assert!(leaf.feature_ids.is_none());
+            assert!(leaf.metadata.is_none());
+        }
+    }
+
     #[test]
     fn root_transform_reaches_the_tileset_root() {
         let dir = std::env::temp_dir().join("tiletopia_mesh_root_transform_test");
