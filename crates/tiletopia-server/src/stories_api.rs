@@ -5,9 +5,10 @@
 use axum::{
     Extension, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
+    middleware,
     response::Json,
-    routing::get,
+    routing::{get, post, put},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,8 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::audit::AuditedResource;
+use crate::auth::Claims;
+use crate::users;
 
 /// A persistent story (narrated 3D presentation).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,7 +26,8 @@ pub struct Story {
     pub id: Uuid,
     pub title: String,
     pub description: String,
-    pub author_id: Option<Uuid>,
+    /// The token subject that created the story.
+    pub author_id: Option<String>,
     pub slides: Vec<Slide>,
     pub is_public: bool,
     pub share_token: Option<String>,
@@ -94,13 +98,22 @@ pub struct UpdateStoryRequest {
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
 pub fn story_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/stories", get(list_stories).post(create_story))
+    let reads = Router::new()
+        .route("/api/v1/stories", get(list_stories))
+        .route("/api/v1/stories/{id}", get(get_story))
+        .route("/api/v1/stories/share/{token}", get(get_shared_story));
+    let writes = Router::new()
+        .route("/api/v1/stories", post(create_story))
         .route(
             "/api/v1/stories/{id}",
-            get(get_story).put(update_story).delete(delete_story),
+            put(update_story).delete(delete_story),
         )
-        .route("/api/v1/stories/share/{token}", get(get_shared_story))
+        .layer(middleware::from_fn(users::require_editor));
+    reads.merge(writes)
+}
+
+fn may_modify(claims: &Claims, story: &Story) -> bool {
+    claims.can_admin() || story.author_id.as_deref() == Some(claims.sub.as_str())
 }
 
 async fn list_stories(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Story>>, StatusCode> {
@@ -114,8 +127,10 @@ async fn list_stories(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Sto
 
 async fn create_story(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<CreateStoryRequest>,
 ) -> Result<(StatusCode, Extension<AuditedResource>, Json<Story>), StatusCode> {
+    let claims = users::claims_from_headers(&headers)?;
     let share_token = if req.is_public {
         Some(Uuid::new_v4().to_string().replace('-', ""))
     } else {
@@ -127,7 +142,7 @@ async fn create_story(
         id: Uuid::new_v4(),
         title: req.title,
         description: req.description,
-        author_id: None,
+        author_id: Some(claims.sub),
         slides: req.slides,
         is_public: req.is_public,
         share_token,
@@ -164,14 +179,19 @@ async fn get_story(
 async fn update_story(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
     Json(req): Json<UpdateStoryRequest>,
 ) -> Result<Json<Story>, StatusCode> {
+    let claims = users::claims_from_headers(&headers)?;
     let mut story = state
         .db
         .get_story(id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    if !may_modify(&claims, &story) {
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     if let Some(title) = req.title {
         story.title = title;
@@ -202,7 +222,18 @@ async fn update_story(
 async fn delete_story(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
+    let claims = users::claims_from_headers(&headers)?;
+    let story = state
+        .db
+        .get_story(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if !may_modify(&claims, &story) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     state
         .db
         .delete_story(id)

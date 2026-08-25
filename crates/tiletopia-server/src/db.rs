@@ -1513,7 +1513,7 @@ impl Database {
     pub async fn create_story(&self, story: &crate::stories_api::Story) -> Result<(), sqlx::Error> {
         let id = story.id.to_string();
         let slides = serde_json::to_string(&story.slides).unwrap_or_else(|_| "[]".into());
-        let author_id = story.author_id.map(|a| a.to_string());
+        let author_id = story.author_id.clone();
         let created_at = story.created_at.to_rfc3339();
         let updated_at = story.updated_at.to_rfc3339();
 
@@ -1563,7 +1563,7 @@ impl Database {
     pub async fn update_story(&self, story: &crate::stories_api::Story) -> Result<(), sqlx::Error> {
         let id = story.id.to_string();
         let slides = serde_json::to_string(&story.slides).unwrap_or_else(|_| "[]".into());
-        let author_id = story.author_id.map(|a| a.to_string());
+        let author_id = story.author_id.clone();
         let updated_at = story.updated_at.to_rfc3339();
 
         sqlx::query(
@@ -2022,7 +2022,7 @@ fn row_to_story(row: &sqlx::sqlite::SqliteRow) -> crate::stories_api::Story {
         id: Uuid::parse_str(&id_str).unwrap_or_default(),
         title: row.get("title"),
         description: row.get("description"),
-        author_id: author_id.and_then(|s| Uuid::parse_str(&s).ok()),
+        author_id,
         slides: serde_json::from_str(&slides_str).unwrap_or_default(),
         is_public: is_public != 0,
         share_token: row.get("share_token"),

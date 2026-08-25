@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Story writes are gated (2026-08-25). `POST /api/v1/stories` and the `PUT`
+  and `DELETE` on a story take the Edit tier through `require_editor`, so a
+  viewer token is refused with 403. A story records the caller's token subject
+  as `author_id`, and only that author or an admin updates or deletes it:
+  anyone else gets 403. Deleting an id that does not exist answers 404 rather
+  than 204. Reads are unchanged: any valid token lists and gets every story,
+  and the share route stays public.
 - Audit rows carry the address and the created id (2026-08-25). The server is
   served with connect info, so a row records the direct peer's IP, which is the
   proxy when one fronts the server. No proxy header is read: `X-Forwarded-For`
