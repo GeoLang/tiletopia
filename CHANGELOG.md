@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 2026-08-25
 
+### Changed
+
+- jsonwebtoken 9 to 11 on the `aws_lc_rs` backend (2026-08-25), a crate the
+  lockfile already resolved. Only HS256 `encode`, `decode`, `from_secret` and
+  `Validation::default()` are used, and 11 keeps `validate_aud` on by default,
+  so a token carrying `aud` is still refused. `cloud-storage` still pins its
+  own jsonwebtoken 7.
+
 ### Added
 
 - `PUT /api/v1/admin/users/{id}/org` (2026-08-25). Admin only, next to the role
