@@ -2,7 +2,9 @@
 
 use crate::bounding_volume::Aabb;
 use crate::compression::simplify_mesh;
-use crate::glb_writer::{self, GlbMesh, MetadataProperty, MetadataValues, TextureData, TileMetadata};
+use crate::glb_writer::{
+    self, GlbMesh, MetadataProperty, MetadataValues, TextureData, TileMetadata,
+};
 use crate::{BoundingVolume, Refine, Tile, TileContent, Tileset, TilesetAsset};
 use image::GenericImageView;
 use std::io;
@@ -912,7 +914,10 @@ mod tests {
         collect_leaves(&tree, &mut leaves);
         assert_eq!(leaves.len(), 2, "the two triangles should split apart");
 
-        let reached: Vec<Vec<u32>> = leaves.iter().map(|mesh| referenced_feature_ids(mesh)).collect();
+        let reached: Vec<Vec<u32>> = leaves
+            .iter()
+            .map(|mesh| referenced_feature_ids(mesh))
+            .collect();
         assert_eq!(reached, vec![vec![0], vec![1]]);
 
         for leaf in &leaves {

@@ -77,7 +77,10 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             })
             .collect();
 
-        let name = entity.get_string(NAME_INDEX).unwrap_or("ifc_element").to_string();
+        let name = entity
+            .get_string(NAME_INDEX)
+            .unwrap_or("ifc_element")
+            .to_string();
 
         meshes.push(MeshData {
             positions,

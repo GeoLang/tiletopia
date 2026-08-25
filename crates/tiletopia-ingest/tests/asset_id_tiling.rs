@@ -54,12 +54,13 @@ impl Glb {
         assert_eq!(table["class"], "asset");
         let property = &table["properties"]["asset_id"];
         let values = self.buffer_view(property["values"].as_u64().unwrap() as usize);
-        let offsets_bytes =
-            self.buffer_view(property["stringOffsets"].as_u64().unwrap() as usize);
+        let offsets_bytes = self.buffer_view(property["stringOffsets"].as_u64().unwrap() as usize);
 
         let offsets: Vec<usize> = offsets_bytes
-            .chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()) as usize)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| u32::from_le_bytes(*chunk) as usize)
             .collect();
         assert_eq!(
             offsets.len() as u64 - 1,
@@ -108,11 +109,14 @@ fn read_and_tile(source: &std::path::Path, output: &std::path::Path) -> Vec<std:
 #[test]
 fn ifc_global_ids_reach_every_tile_as_asset_ids() {
     let dir = tempfile::tempdir().unwrap();
-    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/twin_boxes.ifc");
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/twin_boxes.ifc");
 
     let tiles = read_and_tile(&fixture, &dir.path().join("tiles_out"));
-    assert!(tiles.len() > 1, "the fixture should split over several tiles");
+    assert!(
+        tiles.len() > 1,
+        "the fixture should split over several tiles"
+    );
 
     let mut seen = BTreeSet::new();
     for tile in &tiles {
@@ -125,7 +129,8 @@ fn ifc_global_ids_reach_every_tile_as_asset_ids() {
         );
         let feature_ids = &primitive["extensions"]["EXT_mesh_features"]["featureIds"][0];
         assert_eq!(
-            feature_ids["propertyTable"], 0,
+            feature_ids["propertyTable"],
+            0,
             "{} should point its feature ids at the property table",
             tile.display()
         );

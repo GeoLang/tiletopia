@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- IFC element ids reach the tiles (2026-08-25). The IFC reader keeps each
+  element's GlobalId and the mesh tiler makes every source mesh one feature:
+  each vertex carries its feature id as `_FEATURE_ID_0` under
+  `EXT_mesh_features`, and the tile's `EXT_structural_metadata` property table
+  holds an `asset_id` string per feature, empty for a mesh with no id. A format
+  that carries no element identity, OBJ, glTF or FBX, tiles exactly as before,
+  with neither extension written. Draco does not touch this: the GLB writer
+  never compresses its output, so `draco_encode_mesh` is not on the tiling path
+  and the feature id attribute is written uncompressed either way.
 - `PUT /api/v1/admin/users/{id}/org` (2026-08-25). Admin only, next to the role
   route. The body is `{"org_id": "<uuid>"}` to put a user in an organization or
   `{"org_id": null}` to take them out. An organization that does not exist

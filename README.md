@@ -5,7 +5,7 @@
 
 **Fast open-source 3D Tiles server — self-hosted Cesium Ion replacement.**
 
-Ingest point clouds, tile them into OGC 3D Tiles 1.1, and serve them with view-dependent streaming. Quantized-mesh terrain from a DEM or a prebuilt bundle. Compatible with CesiumJS, Cesium for Unreal, Cesium for Unity, and any 3D Tiles client. Meshes and vector files tile through mago-3d-tiler, IFC through this repository's own reader and mesh tiler.
+Ingest point clouds, tile them into OGC 3D Tiles 1.1, and serve them with view-dependent streaming. Quantized-mesh terrain from a DEM or a prebuilt bundle. Compatible with CesiumJS, Cesium for Unreal, Cesium for Unity, and any 3D Tiles client. Meshes and vector files tile through mago-3d-tiler, IFC through this repository's own reader and mesh tiler. Tiles from an IFC carry each element's GlobalId as the `asset_id` feature property, so a client that picks a tile feature reads the id back.
 
 **Website:** https://geolang.github.io/tiletopia
 
