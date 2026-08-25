@@ -87,7 +87,7 @@ A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields 
 - A failed run keeps its error on the row and is retried on the next tick. Three failures in a row disable the job
 
 ### Audit Trail
-- Every mutation that passed a role gate and answered 2xx lands one row in SQLite: asset create, delete and re-tile, annotation writes, export start, tileset create and delete, plugin install, uninstall, config and enable/disable, webhook and scheduled job writes, org create, admin user delete and role change, API key mint, revoke and delete, story create, update and delete, portal item create and delete, adding a catalog dataset, a caller updating their own profile at `PUT /api/v1/users/me`, and the Ion-compat asset create and token mint
+- Every mutation that passed a role gate and answered 2xx lands one row in SQLite: asset create, delete and re-tile, annotation writes, export start, tileset create and delete, plugin install, uninstall, config and enable/disable, webhook and scheduled job writes, org create, admin user delete, role change and org change, API key mint, revoke and delete, story create, update and delete, portal item create and delete, adding a catalog dataset, a caller updating their own profile at `PUT /api/v1/users/me`, and the Ion-compat asset create and token mint
 - A row names who (the JWT `sub`), what (a `Create`, `Delete`, `PermissionChange` and so on), the resource type and id, the method, path and status, and the address the request came from. Refusals are not recorded: the log says what happened to the data, and recording refusals would let a caller fill the table by being refused in a loop
 - The address is the direct peer off the socket, which is the proxy when one fronts the server. No proxy header is read: a caller can set `X-Forwarded-For` to whatever it likes
 - A create's path names no id, so the handler hands back the id it chose and the row carries that. `PUT /api/v1/users/me` names the caller
@@ -537,9 +537,9 @@ Price is not a capability. Ion is a hosted product. This is a binary you run.
 cargo test
 ```
 
-970 tests (945 Rust + 25 GUI) on default features, counted per crate:
+971 tests (946 Rust + 25 GUI) on default features, counted per crate:
 - Core (124): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
-- Server (722): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation, story and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine (module only, no route reaches it), audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing (module only, no route reaches it), retention, encryption, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduled jobs, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
+- Server (723): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation, story and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine (module only, no route reaches it), audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing (module only, no route reaches it), retention, encryption, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduled jobs, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
 - Ingest (59): LAS/LAZ, E57, PLY, GeoTIFF, DTED, HGT, USGS DEM, glTF, OBJ, FBX, CityGML, CityJSON and IFC readers, texture and material carrying, CRS detection
 - Terrain (28): quantized mesh generation, global DEM terrain
 - Store (12): local filesystem CRUD, path traversal
@@ -547,7 +547,7 @@ cargo test
 GUI: `cd gui && pnpm run test:all` (10 vitest unit tests + 15 Playwright e2e).
 
 Feature-gated tests (`gpu`, `onnx`, `video`, `ml`, `martin`, `wasm-plugins`, cloud
-stores) are not in the 945 and need their feature enabled to run.
+stores) are not in the 946 and need their feature enabled to run.
 
 ---
 

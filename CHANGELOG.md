@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `PUT /api/v1/admin/users/{id}/org` (2026-08-25). Admin only, next to the role
+  route. The body is `{"org_id": "<uuid>"}` to put a user in an organization or
+  `{"org_id": null}` to take them out. An organization that does not exist
+  answers 404. The change lands an audit row, and the user's later writes carry
+  the organization on theirs.
 - Audit rows name the caller's organization (2026-08-25). The middleware reads
   `org_id` off the caller's row in the users table when it records, so the row
   says which organization the user was in at the time of the write. A subject

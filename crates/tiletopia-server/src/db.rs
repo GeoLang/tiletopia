@@ -1367,6 +1367,17 @@ impl Database {
         Ok(rows.iter().map(row_to_org).collect())
     }
 
+    pub async fn get_org(&self, id: Uuid) -> Result<Option<Organization>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT id, name, created_at, max_storage_bytes, max_assets FROM organizations WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.as_ref().map(row_to_org))
+    }
+
     // -- Admin stats --
 
     pub async fn count_assets(&self) -> Result<u64, sqlx::Error> {

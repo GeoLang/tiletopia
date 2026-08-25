@@ -352,6 +352,86 @@ async fn the_row_carries_the_callers_org() {
     assert_eq!(orgs, vec![None, Some(org_id.to_string())]);
 }
 
+/// An admin puts a user in an organization through the route. The organization
+/// has to exist, the user sees it on their own profile, and the user's next
+/// write is filed under it.
+#[tokio::test]
+async fn an_admin_puts_a_user_in_an_org() {
+    let state = common::test_state().await;
+    let admin = common::token("admin-1", "admin");
+    let member_id = Uuid::new_v4();
+    seed_user(&state, member_id).await;
+    let member = common::token(&member_id.to_string(), "editor");
+    let org = tiletopia_server::users::Organization {
+        id: Uuid::new_v4(),
+        name: "surveyors".into(),
+        created_at: Utc::now(),
+        max_storage_bytes: 0,
+        max_assets: 0,
+    };
+    state.db.create_org(&org).await.unwrap();
+
+    let membership = |org_id: serde_json::Value, bearer: &str| {
+        json_request(
+            "PUT",
+            &format!("/api/v1/admin/users/{member_id}/org"),
+            bearer,
+            serde_json::json!({"org_id": org_id}),
+        )
+    };
+
+    let by_member = send(&state, membership(org.id.to_string().into(), &member)).await;
+    assert_eq!(by_member.status, StatusCode::FORBIDDEN);
+
+    let nowhere = send(
+        &state,
+        membership(Uuid::new_v4().to_string().into(), &admin),
+    )
+    .await;
+    assert_eq!(nowhere.status, StatusCode::NOT_FOUND);
+
+    let placed = send(&state, membership(org.id.to_string().into(), &admin)).await;
+    assert_eq!(placed.status, StatusCode::OK);
+    assert_eq!(placed.body["org_id"], org.id.to_string());
+
+    let me = send(&state, empty_request("GET", "/api/v1/users/me", &member)).await;
+    assert_eq!(me.status, StatusCode::OK);
+    assert_eq!(me.body["org_id"], org.id.to_string());
+
+    let story = send(
+        &state,
+        json_request(
+            "POST",
+            "/api/v1/stories",
+            &member,
+            serde_json::json!({"title": "ours", "description": "", "slides": [], "is_public": false}),
+        ),
+    )
+    .await;
+    assert_eq!(story.status, StatusCode::CREATED);
+
+    let removed = send(&state, membership(serde_json::Value::Null, &admin)).await;
+    assert_eq!(removed.status, StatusCode::OK);
+    assert!(removed.body["org_id"].is_null());
+
+    let entries = all_entries(&state).await;
+    let (actions, orgs): (Vec<AuditAction>, Vec<Option<String>>) = entries
+        .iter()
+        .map(|entry| (entry.action.clone(), entry.org_id.clone()))
+        .unzip();
+    // newest first: the removal by the admin, the story by the member, the
+    // placement by the admin. The admin has no user row, so no org
+    assert_eq!(
+        actions,
+        vec![
+            AuditAction::PermissionChange,
+            AuditAction::Create,
+            AuditAction::PermissionChange
+        ]
+    );
+    assert_eq!(orgs, vec![None, Some(org.id.to_string()), None]);
+}
+
 /// The sweep retires what is past the retention window and leaves the rest.
 #[tokio::test]
 async fn the_sweep_deletes_rows_past_the_window() {

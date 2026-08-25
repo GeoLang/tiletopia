@@ -411,6 +411,12 @@ static AUDITED_ROUTES: &[AuditedRoute] = &[
         resource_type: "user",
     },
     AuditedRoute {
+        method: "PUT",
+        template: "/api/v1/admin/users/{id}/org",
+        action: AuditAction::PermissionChange,
+        resource_type: "user",
+    },
+    AuditedRoute {
         method: "POST",
         template: "/api/v1/api-keys",
         action: AuditAction::Create,

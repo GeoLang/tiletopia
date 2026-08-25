@@ -160,6 +160,44 @@ pub async fn set_user_role(
     Ok(Json(user))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SetOrgRequest {
+    pub org_id: Option<Uuid>,
+}
+
+/// Admin-only: put a user in an organization, or take them out with `null`.
+/// The organization must exist.
+pub async fn set_user_org(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SetOrgRequest>,
+) -> Result<Json<User>, StatusCode> {
+    let mut user = state
+        .db
+        .get_user(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if let Some(org_id) = req.org_id {
+        state
+            .db
+            .get_org(org_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?;
+    }
+
+    user.org_id = req.org_id;
+    state
+        .db
+        .update_user(&user)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(user))
+}
+
 pub async fn delete_user(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,

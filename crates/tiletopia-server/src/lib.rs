@@ -253,6 +253,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/v1/admin/users/{id}/role",
             axum::routing::put(admin::set_user_role),
         )
+        .route(
+            "/api/v1/admin/users/{id}/org",
+            axum::routing::put(admin::set_user_org),
+        )
         .layer(middleware::from_fn(users::require_admin));
 
     // Org routes (admin only)
