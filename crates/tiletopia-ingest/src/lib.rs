@@ -130,6 +130,9 @@ pub struct MeshData {
     pub indices: Vec<u32>,
     pub name: String,
     pub material: Option<Material>,
+    /// The source element's stable identity, carried into the tiles as the
+    /// `asset_id` feature property. IFC fills it with the element's GlobalId.
+    pub asset_id: Option<String>,
 }
 
 /// The single material a `MeshData` is painted with.
@@ -162,6 +165,7 @@ impl From<MeshData> for tiletopia_core::mesh_tiler::MeshData {
             texcoords: mesh.texcoords,
             indices: mesh.indices,
             name: mesh.name,
+            asset_id: mesh.asset_id,
             base_color_factor,
             texture: texture.map(|texture| tiletopia_core::glb_writer::TextureData {
                 image_data: texture.image_data,

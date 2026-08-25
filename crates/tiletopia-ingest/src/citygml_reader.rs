@@ -83,6 +83,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
                 .unwrap_or("citygml")
                 .to_string(),
             material: None,
+            asset_id: None,
         });
     }
 

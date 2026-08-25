@@ -182,6 +182,7 @@ impl MaterialGroup {
             indices: self.indices,
             name,
             material,
+            asset_id: None,
         }
     }
 }

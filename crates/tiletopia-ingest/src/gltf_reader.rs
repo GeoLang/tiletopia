@@ -63,6 +63,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
                 indices,
                 name,
                 material,
+                asset_id: None,
             });
         }
     }

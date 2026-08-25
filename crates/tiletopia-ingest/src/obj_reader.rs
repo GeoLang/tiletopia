@@ -89,6 +89,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             indices: mesh.indices.clone(),
             name: model.name,
             material,
+            asset_id: None,
         });
     }
 

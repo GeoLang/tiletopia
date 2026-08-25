@@ -2,7 +2,7 @@
 
 use crate::bounding_volume::Aabb;
 use crate::compression::simplify_mesh;
-use crate::glb_writer::{self, GlbMesh, TextureData};
+use crate::glb_writer::{self, GlbMesh, MetadataProperty, MetadataValues, TextureData, TileMetadata};
 use crate::{BoundingVolume, Refine, Tile, TileContent, Tileset, TilesetAsset};
 use image::GenericImageView;
 use std::io;
@@ -18,9 +18,17 @@ pub struct MeshData {
     pub texcoords: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     pub name: String,
+    /// The source element's stable identity, written into the tile as the
+    /// `asset_id` feature property.
+    pub asset_id: Option<String>,
     pub base_color_factor: Option<[f32; 4]>,
     pub texture: Option<TextureData>,
 }
+
+/// The `EXT_structural_metadata` class and property the tiler writes asset ids
+/// under. The viewer joins a picked feature on this property.
+const ASSET_CLASS_NAME: &str = "asset";
+const ASSET_ID_PROPERTY: &str = "asset_id";
 
 /// Configuration for the mesh tiling pipeline.
 #[derive(Debug, Clone)]
@@ -195,12 +203,18 @@ struct MaterialGroup {
     normals: Vec<[f32; 3]>,
     texcoords: Vec<[f32; 2]>,
     indices: Vec<u32>,
+    /// One per position, indexing `asset_ids`. Empty when no source mesh
+    /// carried an asset id.
+    feature_ids: Vec<u32>,
+    /// One per feature, in feature id order.
+    asset_ids: Vec<String>,
     base_color_factor: Option<[f32; 4]>,
     texture: Option<TextureData>,
 }
 
 fn group_by_material(meshes: &[MeshData]) -> Vec<MaterialGroup> {
     let mut groups: Vec<MaterialGroup> = Vec::new();
+    let any_asset_id = meshes.iter().any(|mesh| mesh.asset_id.is_some());
 
     for mesh in meshes {
         if mesh.positions.is_empty() {
@@ -214,6 +228,8 @@ fn group_by_material(meshes: &[MeshData]) -> Vec<MaterialGroup> {
                     normals: Vec::new(),
                     texcoords: Vec::new(),
                     indices: Vec::new(),
+                    feature_ids: Vec::new(),
+                    asset_ids: Vec::new(),
                     base_color_factor: mesh.base_color_factor,
                     texture: mesh.texture.clone(),
                 });
@@ -228,6 +244,15 @@ fn group_by_material(meshes: &[MeshData]) -> Vec<MaterialGroup> {
         }
         if group.texcoords.len() == base as usize && mesh.texcoords.len() == mesh.positions.len() {
             group.texcoords.extend_from_slice(&mesh.texcoords);
+        }
+        if any_asset_id {
+            let feature_id = group.asset_ids.len() as u32;
+            group
+                .feature_ids
+                .extend(std::iter::repeat_n(feature_id, mesh.positions.len()));
+            group
+                .asset_ids
+                .push(mesh.asset_id.clone().unwrap_or_default());
         }
         group.positions.extend_from_slice(&mesh.positions);
         group.indices.extend(mesh.indices.iter().map(|i| i + base));
@@ -377,14 +402,25 @@ fn make_glb_mesh(group: &MaterialGroup, indices: &[u32], config: &MeshTilingConf
         ),
     };
 
+    // every tile of a group carries the whole group's vertex array, so the
+    // property table covers every feature the tile can name
+    let feature_ids = (!group.feature_ids.is_empty()).then(|| group.feature_ids.clone());
+    let metadata = feature_ids.is_some().then(|| TileMetadata {
+        class_name: ASSET_CLASS_NAME.to_string(),
+        properties: vec![MetadataProperty {
+            name: ASSET_ID_PROPERTY.to_string(),
+            values: MetadataValues::String(group.asset_ids.clone()),
+        }],
+    });
+
     GlbMesh {
         positions,
         normals,
         indices: Some(indices.to_vec()),
         colors: None,
         texcoords,
-        metadata: None,
-        feature_ids: None,
+        metadata,
+        feature_ids,
         texture,
         base_color_factor: group.base_color_factor,
     }
@@ -653,6 +689,7 @@ mod tests {
             texcoords: Vec::new(),
             indices,
             name: "cube".into(),
+            asset_id: None,
             base_color_factor: None,
             texture: None,
         }
@@ -687,6 +724,7 @@ mod tests {
             texcoords: Vec::new(),
             indices,
             name: "grid".into(),
+            asset_id: None,
             base_color_factor: None,
             texture: None,
         }
@@ -796,6 +834,7 @@ mod tests {
             texcoords: Vec::new(),
             indices: vec![0, 1, 2],
             name: "slab".into(),
+            asset_id: None,
             base_color_factor: None,
             texture: None,
         };

@@ -7,6 +7,10 @@ use ifc_lite_core::{
 use ifc_lite_geometry::GeometryRouter;
 use std::path::Path;
 
+/// 0-based attribute positions every IfcRoot subtype shares.
+const GLOBAL_ID_INDEX: usize = 0;
+const NAME_INDEX: usize = 2;
+
 /// 0-based attribute positions on IFCSITE.
 const REF_LATITUDE_INDEX: usize = 9;
 const REF_LONGITUDE_INDEX: usize = 10;
@@ -73,7 +77,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             })
             .collect();
 
-        let name = entity.get_string(2).unwrap_or("ifc_element").to_string();
+        let name = entity.get_string(NAME_INDEX).unwrap_or("ifc_element").to_string();
 
         meshes.push(MeshData {
             positions,
@@ -82,6 +86,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             indices: ifc_mesh.indices,
             name,
             material: None,
+            asset_id: entity.get_string(GLOBAL_ID_INDEX).map(str::to_string),
         });
     }
 

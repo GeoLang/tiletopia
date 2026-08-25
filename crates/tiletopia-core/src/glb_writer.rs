@@ -227,6 +227,20 @@ fn compute_aabb(positions: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
     (min, max)
 }
 
+/// Rows in the property table, taken from its first property.
+fn property_table_count(metadata: &TileMetadata) -> usize {
+    metadata
+        .properties
+        .first()
+        .map(|property| match &property.values {
+            MetadataValues::String(values) => values.len(),
+            MetadataValues::Float32(values) => values.len(),
+            MetadataValues::Int32(values) => values.len(),
+            MetadataValues::Uint8(values) => values.len(),
+        })
+        .unwrap_or(0)
+}
+
 fn build_json(mesh: &GlbMesh, layout: &BufferLayout) -> String {
     let mut buffer_views = Vec::new();
     let mut accessors = Vec::new();
@@ -412,14 +426,18 @@ fn build_json(mesh: &GlbMesh, layout: &BufferLayout) -> String {
         acc_idx += 1;
         let _ = acc_idx; // suppress unused warning
 
-        // Add EXT_mesh_features to primitive
+        // a property table, where there is one, defines the feature set the ids
+        // index into
+        let mut feature_id = serde_json::json!({
+            "featureCount": fids.iter().copied().max().map(|m| m + 1).unwrap_or(0),
+            "attribute": 0
+        });
+        if let Some(count) = mesh.metadata.as_ref().map(property_table_count) {
+            feature_id["featureCount"] = serde_json::json!(count);
+            feature_id["propertyTable"] = serde_json::json!(0);
+        }
         primitive["extensions"] = serde_json::json!({
-            "EXT_mesh_features": {
-                "featureIds": [{
-                    "featureCount": fids.iter().copied().max().map(|m| m + 1).unwrap_or(0),
-                    "attribute": 0
-                }]
-            }
+            "EXT_mesh_features": { "featureIds": [feature_id] }
         });
         attributes.insert("_FEATURE_ID_0".to_string(), serde_json::json!(fid_acc));
         // Re-set attributes since we added _FEATURE_ID_0
@@ -434,16 +452,7 @@ fn build_json(mesh: &GlbMesh, layout: &BufferLayout) -> String {
         // Property table buffer views
         let mut property_table_props = serde_json::Map::new();
         let mut schema_props = serde_json::Map::new();
-        let feature_count = meta
-            .properties
-            .first()
-            .map(|p| match &p.values {
-                MetadataValues::String(v) => v.len(),
-                MetadataValues::Float32(v) => v.len(),
-                MetadataValues::Int32(v) => v.len(),
-                MetadataValues::Uint8(v) => v.len(),
-            })
-            .unwrap_or(0);
+        let feature_count = property_table_count(meta);
 
         for (i, prop) in meta.properties.iter().enumerate() {
             let seg = &layout.metadata_segments[i];
@@ -509,6 +518,9 @@ fn build_json(mesh: &GlbMesh, layout: &BufferLayout) -> String {
         );
 
         extensions_used.push("EXT_structural_metadata");
+    }
+
+    if mesh.feature_ids.is_some() {
         extensions_used.push("EXT_mesh_features");
     }
 
