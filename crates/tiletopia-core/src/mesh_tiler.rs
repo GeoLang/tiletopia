@@ -504,7 +504,9 @@ fn geometric_error_for(bounds: &Aabb) -> f64 {
 fn generate_mesh_tileset(root: &MeshTileNode, root_transform: Option<[f64; 16]>) -> Tileset {
     let mut root_tile = generate_tile(root, "tiles/", &mut NodePath::new());
     root_tile.transform = root_transform;
-    let geometric_error = root_tile.geometric_error;
+    // the tileset's own error has to be above zero or a viewer never visits
+    // the root, and a single-tile root is a leaf whose error is zero
+    let geometric_error = geometric_error_for(root.bounds());
     Tileset {
         asset: TilesetAsset {
             version: "1.1".to_string(),
@@ -807,6 +809,12 @@ mod tests {
         assert_eq!(stats.tile_count, 1);
         assert_eq!(stats.total_triangles, 12);
         assert!(dir.join("tileset.json").exists());
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("tileset.json")).unwrap())
+                .unwrap();
+        assert!(json["geometricError"].as_f64().unwrap() > 0.0);
+        assert_eq!(json["root"]["geometricError"].as_f64().unwrap(), 0.0);
     }
 
     #[test]

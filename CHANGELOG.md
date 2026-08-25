@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 2026-08-25
 
+### Fixed
+
+- A mesh tileset whose root is a single tile drew nothing in Cesium
+  (2026-08-25). The tileset-level `geometricError` copied the root tile's,
+  which is zero for a leaf, and Cesium never visits the root of a tileset
+  whose own error is zero. The tileset now carries the root bounds' error and
+  the leaf root keeps zero.
+
 ### Changed
 
 - jsonwebtoken 9 to 11 on the `aws_lc_rs` backend (2026-08-25), a crate the
