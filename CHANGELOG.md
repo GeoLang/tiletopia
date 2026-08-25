@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The audit log is real (2026-08-24). `audit_middleware` records successful
+  mutations that pass the editor/admin gates into a SQLite `audit_entries`
+  table: assets, annotations, tilesets, plugins, webhooks, scheduler,
+  orgs, admin user role changes, API key mint/revoke, exports, and the
+  Ion-compat writes (`POST /v1/assets`, `POST /v1/tokens`, which reach the
+  same effects as the native routes). `GET /api/v1/audit` reads it back,
+  instance-admin only, filterable. Retention sweeps hourly per
+  `TILETOPIA_AUDIT_RETENTION_DAYS` (default 30). demo.rs no longer seeds
+  fake audit entries and `/api/v1/demo/audit` is gone; the GUI reads the
+  real route. `user_id` comes from the JWT, `ip_address` and `org_id` stay
+  empty (no connect-info, no org claim), and a create records an empty
+  `resource_id` because the id is only known inside the handler.
+- Offline viewer export is real (2026-08-24): `offline_viewer` is an export
+  format on `POST /api/v1/exports`, producing a downloadable zip with the
+  viewer page, `serve.py` and the asset's tiles, pruned like every export.
+  The page is only fully offline when `TILETOPIA_CESIUM_DIR` points at a
+  CesiumJS build to bundle; otherwise it says so in a visible banner
+  instead of silently loading from the CDN.
+
+
 - Mesh formats (glTF, GLB, OBJ, FBX, CityGML, IFC) tile natively with textures
   and materials (2026-08-24), so `TILETOPIA_MAGO_JAR` matters only to vector
   files. The readers carry UVs, diffuse textures and diffuse colours into the
@@ -233,6 +253,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Two facade modules (2026-08-24): `versioning.rs` (asset version control,
+  one route serving demo data, ptolemy is the platform's versioned
+  backbone) and `dashboard.rs` (no routes, the viewer owns dashboards).
+  `/api/v1/versioning/assets` is gone. `temporal.rs` is a different module
+  and still exists, uncalled and disclosed.
 - The `tiletopia-worker` crate (2026-08-24). It was a second job runner over
   `read_point_cloud`, `read_heightmap` and `read_mesh` that no code called:
   `tiletopia-server` and `tiletopia-cli` listed it as a dependency and never
