@@ -584,6 +584,8 @@ pub async fn audit_middleware(
             .unwrap_or_default(),
     };
 
+    let org_id = caller_org(&state.db, &pending.user_id).await;
+
     state
         .audit_log
         .record(AuditEntry {
@@ -595,14 +597,28 @@ pub async fn audit_middleware(
             resource_id,
             details,
             ip_address: pending.ip_address,
-            // no token this server issues carries an organization
-            org_id: None,
+            org_id,
             // only a 2xx gets this far
             success: true,
         })
         .await;
 
     response
+}
+
+/// The caller's organization as the users table has it now. No token carries
+/// one.
+async fn caller_org(db: &Database, user_id: &str) -> Option<String> {
+    let id = uuid::Uuid::parse_str(user_id).ok()?;
+    match db.get_user(id).await {
+        Ok(user) => user?.org_id.map(|org| org.to_string()),
+        Err(error) => {
+            tracing::warn!(
+                "reading the organization of {user_id} for the audit row failed: {error}"
+            );
+            None
+        }
+    }
 }
 
 /// Reading the trail. Instance-admin only.

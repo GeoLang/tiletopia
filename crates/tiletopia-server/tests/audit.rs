@@ -310,6 +310,48 @@ async fn an_admin_reads_back_the_filtered_trail() {
     assert_eq!(after_the_fact.body.as_array().unwrap().len(), 0);
 }
 
+/// The row names the caller's organization as the users table has it, and
+/// stays empty for a caller with no user row.
+#[tokio::test]
+async fn the_row_carries_the_callers_org() {
+    let state = common::test_state().await;
+    let org_id = Uuid::new_v4();
+    let member_id = Uuid::new_v4();
+    seed_user_in_org(&state, member_id, Some(org_id)).await;
+    let member = common::token(&member_id.to_string(), "editor");
+    let loner = common::token("editor-1", "editor");
+
+    let by_member = send(
+        &state,
+        json_request(
+            "POST",
+            "/api/v1/stories",
+            &member,
+            serde_json::json!({"title": "ours", "description": "", "slides": [], "is_public": false}),
+        ),
+    )
+    .await;
+    assert_eq!(by_member.status, StatusCode::CREATED);
+
+    let by_loner = send(
+        &state,
+        json_request(
+            "POST",
+            "/api/v1/stories",
+            &loner,
+            serde_json::json!({"title": "mine", "description": "", "slides": [], "is_public": false}),
+        ),
+    )
+    .await;
+    assert_eq!(by_loner.status, StatusCode::CREATED);
+
+    let entries = all_entries(&state).await;
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    let orgs: Vec<Option<String>> = entries.iter().map(|entry| entry.org_id.clone()).collect();
+    // newest first
+    assert_eq!(orgs, vec![None, Some(org_id.to_string())]);
+}
+
 /// The sweep retires what is past the retention window and leaves the rest.
 #[tokio::test]
 async fn the_sweep_deletes_rows_past_the_window() {
@@ -679,12 +721,16 @@ fn upload_request(bearer: &str, filename: &str) -> Request<Body> {
 }
 
 async fn seed_user(state: &Arc<AppState>, id: Uuid) {
+    seed_user_in_org(state, id, None).await
+}
+
+async fn seed_user_in_org(state: &Arc<AppState>, id: Uuid, org_id: Option<Uuid>) {
     let user = tiletopia_server::users::User {
         id,
         email: format!("{id}@example.invalid"),
         name: "the caller".into(),
         role: tiletopia_server::users::UserRole::Viewer,
-        org_id: None,
+        org_id,
         created_at: Utc::now(),
         last_login: None,
     };

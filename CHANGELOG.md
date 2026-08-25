@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Audit rows name the caller's organization (2026-08-25). The middleware reads
+  `org_id` off the caller's row in the users table when it records, so the row
+  says which organization the user was in at the time of the write. A subject
+  with no user row, an API key or a tool token, records none. Nothing sets a
+  user's `org_id` over the API yet: `POST /api/v1/orgs` creates an organization
+  and no route puts a user in one.
 - Story writes are gated (2026-08-25). `POST /api/v1/stories` and the `PUT`
   and `DELETE` on a story take the Edit tier through `require_editor`, so a
   viewer token is refused with 403. A story records the caller's token subject
