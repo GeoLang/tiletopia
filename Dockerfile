@@ -2,6 +2,24 @@
 ARG MAGO_VERSION=1.16.2
 ARG MAGO_SHA256=d37e58b634e91d7ce7ca046168b1db2cf950cd9b2ffacb826fd3b10a8d31f7e2
 ARG TIPPECANOE_VERSION=2.79.0
+ARG CESIUM_VERSION=1.119
+ARG CESIUM_SHA256=b171f3397eb8ee58dd1f07f99d4dfd75aecb7a8aaeec18e7baf2f4c18e301705
+
+# CesiumJS for the offline viewer export, the version the exported page falls
+# back to on the CDN
+FROM debian:bookworm-slim AS cesium
+ARG CESIUM_VERSION
+ARG CESIUM_SHA256
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl unzip \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL -o /tmp/cesium.zip \
+      "https://github.com/CesiumGS/cesium/releases/download/${CESIUM_VERSION}/Cesium-${CESIUM_VERSION}.zip" && \
+    echo "${CESIUM_SHA256}  /tmp/cesium.zip" | sha256sum -c - && \
+    unzip -q /tmp/cesium.zip "Build/Cesium/*" LICENSE.md -d /tmp/cesium && \
+    mv /tmp/cesium/Build/Cesium /opt/cesium && \
+    mv /tmp/cesium/LICENSE.md /opt/cesium/LICENSE.md && \
+    rm -rf /tmp/cesium.zip /tmp/cesium
 
 # tippecanoe builds vector tilesets. bookworm carries no package for it, and the
 # backport is far behind, so it is built from the pinned tag
@@ -56,6 +74,7 @@ RUN mkdir -p /opt/mago && \
 
 COPY --from=builder /app/target/release/tiletopia /usr/local/bin/tiletopia
 COPY gui /opt/tiletopia/gui
+COPY --from=cesium /opt/cesium /opt/tiletopia/cesium
 
 USER tiletopia
 
@@ -64,6 +83,7 @@ ENV TILETOPIA_DATA_DIR=/data
 ENV TILETOPIA_TILESET_DIR=/data/tilesets
 ENV TILETOPIA_PORT=3000
 ENV TILETOPIA_GUI_DIR=/opt/tiletopia/gui
+ENV TILETOPIA_CESIUM_DIR=/opt/tiletopia/cesium
 ENV RUST_LOG=info,tiletopia=debug
 
 EXPOSE 3000

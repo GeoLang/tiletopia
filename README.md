@@ -75,7 +75,7 @@ A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields 
 - `POST /api/v1/exports` takes an `asset_id` and a `format`, answers 202 with a queued job, and encodes off the request. Editor or admin. `GET /api/v1/exports/{id}` polls it, and `GET /api/v1/exports/download/{id}` pulls the file down while the job reads `Ready`. A job id belonging to another caller answers 404
 - `GET /api/v1/exports/formats` lists what `format` takes: `3dtiles_zip`, `las`, `laz`, `terrain_bundle`, `geojson`, `png`, `citygml`, `obj`, `glb`, `offline_viewer`
 - `offline_viewer` zips the asset's tileset together with a CesiumJS page over it and a `serve.py` that serves the directory over HTTP. The original upload the tiles were built from stays out of the bundle
-- The bundle carries CesiumJS itself only when `TILETOPIA_CESIUM_DIR` names a `Build/Cesium` directory to copy in, and nothing in this repository ships one: the dashboard pulls CesiumJS from npm at build time and `gui/dist` is not checked in. Without it the page loads CesiumJS from cesium.com, needs the network the first time it opens, and says so on screen. `pnpm --dir gui build` then `TILETOPIA_CESIUM_DIR=gui/dist/cesium` gives a bundle that opens with no network at all
+- The bundle carries CesiumJS itself when `TILETOPIA_CESIUM_DIR` names a `Build/Cesium` directory to copy in. The Docker image ships CesiumJS 1.119 at `/opt/tiletopia/cesium` and sets the variable, so a bundle out of the published image opens with no network at all. Outside the image the variable is unset by default, and then the page loads CesiumJS from cesium.com, needs the network the first time it opens, and says so on screen
 - A finished export is downloadable for 7 days. Past that the job reads `Expired`, in the listing as well as on `GET /api/v1/exports/{id}`, and the download answers 410 with the time it expired rather than 404
 - The `prune_export_files` scheduled action removes the directories of expired jobs, and separately the directories whose newest file is older than the age it was configured with. The age rule is what retires files no job record covers any more: those records live in the process, so a restart loses them and leaves the files behind
 
@@ -203,6 +203,14 @@ tiletopia serve --data-dir ./data --port 3000
   `mago-3d-tiler-1.16.2.jar` from the Gaia3D releases and point this at it, with
   a JDK 21 on `PATH`. Unset means vector jobs fail naming the variable. Meshes
   never need it.
+- `TILETOPIA_CESIUM_DIR` — a CesiumJS `Build/Cesium` directory to copy into
+  every `offline_viewer` export, which is what makes the bundle work with no
+  network. The Docker image sets it to the copy it ships. Outside the image,
+  either unzip `Build/Cesium` out of a
+  [CesiumJS release](https://github.com/CesiumGS/cesium/releases) and point this
+  at it, or run `pnpm --dir gui build` and use `gui/dist/cesium`. Unset means the
+  exported page loads CesiumJS from cesium.com and says on screen that it needs
+  the network.
 - `TILETOPIA_PMTILES_DIR` — directory of PMTiles archives to serve under
   `/martin`. Every `*.pmtiles` file directly in it, subdirectories excluded, is
   registered under its filename stem: `basemap.pmtiles` answers at
@@ -537,9 +545,9 @@ Price is not a capability. Ion is a hosted product. This is a binary you run.
 cargo test
 ```
 
-971 tests (946 Rust + 25 GUI) on default features, counted per crate:
+972 tests (947 Rust + 25 GUI) on default features, counted per crate:
 - Core (124): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
-- Server (723): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation, story and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine (module only, no route reaches it), audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing (module only, no route reaches it), retention, encryption, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduled jobs, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
+- Server (724): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation, story and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine (module only, no route reaches it), audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing (module only, no route reaches it), retention, encryption, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduled jobs, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
 - Ingest (59): LAS/LAZ, E57, PLY, GeoTIFF, DTED, HGT, USGS DEM, glTF, OBJ, FBX, CityGML, CityJSON and IFC readers, texture and material carrying, CRS detection
 - Terrain (28): quantized mesh generation, global DEM terrain
 - Store (12): local filesystem CRUD, path traversal
@@ -547,7 +555,7 @@ cargo test
 GUI: `cd gui && pnpm run test:all` (10 vitest unit tests + 15 Playwright e2e).
 
 Feature-gated tests (`gpu`, `onnx`, `video`, `ml`, `martin`, `wasm-plugins`, cloud
-stores) are not in the 946 and need their feature enabled to run.
+stores) are not in the 947 and need their feature enabled to run.
 
 ---
 

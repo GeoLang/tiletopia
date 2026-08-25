@@ -114,8 +114,8 @@ pub const EXPORT_FORMATS: &[FormatInfo] = &[
 ];
 
 /// A CesiumJS `Build/Cesium` directory to copy into every offline viewer
-/// bundle. Unset, the exported page loads CesiumJS from cesium.com instead and
-/// says on screen that it needs the network.
+/// bundle, which the Docker image sets. Unset, the exported page loads CesiumJS
+/// from cesium.com instead and says on screen that it needs the network.
 const CESIUM_BUILD_DIR_VAR: &str = "TILETOPIA_CESIUM_DIR";
 
 /// How long a finished export stays downloadable. Past it the job reads

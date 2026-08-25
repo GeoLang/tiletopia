@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{"org_id": null}` to take them out. An organization that does not exist
   answers 404. The change lands an audit row, and the user's later writes carry
   the organization on theirs.
+- The offline viewer export is offline out of the image (2026-08-25). The
+  Docker image unzips `Build/Cesium` from the pinned CesiumJS 1.119 release,
+  checked against its SHA-256, into `/opt/tiletopia/cesium` and sets
+  `TILETOPIA_CESIUM_DIR` to it, so an `offline_viewer` bundle from the published
+  image carries the library and the Apache-2.0 license it is redistributed
+  under, and its page names no remote host. That is 20 MB more image. Outside
+  the image the variable is still unset by default, and the exported page falls
+  back to cesium.com behind the banner that says it needs the network.
 - Audit rows name the caller's organization (2026-08-25). The middleware reads
   `org_id` off the caller's row in the users table when it records, so the row
   says which organization the user was in at the time of the write. A subject

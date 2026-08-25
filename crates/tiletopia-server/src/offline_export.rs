@@ -4,10 +4,10 @@
 //! into a network with no route out.
 //!
 //! The bundle carries CesiumJS itself only when [`OfflineExportConfig`] names a
-//! local build to copy in. Nothing in this repository ships one: the dashboard
-//! pulls CesiumJS from npm at build time and `gui/dist` is not checked in. With
-//! no build to copy, the page loads CesiumJS from cesium.com and needs the
-//! network the first time it opens, and it says so on screen.
+//! local build to copy in. The Docker image ships one and points
+//! `TILETOPIA_CESIUM_DIR` at it. With no build to copy, the page loads CesiumJS
+//! from cesium.com and needs the network the first time it opens, and it says
+//! so on screen.
 
 use std::path::{Path, PathBuf};
 
