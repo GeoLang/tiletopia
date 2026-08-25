@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -203,17 +204,16 @@ struct TokenBucket {
 }
 
 impl TokenBucket {
-    fn new(max_tokens: f64, refill_rate: f64) -> Self {
+    fn new(max_tokens: f64, refill_rate: f64, now: std::time::Instant) -> Self {
         Self {
             tokens: max_tokens,
             max_tokens,
             refill_rate,
-            last_refill: std::time::Instant::now(),
+            last_refill: now,
         }
     }
 
-    fn try_consume(&mut self) -> bool {
-        let now = std::time::Instant::now();
+    fn try_consume(&mut self, now: std::time::Instant) -> bool {
         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
         self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.max_tokens);
         self.last_refill = now;
@@ -232,7 +232,11 @@ impl TokenBucket {
 pub struct RateLimiter {
     buckets: RwLock<HashMap<Uuid, TokenBucket>>,
     daily_counts: RwLock<HashMap<Uuid, DailyCounter>>,
+    clock: std::sync::RwLock<Clock>,
 }
+
+/// What the per-second buckets read as the current time.
+pub type Clock = Arc<dyn Fn() -> std::time::Instant + Send + Sync>;
 
 #[derive(Debug)]
 struct DailyCounter {
@@ -267,20 +271,33 @@ impl RateLimiter {
         Self {
             buckets: RwLock::new(HashMap::new()),
             daily_counts: RwLock::new(HashMap::new()),
+            clock: std::sync::RwLock::new(Arc::new(std::time::Instant::now)),
         }
+    }
+
+    /// Replace the wall clock, so a test can hold time still and count tokens
+    /// instead of racing the refill.
+    pub fn set_clock(&self, clock: Clock) {
+        *self.clock.write().expect("clock lock") = clock;
+    }
+
+    fn now(&self) -> std::time::Instant {
+        (self.clock.read().expect("clock lock"))()
     }
 
     /// Spend one request against this key's limits.
     pub async fn check_rate_limit(&self, key_id: Uuid, rate_limit: &RateLimit) -> RateLimitResult {
+        let now = self.now();
         let mut buckets = self.buckets.write().await;
         let bucket = buckets.entry(key_id).or_insert_with(|| {
             TokenBucket::new(
                 rate_limit.requests_per_second as f64,
                 rate_limit.requests_per_second as f64,
+                now,
             )
         });
 
-        if !bucket.try_consume() {
+        if !bucket.try_consume(now) {
             return RateLimitResult::Denied {
                 reason: "rate limit exceeded (per second)".into(),
                 retry_after_ms: (1000.0 / rate_limit.requests_per_second as f64).ceil() as u64,

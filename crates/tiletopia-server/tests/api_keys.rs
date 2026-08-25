@@ -306,23 +306,27 @@ async fn no_key_reaches_an_admin_route_whatever_it_carries() {
     }
 }
 
+const FREE_TIER_REQUESTS_PER_SECOND: u32 = 10;
+
 #[tokio::test]
 async fn a_burst_past_the_per_second_bucket_answers_429_with_retry_timing() {
     let state = common::test_state().await;
     let key = create_read_key(&state).await;
 
+    // time stands still, so the bucket never refills during the burst
+    let frozen = std::time::Instant::now();
+    state
+        .api_key_rate_limiter
+        .set_clock(std::sync::Arc::new(move || frozen));
+
     // free tier is 10 requests a second and the bucket starts full
-    let mut denied = None;
-    for attempt in 0..12 {
+    for attempt in 0..FREE_TIER_REQUESTS_PER_SECOND {
         let answer = get_with_key(&state, READ_ROUTE, Some(&key)).await;
-        if answer.status == StatusCode::TOO_MANY_REQUESTS {
-            denied = Some(answer);
-            break;
-        }
         assert_eq!(answer.status, StatusCode::OK, "attempt {attempt}");
     }
 
-    let denied = denied.expect("12 requests inside one second were all allowed");
+    let denied = get_with_key(&state, READ_ROUTE, Some(&key)).await;
+    assert_eq!(denied.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(denied.retry_after.as_deref(), Some("1"));
     assert_eq!(denied.body["retry_after_ms"], 100);
     assert!(
