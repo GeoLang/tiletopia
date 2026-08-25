@@ -296,6 +296,14 @@ static AUDITED_ROUTES: &[AuditedRoute] = &[
         action: AuditAction::Delete,
         resource_type: "annotation",
     },
+    // the asset it copies out is in the body, not the path, so the row names the
+    // export rather than the asset
+    AuditedRoute {
+        method: "POST",
+        template: "/api/v1/exports",
+        action: AuditAction::Export,
+        resource_type: "export",
+    },
     AuditedRoute {
         method: "POST",
         template: "/api/v1/tilesets",

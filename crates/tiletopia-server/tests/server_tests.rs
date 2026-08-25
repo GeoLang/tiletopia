@@ -4144,6 +4144,151 @@ END-ISO-10303-21;
         assert_eq!(status, StatusCode::OK);
     }
 
+    /// Stage the tiles a finished tiling job leaves, beside the upload they were
+    /// built from.
+    fn seed_tiled_asset(data_dir: &std::path::Path, asset_id: &str) {
+        let asset_dir = data_dir.join(asset_id);
+        std::fs::create_dir_all(asset_dir.join("tiles")).unwrap();
+        std::fs::create_dir_all(asset_dir.join("input")).unwrap();
+        std::fs::write(
+            asset_dir.join("tileset.json"),
+            r#"{"asset":{"version":"1.1"}}"#,
+        )
+        .unwrap();
+        std::fs::write(asset_dir.join("tiles/0.pnts"), b"tile bytes").unwrap();
+        std::fs::write(asset_dir.join("input/cloud.las"), b"the original upload").unwrap();
+    }
+
+    /// Poll a job to whatever it settles on.
+    async fn settled_export(state: &Arc<AppState>, id: &str, token: &str) -> serde_json::Value {
+        for _ in 0..200 {
+            let (status, _, bytes) =
+                get_export(state, &format!("/api/v1/exports/{id}"), token).await;
+            assert_eq!(status, StatusCode::OK);
+            let current: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if current["status"] != "Queued" && current["status"] != "Processing" {
+                return current;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("export never settled");
+    }
+
+    /// An offline viewer export hands back one zip holding the viewer page, the
+    /// tiles it reads, and the script that serves them.
+    #[tokio::test]
+    async fn offline_viewer_export_bundles_the_page_and_the_tiles() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "offline-editor@example.com").await;
+        seed_tiled_asset(&state.data_dir, EXPORT_ASSET);
+
+        let (status, job) = post_export(
+            &state,
+            Some(&token),
+            serde_json::json!({ "asset_id": EXPORT_ASSET, "format": "offline_viewer" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(job["format"], "OfflineViewer");
+        let id = job["id"].as_str().expect("job id").to_string();
+
+        let settled = settled_export(&state, &id, &token).await;
+        assert_eq!(settled["status"], "Ready", "job: {settled}");
+
+        let (status, disposition, bytes) =
+            get_export(&state, &format!("/api/v1/exports/download/{id}"), &token).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            disposition.as_deref(),
+            Some("attachment; filename=\"offline_viewer.zip\"")
+        );
+
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        for expected in [
+            "index.html",
+            "serve.py",
+            "tiles/tileset.json",
+            "tiles/tiles/0.pnts",
+        ] {
+            assert!(names.contains(&expected.to_string()), "{names:?}");
+        }
+        assert!(
+            !names.iter().any(|name| name.contains("cloud.las")),
+            "the upload is not part of a viewer bundle: {names:?}"
+        );
+
+        let mut html = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("index.html").unwrap(), &mut html)
+            .unwrap();
+        assert!(html.contains("cesiumContainer"), "{html}");
+        assert!(html.contains("./tiles/tileset.json"), "{html}");
+    }
+
+    /// Exporting a viewer for an asset that was never tiled fails the job rather
+    /// than handing back a page with nothing to show.
+    #[tokio::test]
+    async fn offline_viewer_export_of_an_untiled_asset_fails() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "offline-untiled@example.com").await;
+
+        let (status, job) = post_export(
+            &state,
+            Some(&token),
+            serde_json::json!({
+                "asset_id": uuid::Uuid::new_v4().to_string(),
+                "format": "offline_viewer",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let id = job["id"].as_str().unwrap().to_string();
+
+        let settled = settled_export(&state, &id, &token).await;
+        assert!(
+            settled["status"]["Failed"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("no tiles to view")),
+            "job: {settled}"
+        );
+
+        let (status, _, _) =
+            get_export(&state, &format!("/api/v1/exports/download/{id}"), &token).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// The offline viewer takes the same gate as every other export kind.
+    #[tokio::test]
+    async fn offline_viewer_export_viewer_forbidden() {
+        let state = test_state().await;
+        let (token, _) = signup(&state, "offline-viewer@example.com").await;
+        let (status, _) = post_export(
+            &state,
+            Some(&token),
+            serde_json::json!({ "asset_id": EXPORT_ASSET, "format": "offline_viewer" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    /// The formats endpoint advertises exactly what the create endpoint takes.
+    #[tokio::test]
+    async fn export_formats_advertise_the_offline_viewer() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "offline-formats@example.com").await;
+        let (status, _, body) = get_export(&state, "/api/v1/exports/formats", &token).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let offered = listed["formats"].as_array().unwrap();
+        let viewer = offered
+            .iter()
+            .find(|f| f["id"] == "offline_viewer")
+            .expect("offline_viewer offered");
+        assert_eq!(viewer["extension"], ".zip");
+    }
+
     #[tokio::test]
     async fn export_create_anonymous_rejected() {
         let state = test_state().await;

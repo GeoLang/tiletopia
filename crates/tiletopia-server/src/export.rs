@@ -6,6 +6,7 @@
 //! - Terrain tiles (quantized mesh bundle)
 //! - Screenshots / rendered images
 //! - GeoJSON extracts
+//! - Offline viewer bundles (zip: the tileset plus a CesiumJS page)
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,8 @@ pub enum ExportFormat {
     Obj,
     /// glTF binary
     Glb,
+    /// The tileset plus a CesiumJS viewer page (.zip)
+    OfflineViewer,
 }
 
 /// One offered format, keyed by the id clients send.
@@ -102,7 +105,18 @@ pub const EXPORT_FORMATS: &[FormatInfo] = &[
         extension: ".glb",
         format: ExportFormat::Glb,
     },
+    FormatInfo {
+        id: "offline_viewer",
+        name: "Offline Viewer Bundle",
+        extension: ".zip",
+        format: ExportFormat::OfflineViewer,
+    },
 ];
+
+/// A CesiumJS `Build/Cesium` directory to copy into every offline viewer
+/// bundle. Unset, the exported page loads CesiumJS from cesium.com instead and
+/// says on screen that it needs the network.
+const CESIUM_BUILD_DIR_VAR: &str = "TILETOPIA_CESIUM_DIR";
 
 impl ExportFormat {
     /// Resolve one of the ids advertised by [`EXPORT_FORMATS`].
@@ -385,6 +399,11 @@ impl ExportEngine {
                 write_terrain_bundle(&path, data_dir, job)?;
                 path
             }
+            ExportFormat::OfflineViewer => {
+                let path = output_dir.join("offline_viewer.zip");
+                write_offline_viewer(&path, output_dir, data_dir, job)?;
+                path
+            }
         };
         Ok(path)
     }
@@ -632,6 +651,72 @@ fn write_terrain_bundle(
     Ok(())
 }
 
+/// Zip an offline viewer bundle: the asset's tiles, a CesiumJS page over them,
+/// and a script that serves the directory.
+///
+/// The bundle is staged in a directory beside the zip and removed again, because
+/// [`exported_file`] hands the download the one file in the job's output
+/// directory.
+fn write_offline_viewer(
+    path: &std::path::Path,
+    output_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+    job: &ExportJob,
+) -> Result<(), String> {
+    let tileset_dir = data_dir.join(job.asset_id.to_string());
+    if !tileset_dir.join("tileset.json").is_file() {
+        return Err(format!(
+            "asset {} has no tiles to view: tile it before exporting a viewer",
+            job.asset_id
+        ));
+    }
+
+    let config = crate::offline_export::OfflineExportConfig {
+        title: format!("TileTopia asset {}", job.asset_id),
+        cesium_build_dir: std::env::var_os(CESIUM_BUILD_DIR_VAR).map(std::path::PathBuf::from),
+        ..Default::default()
+    };
+
+    let staging = output_dir.join("viewer");
+    crate::offline_export::export_offline_viewer(&tileset_dir, &staging, &config)
+        .map_err(|e| format!("Write error: {e}"))?;
+    zip_tree(&staging, path)?;
+    std::fs::remove_dir_all(&staging).map_err(|e| format!("Write error: {e}"))?;
+    Ok(())
+}
+
+/// Zip every file under `dir`, named relative to it.
+fn zip_tree(dir: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
+    let file = std::fs::File::create(path).map_err(|e| format!("Write error: {e}"))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let opts =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+    let read_failed = |e: std::io::Error| format!("Read error: {e}");
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        for entry in std::fs::read_dir(&current).map_err(read_failed)? {
+            let entry_path = entry.map_err(read_failed)?.path();
+            if entry_path.is_dir() {
+                pending.push(entry_path);
+                continue;
+            }
+            // zip entry names are '/'-separated whatever the host uses
+            let name = entry_path
+                .strip_prefix(dir)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            zip.start_file(name, opts).map_err(|e| e.to_string())?;
+            let mut source = std::fs::File::open(&entry_path).map_err(read_failed)?;
+            std::io::copy(&mut source, &mut zip).map_err(read_failed)?;
+        }
+    }
+
+    zip.finish().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,6 +913,87 @@ mod tests {
         let mut body = String::new();
         std::io::Read::read_to_string(&mut entry, &mut body).unwrap();
         assert!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["root"].is_object());
+    }
+
+    /// Stage an asset directory the way a finished tiling job leaves one.
+    fn write_tiled_asset(data_dir: &std::path::Path, asset_id: Uuid) {
+        let asset_dir = data_dir.join(asset_id.to_string());
+        std::fs::create_dir_all(asset_dir.join("tiles")).unwrap();
+        std::fs::create_dir_all(asset_dir.join("input")).unwrap();
+        std::fs::write(
+            asset_dir.join("tileset.json"),
+            r#"{"asset":{"version":"1.1"}}"#,
+        )
+        .unwrap();
+        std::fs::write(asset_dir.join("tiles/0.pnts"), b"tile bytes").unwrap();
+        std::fs::write(asset_dir.join("input/cloud.las"), b"the original upload").unwrap();
+    }
+
+    fn zip_entries(path: &std::path::Path) -> Vec<String> {
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+        (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_export_offline_viewer_bundles_the_page_and_the_tiles() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let asset_id = Uuid::new_v4();
+        write_tiled_asset(tmp.path(), asset_id);
+
+        let out = export_to_file(tmp.path(), asset_id, ExportFormat::OfflineViewer, None).await;
+        assert_eq!(out.file_name().unwrap(), "offline_viewer.zip");
+
+        let names = zip_entries(&out);
+        for expected in [
+            "index.html",
+            "serve.py",
+            "tiles/tileset.json",
+            "tiles/tiles/0.pnts",
+        ] {
+            assert!(names.contains(&expected.to_string()), "{names:?}");
+        }
+        // the upload the tiles were built from is not part of a viewer bundle
+        assert!(
+            !names.iter().any(|name| name.contains("cloud.las")),
+            "{names:?}"
+        );
+
+        // and the staging directory is gone, so the download finds one file
+        assert_eq!(
+            exported_file(tmp.path(), out_job_id(&out)),
+            Some(out.clone())
+        );
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+        let mut html = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("index.html").unwrap(), &mut html)
+            .unwrap();
+        assert!(html.contains("./tiles/tileset.json"), "{html}");
+        assert!(html.contains(&asset_id.to_string()), "{html}");
+    }
+
+    /// The job id owns the output directory the encoded file sits in.
+    fn out_job_id(out: &std::path::Path) -> Uuid {
+        Uuid::parse_str(out.parent().unwrap().file_name().unwrap().to_str().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_export_offline_viewer_of_an_untiled_asset_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let engine = ExportEngine::new();
+        let job = engine
+            .create_export(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                ExportFormat::OfflineViewer,
+                None,
+            )
+            .await;
+
+        let reason = engine.execute_export(job.id, tmp.path()).await.unwrap_err();
+        assert!(reason.contains("no tiles to view"), "{reason}");
     }
 
     #[tokio::test]

@@ -71,6 +71,13 @@ A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields 
 - A failed delivery is retried three times, 30 seconds apart and doubling, then dropped. `GET /api/v1/webhooks/deliveries` reports what happened
 - Pending deliveries live in the process: a restart drops what has not gone out yet
 
+### Exports
+- `POST /api/v1/exports` takes an `asset_id` and a `format`, answers 202 with a queued job, and encodes off the request. Editor or admin. `GET /api/v1/exports/{id}` polls it, and `GET /api/v1/exports/download/{id}` pulls the file down once the job reads `Ready`. A job id belonging to another caller answers 404
+- `GET /api/v1/exports/formats` lists what `format` takes: `3dtiles_zip`, `las`, `laz`, `terrain_bundle`, `geojson`, `png`, `citygml`, `obj`, `glb`, `offline_viewer`
+- `offline_viewer` zips the asset's tileset together with a CesiumJS page over it and a `serve.py` that serves the directory over HTTP. The original upload the tiles were built from stays out of the bundle
+- The bundle carries CesiumJS itself only when `TILETOPIA_CESIUM_DIR` names a `Build/Cesium` directory to copy in, and nothing in this repository ships one: the dashboard pulls CesiumJS from npm at build time and `gui/dist` is not checked in. Without it the page loads CesiumJS from cesium.com, needs the network the first time it opens, and says so on screen. `pnpm --dir gui build` then `TILETOPIA_CESIUM_DIR=gui/dist/cesium` gives a bundle that opens with no network at all
+- Job records live in the process, so a restart loses them and leaves the files. The `prune_export_files` scheduled action is what removes those
+
 ### Scheduled Jobs
 - `POST /api/v1/scheduler/jobs` stores a job: a name, an action, a schedule, and whether it is enabled. Editor or admin, and a job belongs to whoever created it
 - Three actions, which are the three the worker runs: `retile_asset` puts an asset back on the tiling queue with the placement its last job carried, `prune_export_files` removes finished export directories past an age, `prune_finished_jobs` removes settled rows from the `jobs` table past an age
@@ -79,7 +86,7 @@ A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields 
 - A failed run keeps its error on the row and is retried on the next tick. Three failures in a row disable the job
 
 ### Audit Trail
-- Every mutation that passed a role gate and answered 2xx lands one row in SQLite: asset create, delete and re-tile, annotation writes, tileset create and delete, plugin install, uninstall, config and enable/disable, webhook and scheduled job writes, org create, admin user delete and role change, API key mint, revoke and delete, and the Ion-compat asset create and token mint
+- Every mutation that passed a role gate and answered 2xx lands one row in SQLite: asset create, delete and re-tile, annotation writes, export start, tileset create and delete, plugin install, uninstall, config and enable/disable, webhook and scheduled job writes, org create, admin user delete and role change, API key mint, revoke and delete, and the Ion-compat asset create and token mint
 - A row names who (the JWT `sub`), what (a `Create`, `Delete`, `PermissionChange` and so on), the resource type and id, and the method, path and status. Refusals are not recorded: the log says what happened to the data, and recording refusals would let a caller fill the table by being refused in a loop
 - `GET /api/v1/audit` reads it back, instance-admin only, filtered by `user_id`, `action`, `resource_type`, `from`, `to` and `limit` (100 rows by default, 1000 at most). Newest first
 - `TILETOPIA_AUDIT_RETENTION_DAYS` — how long a row is kept, 30 by default. A sweep runs hourly. `0`, a negative number, or anything that is not a whole number of days turns the sweep off and keeps everything
@@ -96,7 +103,7 @@ Not implemented, whatever the code in the repository suggests:
 | Subsystem | State |
 |-----------|-------|
 | DAE tiling | Neither the native tiler nor mago-3d-tiler takes DAE, so those jobs fail. Point clouds, meshes, vector files and IFC do tile |
-| Temporal versioning, CRDT, federation, CI/CD validation, multi-tenant isolation, leader election, priority queue / SLA, white-label, marketplace, geofencing, encryption, custom dashboards, AR/VR foveated rendering, cinematic flythrough, scripting, offline viewer export | `pub mod` lines with unit tests. No route, CLI or render loop calls them |
+| Temporal versioning, CRDT, federation, CI/CD validation, multi-tenant isolation, leader election, priority queue / SLA, white-label, marketplace, geofencing, encryption, custom dashboards, AR/VR foveated rendering, cinematic flythrough, scripting | `pub mod` lines with unit tests. No route, CLI or render loop calls them |
 
 The modules stay. Wiring or deleting them is a product call, recorded in `viewtopia/DESIGN_TODO.md`.
 

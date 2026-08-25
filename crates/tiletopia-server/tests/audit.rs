@@ -106,6 +106,38 @@ async fn an_editor_mutation_lands_one_row() {
     assert!(entry.details.contains("201"), "{}", entry.details);
 }
 
+/// Starting an export copies data out of the instance, so the trail records who
+/// asked for it. The export routes read the tenant off the token subject, so the
+/// caller's subject is a uuid here rather than a name.
+#[tokio::test]
+async fn starting_an_export_lands_one_row() {
+    let state = common::test_state().await;
+    let editor_id = Uuid::new_v4();
+    let editor = common::token(&editor_id.to_string(), "editor");
+    let asset_id = seed_asset(&state, &editor_id.to_string()).await;
+
+    let answer = send(
+        &state,
+        json_request(
+            "POST",
+            "/api/v1/exports",
+            &editor,
+            serde_json::json!({"asset_id": asset_id, "format": "offline_viewer"}),
+        ),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::ACCEPTED);
+
+    let entries = all_entries(&state).await;
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let entry = &entries[0];
+    assert_eq!(entry.user_id, editor_id.to_string());
+    assert_eq!(entry.action, AuditAction::Export);
+    assert_eq!(entry.resource_type, "export");
+    assert!(entry.success);
+    assert!(entry.details.contains("202"), "{}", entry.details);
+}
+
 /// A mutation the server refused says nothing about the data, and recording it
 /// would let a caller fill the table by being refused in a loop.
 #[tokio::test]

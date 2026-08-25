@@ -807,6 +807,46 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// An offline viewer bundle is retired on age like any other export, which
+    /// is what keeps a copy of every tileset it holds from sitting on disk
+    /// forever.
+    #[tokio::test]
+    async fn pruning_export_files_removes_an_aged_offline_viewer_bundle() {
+        let dir = std::env::temp_dir().join(format!("tiletopia_prune_{}", Uuid::new_v4()));
+        let asset_id = Uuid::new_v4();
+        let asset_dir = dir.join(asset_id.to_string());
+        std::fs::create_dir_all(asset_dir.join("tiles")).unwrap();
+        std::fs::write(asset_dir.join("tileset.json"), r#"{"asset":{}}"#).unwrap();
+        std::fs::write(asset_dir.join("tiles/0.pnts"), b"tile bytes").unwrap();
+
+        let engine = crate::export::ExportEngine::new();
+        let job = engine
+            .create_export(
+                Uuid::new_v4(),
+                asset_id,
+                crate::export::ExportFormat::OfflineViewer,
+                None,
+            )
+            .await;
+        let bundle = engine.execute_export(job.id, &dir).await.unwrap();
+
+        let three_days_ago = SystemTime::now() - Duration::from_secs(3 * SECONDS_PER_DAY);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&bundle)
+            .unwrap()
+            .set_modified(three_days_ago)
+            .unwrap();
+
+        let detail = prune_export_files(&dir, 1).await.unwrap();
+        assert_eq!(detail, "removed 1 expired export directories");
+        assert!(!bundle.exists());
+        // the asset's own tiles are not an export, so they stay
+        assert!(asset_dir.join("tileset.json").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[tokio::test]
     async fn pruning_export_files_on_a_server_that_has_exported_nothing_is_not_a_failure() {
         let dir = std::env::temp_dir().join(format!("tiletopia_prune_{}", Uuid::new_v4()));
