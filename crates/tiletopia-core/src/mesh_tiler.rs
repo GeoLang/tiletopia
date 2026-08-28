@@ -634,15 +634,15 @@ pub fn split_texture(
 
     let cropped = img.crop_imm(crop_x, crop_y, crop_w, crop_h);
 
-    // PNG so a JPEG source is not re-encoded at quality 90 on every tile.
+    let format = image::ImageFormat::from_mime_type(&original.mime_type)
+        .or_else(|| image::guess_format(&original.image_data).ok())
+        .expect("texture image should name a format");
     let mut buf = std::io::Cursor::new(Vec::new());
-    cropped
-        .write_to(&mut buf, image::ImageFormat::Png)
-        .expect("PNG encode");
+    cropped.write_to(&mut buf, format).expect("texture encode");
 
     let new_texture = glb_writer::TextureData {
         image_data: buf.into_inner(),
-        mime_type: "image/png".to_string(),
+        mime_type: original.mime_type.clone(),
         width: crop_w,
         height: crop_h,
     };
@@ -1043,11 +1043,10 @@ mod tests {
     }
 
     #[test]
-    fn a_jpeg_crop_is_written_as_png() {
+    fn a_crop_keeps_the_source_format() {
         let img = image::RgbImage::from_pixel(16, 16, image::Rgb([10, 20, 30]));
         let mut buf = std::io::Cursor::new(Vec::new());
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 80);
-        img.write_with_encoder(encoder).unwrap();
+        img.write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
         let tex = glb_writer::TextureData {
             image_data: buf.into_inner(),
             mime_type: "image/jpeg".to_string(),
@@ -1056,10 +1055,10 @@ mod tests {
         };
         let texcoords = vec![[0.0, 0.0], [0.5, 0.0], [0.0, 0.5]];
         let (cropped, _) = split_texture(&tex, &texcoords, &[0, 1, 2]);
-        assert_eq!(cropped.mime_type, "image/png");
+        assert_eq!(cropped.mime_type, tex.mime_type);
         assert_eq!(
             image::guess_format(&cropped.image_data).unwrap(),
-            image::ImageFormat::Png
+            image::ImageFormat::Jpeg
         );
     }
 
