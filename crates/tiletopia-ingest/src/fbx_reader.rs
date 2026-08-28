@@ -237,10 +237,10 @@ impl MaterialGroup {
 
 fn face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     let mut normals = vec![[0.0; 3]; positions.len()];
-    for triangle in indices.chunks_exact(3) {
-        let a = positions[triangle[0] as usize];
-        let b = positions[triangle[1] as usize];
-        let c = positions[triangle[2] as usize];
+    for &[ia, ib, ic] in indices.as_chunks::<3>().0 {
+        let a = positions[ia as usize];
+        let b = positions[ib as usize];
+        let c = positions[ic as usize];
         let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
         let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
         let cross = [
@@ -248,7 +248,7 @@ fn face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
             ab[2] * ac[0] - ab[0] * ac[2],
             ab[0] * ac[1] - ab[1] * ac[0],
         ];
-        for &index in triangle {
+        for index in [ia, ib, ic] {
             let n = &mut normals[index as usize];
             n[0] += cross[0];
             n[1] += cross[1];
