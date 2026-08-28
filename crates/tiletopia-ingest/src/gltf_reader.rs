@@ -103,31 +103,77 @@ fn read_texture(
     }
 }
 
-fn to_rgba8(data: &gltf::image::Data, name: &str) -> Option<Vec<u8>> {
+fn to_rgba8(data: &gltf::image::Data, _name: &str) -> Option<Vec<u8>> {
     use gltf::image::Format;
 
-    let channels = match data.format {
-        Format::R8 => 1,
-        Format::R8G8 => 2,
-        Format::R8G8B8 => 3,
-        Format::R8G8B8A8 => 4,
-        other => {
-            tracing::warn!("texture {name} is {other:?}, mesh stays untextured");
-            return None;
-        }
-    };
+    match data.format {
+        Format::R8 => Some(expand_u8(&data.pixels, 1)),
+        Format::R8G8 => Some(expand_u8(&data.pixels, 2)),
+        Format::R8G8B8 => Some(expand_u8(&data.pixels, 3)),
+        Format::R8G8B8A8 => Some(expand_u8(&data.pixels, 4)),
+        Format::R16 => Some(expand_u16(&data.pixels, 1)),
+        Format::R16G16 => Some(expand_u16(&data.pixels, 2)),
+        Format::R16G16B16 => Some(expand_u16(&data.pixels, 3)),
+        Format::R16G16B16A16 => Some(expand_u16(&data.pixels, 4)),
+        Format::R32G32B32FLOAT => Some(expand_f32(&data.pixels, 3)),
+        Format::R32G32B32A32FLOAT => Some(expand_f32(&data.pixels, 4)),
+    }
+}
 
-    Some(
-        data.pixels
-            .chunks_exact(channels)
-            .flat_map(|pixel| match channels {
-                1 => [pixel[0], pixel[0], pixel[0], 255],
-                2 => [pixel[0], pixel[0], pixel[0], pixel[1]],
-                3 => [pixel[0], pixel[1], pixel[2], 255],
-                _ => [pixel[0], pixel[1], pixel[2], pixel[3]],
-            })
-            .collect(),
-    )
+fn expand_u8(pixels: &[u8], channels: usize) -> Vec<u8> {
+    pixels
+        .chunks_exact(channels)
+        .flat_map(|pixel| match channels {
+            1 => [pixel[0], pixel[0], pixel[0], 255],
+            2 => [pixel[0], pixel[0], pixel[0], pixel[1]],
+            3 => [pixel[0], pixel[1], pixel[2], 255],
+            _ => [pixel[0], pixel[1], pixel[2], pixel[3]],
+        })
+        .collect()
+}
+
+fn u16_to_u8(bytes: &[u8]) -> u8 {
+    let value = u16::from_le_bytes([bytes[0], bytes[1]]);
+    (u32::from(value) * 255 / 65535) as u8
+}
+
+fn expand_u16(pixels: &[u8], channels: usize) -> Vec<u8> {
+    pixels
+        .chunks_exact(channels * 2)
+        .flat_map(|pixel| {
+            let channel = |i: usize| u16_to_u8(&pixel[i * 2..i * 2 + 2]);
+            match channels {
+                1 => {
+                    let r = channel(0);
+                    [r, r, r, 255]
+                }
+                2 => {
+                    let r = channel(0);
+                    [r, r, r, channel(1)]
+                }
+                3 => [channel(0), channel(1), channel(2), 255],
+                _ => [channel(0), channel(1), channel(2), channel(3)],
+            }
+        })
+        .collect()
+}
+
+fn f32_to_u8(bytes: &[u8]) -> u8 {
+    let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn expand_f32(pixels: &[u8], channels: usize) -> Vec<u8> {
+    pixels
+        .chunks_exact(channels * 4)
+        .flat_map(|pixel| {
+            let channel = |i: usize| f32_to_u8(&pixel[i * 4..i * 4 + 4]);
+            match channels {
+                3 => [channel(0), channel(1), channel(2), 255],
+                _ => [channel(0), channel(1), channel(2), channel(3)],
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -227,5 +273,41 @@ mod tests {
         tiletopia_core::glb_writer::write_glb_file(&written, &path).unwrap();
 
         assert!(read(&path).unwrap()[0].material.is_none());
+    }
+
+    #[test]
+    fn sixteen_bit_pixels_become_rgba8() {
+        let mut pixels = Vec::new();
+        for value in [0u16, 65535, 32768] {
+            pixels.extend_from_slice(&value.to_le_bytes());
+        }
+        let data = gltf::image::Data {
+            format: gltf::image::Format::R16,
+            width: 3,
+            height: 1,
+            pixels,
+        };
+        let rgba = to_rgba8(&data, "test").expect("rgba");
+        assert_eq!(rgba.len(), 12);
+        assert_eq!(&rgba[0..4], &[0, 0, 0, 255]);
+        assert_eq!(&rgba[4..8], &[255, 255, 255, 255]);
+        assert_eq!(rgba[8], 127);
+    }
+
+    #[test]
+    fn float_pixels_become_rgba8() {
+        let mut pixels = Vec::new();
+        for value in [0.0f32, 1.0, 0.5] {
+            pixels.extend_from_slice(&value.to_le_bytes());
+        }
+        pixels.extend_from_slice(&1.0f32.to_le_bytes());
+        let data = gltf::image::Data {
+            format: gltf::image::Format::R32G32B32A32FLOAT,
+            width: 1,
+            height: 1,
+            pixels,
+        };
+        let rgba = to_rgba8(&data, "test").expect("rgba");
+        assert_eq!(rgba, vec![0, 255, 128, 255]);
     }
 }

@@ -3,7 +3,7 @@
 use crate::{IngestError, Material, MeshData, Texture, texture_image};
 use fbxcel_dom::any::AnyDocument;
 use fbxcel_dom::v7400::Document;
-use fbxcel_dom::v7400::data::mesh::layer::{TypedLayerElementHandle, uv::Uv};
+use fbxcel_dom::v7400::data::mesh::layer::{TypedLayerElementHandle, normal::Normals, uv::Uv};
 use fbxcel_dom::v7400::data::mesh::{TriangleVertexIndex, TriangleVertices};
 use fbxcel_dom::v7400::object::material::MaterialHandle;
 use fbxcel_dom::v7400::object::property::loaders::PrimitiveLoader;
@@ -12,8 +12,34 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::path::Path;
 
-/// Turns a source-frame vector into the y-up frame the tiler writes.
-type ToYUp = fn([f32; 3]) -> [f32; 3];
+/// How the file's axes and units land in the y-up centimetre frame the tiler writes.
+struct SourceFrame {
+    x_from: usize,
+    y_from: usize,
+    z_from: usize,
+    x_sign: f32,
+    y_sign: f32,
+    z_sign: f32,
+    scale: f32,
+}
+
+impl SourceFrame {
+    fn position(&self, v: [f32; 3]) -> [f32; 3] {
+        [
+            v[self.x_from] * self.x_sign * self.scale,
+            v[self.y_from] * self.y_sign * self.scale,
+            v[self.z_from] * self.z_sign * self.scale,
+        ]
+    }
+
+    fn direction(&self, v: [f32; 3]) -> [f32; 3] {
+        [
+            v[self.x_from] * self.x_sign,
+            v[self.y_from] * self.y_sign,
+            v[self.z_from] * self.z_sign,
+        ]
+    }
+}
 
 /// Read meshes from an FBX binary file. Positions come out y-up whatever the
 /// file's `GlobalSettings` `UpAxis` says, and a mesh painted with several
@@ -29,7 +55,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
         _ => return Err(IngestError::ParseError("unsupported FBX version".into())),
     };
 
-    let to_y_up = up_axis_rotation(&doc);
+    let frame = source_frame(&doc);
     let mesh_dir = path.parent().unwrap_or(Path::new("."));
     let mut meshes = Vec::new();
 
@@ -55,12 +81,16 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
         }
 
         let mut uv = None;
+        let mut normals_layer = None;
         let mut material_indices = None;
         for layer in mesh_handle.layers() {
             for entry in layer.layer_element_entries() {
                 match entry.typed_layer_element() {
                     Ok(TypedLayerElementHandle::Uv(handle)) if uv.is_none() => {
                         uv = handle.uv().ok();
+                    }
+                    Ok(TypedLayerElementHandle::Normal(handle)) if normals_layer.is_none() => {
+                        normals_layer = handle.normals().ok();
                     }
                     Ok(TypedLayerElementHandle::Material(handle)) if material_indices.is_none() => {
                         material_indices = handle.materials().ok();
@@ -86,7 +116,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             let Some(control_point_index) = triangles.control_point_index(triangle_vertex) else {
                 continue;
             };
-            let position = to_y_up([
+            let position = frame.position([
                 control_point.x as f32,
                 control_point.y as f32,
                 control_point.z as f32,
@@ -94,6 +124,9 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             let texcoord = uv
                 .as_ref()
                 .map(|uv| read_uv(uv, &triangles, triangle_vertex));
+            let normal = normals_layer.as_ref().and_then(|normals| {
+                read_normal(normals, &triangles, triangle_vertex).map(|n| frame.direction(n))
+            });
             let material_index = material_indices
                 .as_ref()
                 .and_then(|indices| indices.material_index(&triangles, triangle_vertex).ok())
@@ -103,6 +136,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
                 control_point_index.to_u32(),
                 position,
                 texcoord,
+                normal,
             );
         }
 
@@ -139,10 +173,12 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
 #[derive(Default)]
 struct MaterialGroup {
     positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
     texcoords: Vec<[f32; 2]>,
     indices: Vec<u32>,
-    /// Control point and UV bits of a vertex already emitted, to its index.
-    emitted: HashMap<(u32, u32, u32), u32>,
+    has_layer_normals: bool,
+    /// Control point, UV and normal bits of a vertex already emitted, to its index.
+    emitted: HashMap<(u32, u32, u32, u32, u32, u32), u32>,
 }
 
 impl MaterialGroup {
@@ -151,18 +187,27 @@ impl MaterialGroup {
         control_point_index: u32,
         position: [f32; 3],
         texcoord: Option<[f32; 2]>,
+        normal: Option<[f32; 3]>,
     ) {
         let texcoord = texcoord.unwrap_or([0.0, 0.0]);
+        let normal = normal.unwrap_or([0.0, 0.0, 0.0]);
+        if normal != [0.0, 0.0, 0.0] {
+            self.has_layer_normals = true;
+        }
         let key = (
             control_point_index,
             texcoord[0].to_bits(),
             texcoord[1].to_bits(),
+            normal[0].to_bits(),
+            normal[1].to_bits(),
+            normal[2].to_bits(),
         );
         let index = match self.emitted.get(&key) {
             Some(&index) => index,
             None => {
                 let index = self.positions.len() as u32;
                 self.positions.push(position);
+                self.normals.push(normal);
                 self.texcoords.push(texcoord);
                 self.emitted.insert(key, index);
                 index
@@ -171,13 +216,16 @@ impl MaterialGroup {
         self.indices.push(index);
     }
 
-    fn into_mesh(self, name: String, material: Option<Material>) -> MeshData {
+    fn into_mesh(mut self, name: String, material: Option<Material>) -> MeshData {
         let textured = material
             .as_ref()
             .is_some_and(|material| material.texture.is_some());
+        if !self.has_layer_normals {
+            self.normals = face_normals(&self.positions, &self.indices);
+        }
         MeshData {
             positions: self.positions,
-            normals: Vec::new(),
+            normals: self.normals,
             texcoords: if textured { self.texcoords } else { Vec::new() },
             indices: self.indices,
             name,
@@ -185,6 +233,46 @@ impl MaterialGroup {
             asset_id: None,
         }
     }
+}
+
+fn face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
+    let mut normals = vec![[0.0; 3]; positions.len()];
+    for triangle in indices.chunks_exact(3) {
+        let a = positions[triangle[0] as usize];
+        let b = positions[triangle[1] as usize];
+        let c = positions[triangle[2] as usize];
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let cross = [
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        ];
+        for &index in triangle {
+            let n = &mut normals[index as usize];
+            n[0] += cross[0];
+            n[1] += cross[1];
+            n[2] += cross[2];
+        }
+    }
+    for n in &mut normals {
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if len > 0.0 {
+            n[0] /= len;
+            n[1] /= len;
+            n[2] /= len;
+        }
+    }
+    normals
+}
+
+fn read_normal(
+    normals: &Normals<'_>,
+    triangles: &TriangleVertices<'_>,
+    index: TriangleVertexIndex,
+) -> Option<[f32; 3]> {
+    let n = normals.normal(triangles, index).ok()?;
+    Some([n.x as f32, n.y as f32, n.z as f32])
 }
 
 /// The FBX v axis counts from the bottom of the image, glTF from the top.
@@ -221,38 +309,109 @@ fn read_texture(handle: &MaterialHandle<'_>, mesh_dir: &Path) -> Option<Texture>
     texture_image::resolve(mesh_dir, relative).and_then(|path| texture_image::from_file(&path))
 }
 
-/// The rotation taking the file's up axis to +y. `UpAxis` is 0, 1 or 2 for x,
-/// y or z, and `UpAxisSign` says which end of it points up.
-fn up_axis_rotation(doc: &Document) -> ToYUp {
-    let identity: ToYUp = |v| v;
-
+fn source_frame(doc: &Document) -> SourceFrame {
+    let identity = SourceFrame {
+        x_from: 0,
+        y_from: 1,
+        z_from: 2,
+        x_sign: 1.0,
+        y_sign: 1.0,
+        z_sign: 1.0,
+        scale: 1.0,
+    };
     let Some(settings) = doc.global_settings() else {
         return identity;
     };
     let properties = settings.raw_properties();
-    let read = |name: &str| {
+    let read_int = |name: &str| {
         properties
             .get_property(name)
             .and_then(|property| property.load_value(PrimitiveLoader::<i32>::new()).ok())
     };
+    let scale = properties
+        .get_property("UnitScaleFactor")
+        .and_then(|property| property.load_value(PrimitiveLoader::<f64>::new()).ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0) as f32;
 
-    let Some(up_axis) = read("UpAxis") else {
-        return identity;
+    let Some(up_axis) = read_int("UpAxis") else {
+        return SourceFrame { scale, ..identity };
     };
-    let sign = read("UpAxisSign").unwrap_or(1);
+    let up_sign = read_int("UpAxisSign").unwrap_or(1);
+    let front = read_int("FrontAxis").zip(read_int("FrontAxisSign"));
+    let coord = read_int("CoordAxis").zip(read_int("CoordAxisSign"));
 
-    match (up_axis, sign.signum()) {
-        (1, 1) => identity,
-        (1, -1) => |v: [f32; 3]| [v[0], -v[1], -v[2]],
-        (2, 1) => |v: [f32; 3]| [v[0], v[2], -v[1]],
-        (2, -1) => |v: [f32; 3]| [v[0], -v[2], v[1]],
-        (0, 1) => |v: [f32; 3]| [-v[1], v[0], v[2]],
-        (0, -1) => |v: [f32; 3]| [v[1], -v[0], v[2]],
-        _ => {
-            tracing::warn!("FBX UpAxis {up_axis} sign {sign} is not an axis, reading as y up");
+    let mut frame = if let (Some((front_axis, front_sign)), Some((coord_axis, coord_sign))) =
+        (front, coord)
+    {
+        if ![up_axis, front_axis, coord_axis]
+            .iter()
+            .all(|axis| (0..=2).contains(axis))
+            || up_axis == front_axis
+            || up_axis == coord_axis
+            || front_axis == coord_axis
+        {
+            tracing::warn!(
+                "FBX axes {coord_axis}/{up_axis}/{front_axis} are not a permutation, reading as y up"
+            );
             identity
+        } else {
+            SourceFrame {
+                x_from: coord_axis as usize,
+                y_from: up_axis as usize,
+                z_from: front_axis as usize,
+                x_sign: sign_f32(coord_sign),
+                y_sign: sign_f32(up_sign),
+                z_sign: sign_f32(front_sign),
+                scale: 1.0,
+            }
         }
-    }
+    } else {
+        match (up_axis, up_sign.signum()) {
+            (1, 1) => identity,
+            (1, -1) => SourceFrame {
+                y_sign: -1.0,
+                z_sign: -1.0,
+                ..identity
+            },
+            (2, 1) => SourceFrame {
+                y_from: 2,
+                z_from: 1,
+                z_sign: -1.0,
+                ..identity
+            },
+            (2, -1) => SourceFrame {
+                y_from: 2,
+                y_sign: -1.0,
+                z_from: 1,
+                ..identity
+            },
+            (0, 1) => SourceFrame {
+                x_from: 1,
+                x_sign: -1.0,
+                y_from: 0,
+                ..identity
+            },
+            (0, -1) => SourceFrame {
+                x_from: 1,
+                y_from: 0,
+                y_sign: -1.0,
+                ..identity
+            },
+            _ => {
+                tracing::warn!(
+                    "FBX UpAxis {up_axis} sign {up_sign} is not an axis, reading as y up"
+                );
+                identity
+            }
+        }
+    };
+    frame.scale = scale;
+    frame
+}
+
+fn sign_f32(value: i32) -> f32 {
+    if value < 0 { -1.0 } else { 1.0 }
 }
 
 #[cfg(test)]
@@ -296,6 +455,7 @@ mod tests {
 
     struct FbxBuilder {
         tree: Tree,
+        properties: NodeId,
     }
 
     impl FbxBuilder {
@@ -316,7 +476,23 @@ mod tests {
             tree.append_new(root, "Documents");
             tree.append_new(root, "Objects");
             tree.append_new(root, "Connections");
-            Self { tree }
+            Self { tree, properties }
+        }
+
+        fn global_int(&mut self, name: &str, value: i32) {
+            let property = self.tree.append_new(self.properties, "P");
+            for attribute in [name, "int", "Integer", ""] {
+                self.tree.append_attribute(property, attribute.to_string());
+            }
+            self.tree.append_attribute(property, value);
+        }
+
+        fn global_double(&mut self, name: &str, value: f64) {
+            let property = self.tree.append_new(self.properties, "P");
+            for attribute in [name, "double", "Number", ""] {
+                self.tree.append_attribute(property, attribute.to_string());
+            }
+            self.tree.append_attribute(property, value);
         }
 
         fn top_level(&self, name: &str) -> NodeId {
@@ -462,7 +638,47 @@ mod tests {
         assert_eq!(meshes.len(), 1);
         assert_eq!(meshes[0].indices.len(), 6);
         assert_eq!(meshes[0].positions.len(), 4);
-        assert!(meshes[0].normals.is_empty());
+        assert_eq!(meshes[0].normals.len(), 4);
+        let n = meshes[0].normals[0];
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        assert!((len - 1.0).abs() < 1e-5, "{n:?}");
+    }
+
+    #[test]
+    fn unit_scale_factor_scales_positions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scaled.fbx");
+        let mut builder = FbxBuilder::new(1, 1);
+        builder.global_double("UnitScaleFactor", 100.0);
+        builder.square(false);
+        builder.write(&path);
+
+        let meshes = read(&path).unwrap();
+        assert!(
+            meshes[0].positions.contains(&[100.0, 100.0, 200.0]),
+            "{:?}",
+            meshes[0].positions
+        );
+    }
+
+    #[test]
+    fn front_and_coord_axes_turn_z_up_the_same_as_up_axis_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("max.fbx");
+        let mut builder = FbxBuilder::new(2, 1);
+        builder.global_int("FrontAxis", 1);
+        builder.global_int("FrontAxisSign", -1);
+        builder.global_int("CoordAxis", 0);
+        builder.global_int("CoordAxisSign", 1);
+        builder.square(false);
+        builder.write(&path);
+
+        let meshes = read(&path).unwrap();
+        assert!(
+            meshes[0].positions.contains(&[1.0, 2.0, -1.0]),
+            "{:?}",
+            meshes[0].positions
+        );
     }
 
     #[test]

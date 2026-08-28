@@ -634,24 +634,15 @@ pub fn split_texture(
 
     let cropped = img.crop_imm(crop_x, crop_y, crop_w, crop_h);
 
-    // Encode the cropped image.
+    // PNG so a JPEG source is not re-encoded at quality 90 on every tile.
     let mut buf = std::io::Cursor::new(Vec::new());
-    let is_jpeg = original.mime_type == "image/jpeg";
-    if is_jpeg {
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 90);
-        cropped
-            .to_rgb8()
-            .write_with_encoder(encoder)
-            .expect("JPEG encode");
-    } else {
-        cropped
-            .write_to(&mut buf, image::ImageFormat::Png)
-            .expect("PNG encode");
-    }
+    cropped
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .expect("PNG encode");
 
     let new_texture = glb_writer::TextureData {
         image_data: buf.into_inner(),
-        mime_type: original.mime_type.clone(),
+        mime_type: "image/png".to_string(),
         width: crop_w,
         height: crop_h,
     };
@@ -1049,6 +1040,27 @@ mod tests {
 
         // The cropped texture should be loadable.
         image::load_from_memory(&cropped.image_data).expect("cropped texture should be valid");
+    }
+
+    #[test]
+    fn a_jpeg_crop_is_written_as_png() {
+        let img = image::RgbImage::from_pixel(16, 16, image::Rgb([10, 20, 30]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 80);
+        img.write_with_encoder(encoder).unwrap();
+        let tex = glb_writer::TextureData {
+            image_data: buf.into_inner(),
+            mime_type: "image/jpeg".to_string(),
+            width: 16,
+            height: 16,
+        };
+        let texcoords = vec![[0.0, 0.0], [0.5, 0.0], [0.0, 0.5]];
+        let (cropped, _) = split_texture(&tex, &texcoords, &[0, 1, 2]);
+        assert_eq!(cropped.mime_type, "image/png");
+        assert_eq!(
+            image::guess_format(&cropped.image_data).unwrap(),
+            image::ImageFormat::Png
+        );
     }
 
     /// A grid mesh with UVs spanning the whole texture.

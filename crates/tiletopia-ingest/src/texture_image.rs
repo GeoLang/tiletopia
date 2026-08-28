@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 
 const PNG_MIME: &str = "image/png";
 const JPEG_MIME: &str = "image/jpeg";
+/// Independent of the upload cap. 4096² is 16 megapixels.
+const MAX_TEXTURE_PIXELS: u64 = 4096 * 4096;
+const MAX_TEXTURE_SIDE: u32 = 8192;
 
 /// Read a texture from an image file.
 pub fn from_file(path: &Path) -> Option<Texture> {
@@ -44,6 +47,9 @@ pub fn from_bytes(bytes: Vec<u8>, source: &str) -> Option<Texture> {
             return None;
         }
     };
+    if !texture_fits(dimensions.0, dimensions.1, source) {
+        return None;
+    }
 
     match format {
         Some(ImageFormat::Png) => Some(Texture {
@@ -64,6 +70,9 @@ pub fn from_bytes(bytes: Vec<u8>, source: &str) -> Option<Texture> {
 
 /// Build a texture from raw RGBA8 pixels.
 pub fn from_rgba8(pixels: Vec<u8>, width: u32, height: u32, source: &str) -> Option<Texture> {
+    if !texture_fits(width, height, source) {
+        return None;
+    }
     let Some(image) = image::RgbaImage::from_raw(width, height, pixels) else {
         tracing::warn!(
             "texture {source} has fewer pixels than {width}x{height}, mesh stays untextured"
@@ -71,6 +80,15 @@ pub fn from_rgba8(pixels: Vec<u8>, width: u32, height: u32, source: &str) -> Opt
         return None;
     };
     encode_png(&image::DynamicImage::ImageRgba8(image), source)
+}
+
+fn texture_fits(width: u32, height: u32, source: &str) -> bool {
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if width > MAX_TEXTURE_SIDE || height > MAX_TEXTURE_SIDE || pixels > MAX_TEXTURE_PIXELS {
+        tracing::warn!("texture {source} is {width}x{height}, mesh stays untextured");
+        return false;
+    }
+    true
 }
 
 fn reencode_as_png(bytes: &[u8], source: &str) -> Option<Texture> {
@@ -184,5 +202,10 @@ mod tests {
     #[test]
     fn a_missing_file_leaves_the_mesh_untextured() {
         assert!(from_file(Path::new("/nonexistent/texture.png")).is_none());
+    }
+
+    #[test]
+    fn a_texture_past_the_side_cap_is_dropped() {
+        assert!(from_rgba8(vec![0; 4], MAX_TEXTURE_SIDE + 1, 1, "wide").is_none());
     }
 }

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- FBX mesh ingest reads `UnitScaleFactor`, `FrontAxis` and `CoordAxis`, and
+  writes normals (from the file, or from the faces when the layer is missing).
+- glTF 16- and 32-bit textures convert to RGBA8 instead of leaving the mesh
+  untextured. JPEG tile crops encode as PNG rather than JPEG quality 90.
+  Texture decode refuses a raster past 8192 on a side or 4096² pixels.
+
 - A mesh tileset whose root is a single tile drew nothing in Cesium
   (2026-08-25). The tileset-level `geometricError` copied the root tile's,
   which is zero for a leaf, and Cesium never visits the root of a tileset
