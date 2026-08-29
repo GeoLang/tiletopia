@@ -12,7 +12,10 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::path::Path;
 
-/// How the file's axes and units land in the y-up centimetre frame the tiler writes.
+/// FBX positions are in `UnitScaleFactor` centimetres per file unit, 1 when absent.
+const CENTIMETRES_PER_METRE: f64 = 100.0;
+
+/// How the file's axes and units land in the y-up metre frame the tiler writes.
 struct SourceFrame {
     x_from: usize,
     y_from: usize,
@@ -154,7 +157,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             } else {
                 name.clone()
             };
-            meshes.push(group.into_mesh(name, material));
+            meshes.push(group.into_mesh(name, material, normals_layer.is_some()));
         }
     }
 
@@ -176,7 +179,6 @@ struct MaterialGroup {
     normals: Vec<[f32; 3]>,
     texcoords: Vec<[f32; 2]>,
     indices: Vec<u32>,
-    has_layer_normals: bool,
     /// Control point, UV and normal bits of a vertex already emitted, to its index.
     emitted: HashMap<(u32, u32, u32, u32, u32, u32), u32>,
 }
@@ -191,9 +193,6 @@ impl MaterialGroup {
     ) {
         let texcoord = texcoord.unwrap_or([0.0, 0.0]);
         let normal = normal.unwrap_or([0.0, 0.0, 0.0]);
-        if normal != [0.0, 0.0, 0.0] {
-            self.has_layer_normals = true;
-        }
         let key = (
             control_point_index,
             texcoord[0].to_bits(),
@@ -216,11 +215,16 @@ impl MaterialGroup {
         self.indices.push(index);
     }
 
-    fn into_mesh(mut self, name: String, material: Option<Material>) -> MeshData {
+    fn into_mesh(
+        mut self,
+        name: String,
+        material: Option<Material>,
+        layer_normals: bool,
+    ) -> MeshData {
         let textured = material
             .as_ref()
             .is_some_and(|material| material.texture.is_some());
-        if !self.has_layer_normals {
+        if !layer_normals {
             self.normals = face_normals(&self.positions, &self.indices);
         }
         MeshData {
@@ -328,11 +332,12 @@ fn source_frame(doc: &Document) -> SourceFrame {
             .get_property(name)
             .and_then(|property| property.load_value(PrimitiveLoader::<i32>::new()).ok())
     };
-    let scale = properties
+    let scale = (properties
         .get_property("UnitScaleFactor")
         .and_then(|property| property.load_value(PrimitiveLoader::<f64>::new()).ok())
         .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(1.0) as f32;
+        .unwrap_or(1.0)
+        / CENTIMETRES_PER_METRE) as f32;
 
     let Some(up_axis) = read_int("UpAxis") else {
         return SourceFrame { scale, ..identity };
@@ -459,7 +464,12 @@ mod tests {
     }
 
     impl FbxBuilder {
+        /// A file in metres, so position assertions read as written.
         fn new(up_axis: i32, up_axis_sign: i32) -> Self {
+            Self::with_unit_scale(up_axis, up_axis_sign, Some(100.0))
+        }
+
+        fn with_unit_scale(up_axis: i32, up_axis_sign: i32, unit_scale: Option<f64>) -> Self {
             let mut tree = Tree::default();
             let root = tree.root().node_id();
 
@@ -476,7 +486,11 @@ mod tests {
             tree.append_new(root, "Documents");
             tree.append_new(root, "Objects");
             tree.append_new(root, "Connections");
-            Self { tree, properties }
+            let mut builder = Self { tree, properties };
+            if let Some(unit_scale) = unit_scale {
+                builder.global_double("UnitScaleFactor", unit_scale);
+            }
+            builder
         }
 
         fn global_int(&mut self, name: &str, value: i32) {
@@ -645,17 +659,32 @@ mod tests {
     }
 
     #[test]
-    fn unit_scale_factor_scales_positions() {
+    fn a_centimetre_file_comes_out_in_metres() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("scaled.fbx");
-        let mut builder = FbxBuilder::new(1, 1);
-        builder.global_double("UnitScaleFactor", 100.0);
+        let path = dir.path().join("centimetres.fbx");
+        let mut builder = FbxBuilder::with_unit_scale(1, 1, Some(1.0));
         builder.square(false);
         builder.write(&path);
 
         let meshes = read(&path).unwrap();
         assert!(
-            meshes[0].positions.contains(&[100.0, 100.0, 200.0]),
+            meshes[0].positions.contains(&[0.01, 0.01, 0.02]),
+            "{:?}",
+            meshes[0].positions
+        );
+    }
+
+    #[test]
+    fn a_missing_unit_scale_factor_reads_as_centimetres() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unitless.fbx");
+        let mut builder = FbxBuilder::with_unit_scale(1, 1, None);
+        builder.square(false);
+        builder.write(&path);
+
+        let meshes = read(&path).unwrap();
+        assert!(
+            meshes[0].positions.contains(&[0.01, 0.01, 0.02]),
             "{:?}",
             meshes[0].positions
         );

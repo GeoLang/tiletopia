@@ -9,10 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- FBX positions come out in metres (2026-08-29). `UnitScaleFactor` is
+  centimetres per file unit. A default file (1) was read 100 times too large,
+  and the 2026-08-28 change multiplied by the factor without dividing by 100,
+  which made a metre file (100) 100 times too large as well.
 - FBX mesh ingest reads `UnitScaleFactor`, `FrontAxis` and `CoordAxis`, and
-  writes normals (from the file, or from the faces when the layer is missing).
+  writes normals (from the file, or from the faces when the layer is missing)
+  (2026-08-28).
 - glTF 16- and 32-bit textures convert to RGBA8 instead of leaving the mesh
-  untextured. Tile crops keep the source mime type instead of re-encoding
+  untextured (2026-08-28). Tile crops keep the source mime type instead of re-encoding
   JPEG at quality 90. Texture decode refuses a raster past 8192 on a side
   or 4096² pixels.
 

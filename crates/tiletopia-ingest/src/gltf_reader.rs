@@ -97,13 +97,13 @@ fn read_texture(
         }
         gltf::image::Source::Uri { .. } => {
             let data = images.get(image.index())?;
-            let pixels = to_rgba8(data, &name)?;
+            let pixels = to_rgba8(data)?;
             texture_image::from_rgba8(pixels, data.width, data.height, &name)
         }
     }
 }
 
-fn to_rgba8(data: &gltf::image::Data, _name: &str) -> Option<Vec<u8>> {
+fn to_rgba8(data: &gltf::image::Data) -> Option<Vec<u8>> {
     use gltf::image::Format;
 
     match data.format {
@@ -287,7 +287,7 @@ mod tests {
             height: 1,
             pixels,
         };
-        let rgba = to_rgba8(&data, "test").expect("rgba");
+        let rgba = to_rgba8(&data).expect("rgba");
         assert_eq!(rgba.len(), 12);
         assert_eq!(&rgba[0..4], &[0, 0, 0, 255]);
         assert_eq!(&rgba[4..8], &[255, 255, 255, 255]);
@@ -307,7 +307,7 @@ mod tests {
             height: 1,
             pixels,
         };
-        let rgba = to_rgba8(&data, "test").expect("rgba");
+        let rgba = to_rgba8(&data).expect("rgba");
         assert_eq!(rgba, vec![0, 255, 128, 255]);
     }
 }

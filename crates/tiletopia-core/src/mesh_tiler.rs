@@ -636,7 +636,7 @@ pub fn split_texture(
 
     let format = image::ImageFormat::from_mime_type(&original.mime_type)
         .or_else(|| image::guess_format(&original.image_data).ok())
-        .expect("texture image should name a format");
+        .unwrap_or(image::ImageFormat::Png);
     let mut buf = std::io::Cursor::new(Vec::new());
     cropped.write_to(&mut buf, format).expect("texture encode");
 
