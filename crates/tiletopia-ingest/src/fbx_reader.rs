@@ -6,7 +6,9 @@ use fbxcel_dom::v7400::Document;
 use fbxcel_dom::v7400::data::mesh::layer::{TypedLayerElementHandle, normal::Normals, uv::Uv};
 use fbxcel_dom::v7400::data::mesh::{TriangleVertexIndex, TriangleVertices};
 use fbxcel_dom::v7400::object::material::MaterialHandle;
-use fbxcel_dom::v7400::object::property::loaders::PrimitiveLoader;
+use fbxcel_dom::v7400::object::model::ModelHandle;
+use fbxcel_dom::v7400::object::property::ObjectProperties;
+use fbxcel_dom::v7400::object::property::loaders::{F64Arr3Loader, PrimitiveLoader};
 use fbxcel_dom::v7400::object::{TypedObjectHandle, geometry::TypedGeometryHandle};
 use std::collections::HashMap;
 use std::io::BufReader;
@@ -44,9 +46,213 @@ impl SourceFrame {
     }
 }
 
-/// Read meshes from an FBX binary file. Positions come out y-up whatever the
-/// file's `GlobalSettings` `UpAxis` says, and a mesh painted with several
-/// materials comes out as one mesh per material.
+const ZERO3: [f64; 3] = [0.0; 3];
+const ONE3: [f64; 3] = [1.0; 3];
+const ROTATION_ORDER_XYZ: [usize; 3] = [0, 1, 2];
+
+/// Column-vector affine map, v' = linear * v + translation.
+#[derive(Clone, Copy)]
+struct Affine {
+    linear: [[f64; 3]; 3],
+    translation: [f64; 3],
+}
+
+impl Affine {
+    const IDENTITY: Self = Self {
+        linear: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        translation: ZERO3,
+    };
+
+    fn translation(translation: [f64; 3]) -> Self {
+        Self {
+            translation,
+            ..Self::IDENTITY
+        }
+    }
+
+    fn scaling(s: [f64; 3]) -> Self {
+        Self {
+            linear: [[s[0], 0.0, 0.0], [0.0, s[1], 0.0], [0.0, 0.0, s[2]]],
+            ..Self::IDENTITY
+        }
+    }
+
+    fn rotation_about(axis: usize, degrees: f64) -> Self {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let mut linear = Self::IDENTITY.linear;
+        let a = (axis + 1) % 3;
+        let b = (axis + 2) % 3;
+        linear[a][a] = cos;
+        linear[a][b] = -sin;
+        linear[b][a] = sin;
+        linear[b][b] = cos;
+        Self {
+            linear,
+            ..Self::IDENTITY
+        }
+    }
+
+    /// Euler angles in degrees, `order` naming the axis that turns the vector first.
+    fn euler(degrees: [f64; 3], order: [usize; 3]) -> Self {
+        Self::rotation_about(order[2], degrees[order[2]])
+            .times(Self::rotation_about(order[1], degrees[order[1]]))
+            .times(Self::rotation_about(order[0], degrees[order[0]]))
+    }
+
+    /// The inverse of a pure rotation.
+    fn transposed(self) -> Self {
+        let mut linear = [[0.0; 3]; 3];
+        for (row, line) in linear.iter_mut().enumerate() {
+            for (col, cell) in line.iter_mut().enumerate() {
+                *cell = self.linear[col][row];
+            }
+        }
+        Self {
+            linear,
+            ..Self::IDENTITY
+        }
+    }
+
+    /// `self * other`: `other` reaches the vector first.
+    fn times(self, other: Self) -> Self {
+        let mut linear = [[0.0; 3]; 3];
+        for (row, line) in linear.iter_mut().enumerate() {
+            for (col, cell) in line.iter_mut().enumerate() {
+                *cell = (0..3)
+                    .map(|k| self.linear[row][k] * other.linear[k][col])
+                    .sum();
+            }
+        }
+        Self {
+            linear,
+            translation: self.apply(other.translation),
+        }
+    }
+
+    fn apply(&self, v: [f64; 3]) -> [f64; 3] {
+        let mut out = self.translation;
+        for (row, line) in self.linear.iter().enumerate() {
+            for (k, cell) in line.iter().enumerate() {
+                out[row] += cell * v[k];
+            }
+        }
+        out
+    }
+
+    /// Normals go through the inverse transpose so a non-uniform scale keeps
+    /// them perpendicular. The cofactor matrix is that up to the determinant.
+    fn apply_normal(&self, n: [f64; 3]) -> [f64; 3] {
+        let m = &self.linear;
+        let cofactor = |r: usize, c: usize| {
+            let (r1, r2) = ((r + 1) % 3, (r + 2) % 3);
+            let (c1, c2) = ((c + 1) % 3, (c + 2) % 3);
+            m[r1][c1] * m[r2][c2] - m[r1][c2] * m[r2][c1]
+        };
+        let determinant: f64 = (0..3).map(|k| m[0][k] * cofactor(0, k)).sum();
+        let mut out = [0.0; 3];
+        for (row, value) in out.iter_mut().enumerate() {
+            *value = (0..3).map(|k| cofactor(row, k) * n[k]).sum();
+        }
+        if determinant < 0.0 {
+            out = out.map(|c| -c);
+        }
+        let len = (out[0] * out[0] + out[1] * out[1] + out[2] * out[2]).sqrt();
+        if len > 0.0 { out.map(|c| c / len) } else { n }
+    }
+}
+
+fn negated(v: [f64; 3]) -> [f64; 3] {
+    v.map(|c| -c)
+}
+
+/// `RotationOrder` as the FBX SDK numbers `FbxEuler::EOrder`, XYZ for anything else.
+fn rotation_order(value: i32) -> [usize; 3] {
+    match value {
+        1 => [0, 2, 1],
+        2 => [1, 2, 0],
+        3 => [1, 0, 2],
+        4 => [2, 0, 1],
+        5 => [2, 1, 0],
+        _ => ROTATION_ORDER_XYZ,
+    }
+}
+
+fn vector_property(properties: &ObjectProperties<'_>, name: &str, missing: [f64; 3]) -> [f64; 3] {
+    properties
+        .get_property(name)
+        .and_then(|property| property.load_value(F64Arr3Loader).ok())
+        .unwrap_or(missing)
+}
+
+/// The FBX SDK's own composition:
+/// T * Roff * Rp * Rpre * R * Rpost^-1 * Rp^-1 * Soff * Sp * S * Sp^-1.
+fn node_local_transform(model: &ModelHandle<'_>) -> Affine {
+    let properties = model.properties_by_native_typename("FbxNode");
+    let vec3 = |name: &str, missing: [f64; 3]| vector_property(&properties, name, missing);
+    let rotation_active = properties
+        .get_property("RotationActive")
+        .and_then(|property| property.load_value(PrimitiveLoader::<bool>::new()).ok())
+        .unwrap_or(false);
+    // pre and post rotation and the order count only while RotationActive is set
+    let (pre_rotation, post_rotation, order) = if rotation_active {
+        let order = properties
+            .get_property("RotationOrder")
+            .and_then(|property| property.load_value(PrimitiveLoader::<i32>::new()).ok())
+            .map_or(ROTATION_ORDER_XYZ, rotation_order);
+        (
+            vec3("PreRotation", ZERO3),
+            vec3("PostRotation", ZERO3),
+            order,
+        )
+    } else {
+        (ZERO3, ZERO3, ROTATION_ORDER_XYZ)
+    };
+    let rotation = Affine::euler(pre_rotation, ROTATION_ORDER_XYZ)
+        .times(Affine::euler(vec3("Lcl Rotation", ZERO3), order))
+        .times(Affine::euler(post_rotation, ROTATION_ORDER_XYZ).transposed());
+    let rotation_pivot = vec3("RotationPivot", ZERO3);
+    let scaling_pivot = vec3("ScalingPivot", ZERO3);
+    Affine::translation(vec3("Lcl Translation", ZERO3))
+        .times(Affine::translation(vec3("RotationOffset", ZERO3)))
+        .times(Affine::translation(rotation_pivot))
+        .times(rotation)
+        .times(Affine::translation(negated(rotation_pivot)))
+        .times(Affine::translation(vec3("ScalingOffset", ZERO3)))
+        .times(Affine::translation(scaling_pivot))
+        .times(Affine::scaling(vec3("Lcl Scaling", ONE3)))
+        .times(Affine::translation(negated(scaling_pivot)))
+}
+
+// TODO: InheritType other than RrSs changes how a parent's scale reaches the child
+fn node_world_transform(model: &ModelHandle<'_>) -> Affine {
+    let mut world = node_local_transform(model);
+    let mut parent = model.parent_model();
+    while let Some(node) = parent {
+        world = node_local_transform(&node).times(world);
+        parent = node.parent_model();
+    }
+    world
+}
+
+/// The node's geometric offset moves its own mesh and no child.
+fn geometric_transform(model: &ModelHandle<'_>) -> Affine {
+    let properties = model.properties_by_native_typename("FbxNode");
+    Affine::translation(vector_property(&properties, "GeometricTranslation", ZERO3))
+        .times(Affine::euler(
+            vector_property(&properties, "GeometricRotation", ZERO3),
+            ROTATION_ORDER_XYZ,
+        ))
+        .times(Affine::scaling(vector_property(
+            &properties,
+            "GeometricScaling",
+            ONE3,
+        )))
+}
+
+/// Read meshes from an FBX binary file. Positions are flattened through the
+/// model hierarchy, come out y-up whatever the file's `GlobalSettings`
+/// `UpAxis` says, and a mesh painted with several materials comes out as one
+/// mesh per material.
 pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
@@ -103,11 +309,14 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             }
         }
 
-        let material_handles: Vec<MaterialHandle> = mesh_handle
-            .models()
-            .next()
+        let model = mesh_handle.models().next();
+        let material_handles: Vec<MaterialHandle> = model
+            .as_ref()
             .map(|model| model.materials().collect())
             .unwrap_or_default();
+        let node = model.as_ref().map_or(Affine::IDENTITY, |model| {
+            node_world_transform(model).times(geometric_transform(model))
+        });
 
         let name = mesh_handle.name().unwrap_or("mesh").to_string();
         let mut groups: HashMap<u32, MaterialGroup> = HashMap::new();
@@ -119,16 +328,14 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             let Some(control_point_index) = triangles.control_point_index(triangle_vertex) else {
                 continue;
             };
-            let position = frame.position([
-                control_point.x as f32,
-                control_point.y as f32,
-                control_point.z as f32,
-            ]);
+            let placed = node.apply([control_point.x, control_point.y, control_point.z]);
+            let position = frame.position(placed.map(|c| c as f32));
             let texcoord = uv
                 .as_ref()
                 .map(|uv| read_uv(uv, &triangles, triangle_vertex));
             let normal = normals_layer.as_ref().and_then(|normals| {
-                read_normal(normals, &triangles, triangle_vertex).map(|n| frame.direction(n))
+                read_normal(normals, &triangles, triangle_vertex)
+                    .map(|n| frame.direction(node.apply_normal(n).map(|c| c as f32)))
             });
             let material_index = material_indices
                 .as_ref()
@@ -274,9 +481,9 @@ fn read_normal(
     normals: &Normals<'_>,
     triangles: &TriangleVertices<'_>,
     index: TriangleVertexIndex,
-) -> Option<[f32; 3]> {
+) -> Option<[f64; 3]> {
     let n = normals.normal(triangles, index).ok()?;
-    Some([n.x as f32, n.y as f32, n.z as f32])
+    Some([n.x, n.y, n.z])
 }
 
 /// The FBX v axis counts from the bottom of the image, glTF from the top.
@@ -494,11 +701,38 @@ mod tests {
         }
 
         fn global_int(&mut self, name: &str, value: i32) {
-            let property = self.tree.append_new(self.properties, "P");
+            let properties = self.properties;
+            self.int(properties, name, value);
+        }
+
+        fn int(&mut self, properties: NodeId, name: &str, value: i32) {
+            let property = self.tree.append_new(properties, "P");
             for attribute in [name, "int", "Integer", ""] {
                 self.tree.append_attribute(property, attribute.to_string());
             }
             self.tree.append_attribute(property, value);
+        }
+
+        fn vector(&mut self, properties: NodeId, name: &str, value: [f64; 3]) {
+            let property = self.tree.append_new(properties, "P");
+            for attribute in [name, "Vector3D", "Vector", ""] {
+                self.tree.append_attribute(property, attribute.to_string());
+            }
+            for component in value {
+                self.tree.append_attribute(property, component);
+            }
+        }
+
+        /// The property block of an object node.
+        fn properties(&mut self, node: NodeId) -> NodeId {
+            self.tree.append_new(node, "Properties70")
+        }
+
+        /// A model above the square's, with no geometry of its own.
+        fn parent_model(&mut self, id: i64) -> NodeId {
+            let node = self.object("Model", id, "parent", "Model", "Null");
+            self.connect(MODEL_ID, id, None);
+            node
         }
 
         fn global_double(&mut self, name: &str, value: f64) {
@@ -549,7 +783,8 @@ mod tests {
         }
 
         /// A square geometry, its model, and the UV layer when asked for.
-        fn square(&mut self, with_uvs: bool) {
+        /// Returns the model node.
+        fn square(&mut self, with_uvs: bool) -> NodeId {
             let geometry = self.object("Geometry", GEOMETRY_ID, "square", "Geometry", "Mesh");
 
             let vertices = self.tree.append_new(geometry, "Vertices");
@@ -584,8 +819,9 @@ mod tests {
                 self.tree.append_attribute(entry_index, 0i32);
             }
 
-            self.object("Model", MODEL_ID, "square", "Model", "Mesh");
+            let model = self.object("Model", MODEL_ID, "square", "Model", "Mesh");
             self.connect(GEOMETRY_ID, MODEL_ID, None);
+            model
         }
 
         /// A material with a diffuse colour, and an embedded texture when given.
@@ -656,6 +892,164 @@ mod tests {
         let n = meshes[0].normals[0];
         let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
         assert!((len - 1.0).abs() < 1e-5, "{n:?}");
+    }
+
+    const PARENT_ID: i64 = 300;
+
+    fn has_position(meshes: &[MeshData], expected: [f32; 3]) -> bool {
+        meshes[0].positions.iter().any(|position| {
+            position
+                .iter()
+                .zip(expected)
+                .all(|(actual, wanted)| (actual - wanted).abs() < 1e-4)
+        })
+    }
+
+    fn read_square(configure: impl FnOnce(&mut FbxBuilder)) -> Vec<MeshData> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("placed.fbx");
+        let mut builder = FbxBuilder::new(1, 1);
+        configure(&mut builder);
+        builder.write(&path);
+        read(&path).unwrap()
+    }
+
+    #[test]
+    fn a_node_translation_moves_the_mesh() {
+        let meshes = read_square(|builder| {
+            let model = builder.square(false);
+            let properties = builder.properties(model);
+            builder.vector(properties, "Lcl Translation", [10.0, 0.0, 0.0]);
+        });
+        assert!(
+            has_position(&meshes, [11.0, 1.0, 2.0]),
+            "{:?}",
+            meshes[0].positions
+        );
+    }
+
+    #[test]
+    fn a_parent_scales_the_child_after_the_child_translates() {
+        let meshes = read_square(|builder| {
+            let model = builder.square(false);
+            let properties = builder.properties(model);
+            builder.vector(properties, "Lcl Translation", [1.0, 0.0, 0.0]);
+            let parent = builder.parent_model(PARENT_ID);
+            let properties = builder.properties(parent);
+            builder.vector(properties, "Lcl Scaling", [2.0, 2.0, 2.0]);
+        });
+        assert!(
+            has_position(&meshes, [4.0, 2.0, 4.0]),
+            "{:?}",
+            meshes[0].positions
+        );
+    }
+
+    #[test]
+    fn rotation_order_xyz_turns_about_x_first() {
+        let meshes = read_square(|builder| {
+            let model = builder.square(false);
+            let properties = builder.properties(model);
+            builder.vector(properties, "Lcl Rotation", [90.0, 0.0, 90.0]);
+        });
+        assert!(
+            has_position(&meshes, [0.0, 1.0, 0.0]),
+            "{:?}",
+            meshes[0].positions
+        );
+        assert!(
+            has_position(&meshes, [2.0, 0.0, 1.0]),
+            "{:?}",
+            meshes[0].positions
+        );
+    }
+
+    #[test]
+    fn rotation_order_zyx_turns_about_z_first() {
+        let meshes = read_square(|builder| {
+            let model = builder.square(false);
+            let properties = builder.properties(model);
+            builder.vector(properties, "Lcl Rotation", [90.0, 0.0, 90.0]);
+            builder.int(properties, "RotationActive", 1);
+            builder.int(properties, "RotationOrder", 5);
+        });
+        assert!(
+            has_position(&meshes, [0.0, 0.0, 1.0]),
+            "{:?}",
+            meshes[0].positions
+        );
+    }
+
+    #[test]
+    fn pre_rotation_counts_only_while_rotation_is_active() {
+        let inactive = read_square(|builder| {
+            let model = builder.square(false);
+            let properties = builder.properties(model);
+            builder.vector(properties, "PreRotation", [0.0, 0.0, 90.0]);
+        });
+        assert!(
+            has_position(&inactive, [1.0, 0.0, 0.0]),
+            "{:?}",
+            inactive[0].positions
+        );
+
+        let active = read_square(|builder| {
+            let model = builder.square(false);
+            let properties = builder.properties(model);
+            builder.vector(properties, "PreRotation", [0.0, 0.0, 90.0]);
+            builder.int(properties, "RotationActive", 1);
+        });
+        assert!(
+            has_position(&active, [0.0, 1.0, 0.0]),
+            "{:?}",
+            active[0].positions
+        );
+    }
+
+    #[test]
+    fn a_rotation_pivot_is_the_point_the_node_turns_about() {
+        let meshes = read_square(|builder| {
+            let model = builder.square(false);
+            let properties = builder.properties(model);
+            builder.vector(properties, "Lcl Rotation", [0.0, 0.0, 90.0]);
+            builder.vector(properties, "RotationPivot", [1.0, 0.0, 0.0]);
+        });
+        assert!(
+            has_position(&meshes, [1.0, 0.0, 0.0]),
+            "{:?}",
+            meshes[0].positions
+        );
+        assert!(
+            has_position(&meshes, [1.0, -1.0, 0.0]),
+            "{:?}",
+            meshes[0].positions
+        );
+    }
+
+    #[test]
+    fn a_geometric_offset_moves_the_node_mesh_and_no_child() {
+        let own = read_square(|builder| {
+            let model = builder.square(false);
+            let properties = builder.properties(model);
+            builder.vector(properties, "GeometricTranslation", [0.0, 0.0, 3.0]);
+        });
+        assert!(
+            has_position(&own, [1.0, 1.0, 5.0]),
+            "{:?}",
+            own[0].positions
+        );
+
+        let inherited = read_square(|builder| {
+            builder.square(false);
+            let parent = builder.parent_model(PARENT_ID);
+            let properties = builder.properties(parent);
+            builder.vector(properties, "GeometricTranslation", [0.0, 0.0, 3.0]);
+        });
+        assert!(
+            has_position(&inherited, [1.0, 1.0, 2.0]),
+            "{:?}",
+            inherited[0].positions
+        );
     }
 
     #[test]

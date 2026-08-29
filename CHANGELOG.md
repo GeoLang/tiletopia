@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- FBX meshes sit where their model node puts them (2026-08-29). The reader
+  flattens positions and normals through the node hierarchy with the FBX
+  SDK's composition (translation, pivots and offsets, pre and post rotation,
+  `RotationOrder`, scaling) plus the node's own geometric offset. A mesh
+  offset or scaled through its node used to land at the origin unscaled.
 - FBX positions come out in metres (2026-08-29). `UnitScaleFactor` is
   centimetres per file unit. A default file (1) was read 100 times too large,
   and the 2026-08-28 change multiplied by the factor without dividing by 100,
