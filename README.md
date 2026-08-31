@@ -106,9 +106,9 @@ Not implemented, whatever the code in the repository suggests:
 | Subsystem | State |
 |-----------|-------|
 | DAE tiling | Neither the native tiler nor mago-3d-tiler takes DAE, so those jobs fail. Point clouds, meshes, vector files and IFC do tile |
-| Temporal versioning, CRDT, federation, CI/CD validation, multi-tenant isolation, leader election, priority queue / SLA, white-label, marketplace, geofencing, encryption, custom dashboards, AR/VR foveated rendering, cinematic flythrough, scripting | `pub mod` lines with unit tests. No route, CLI or render loop calls them |
+| CRDT, multi-tenant isolation, geofencing | `pub mod` lines with unit tests. No route, CLI or render loop calls them |
 
-The modules stay. Wiring or deleting them is a product call, recorded in `viewtopia/DESIGN_TODO.md`.
+These three are parked deliberately. Wiring them is a product call, recorded in `viewtopia/DESIGN_TODO.md`.
 
 ---
 
@@ -545,17 +545,17 @@ Price is not a capability. Ion is a hosted product. This is a binary you run.
 cargo test
 ```
 
-972 tests (947 Rust + 25 GUI) on default features, counted per crate:
-- Core (124): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, predictive analytics, BIM clash detection, plus 8 stress tests
-- Server (724): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation, story and plugin writes, asset list visibility, annotations, temporal versioning, multi-tenancy, offline export, federated mesh, CRDT collaboration, rules engine (module only, no route reaches it), audit log, leader election, priority queue, webhooks, branding, marketplace, geofencing (module only, no route reaches it), retention, encryption, stories, foveated rendering, flythrough, site reports, API keys, metering, scheduled jobs, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
-- Ingest (59): LAS/LAZ, E57, PLY, GeoTIFF, DTED, HGT, USGS DEM, glTF, OBJ, FBX, CityGML, CityJSON and IFC readers, texture and material carrying, CRS detection
+917 tests (892 Rust + 25 GUI) on default features, counted per crate:
+- Core (120): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, BIM clash detection, plus 8 stress tests
+- Server (658): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation, story and plugin writes, asset list visibility, annotations, multi-tenancy, offline export, CRDT collaboration, audit log, webhooks, geofencing (module only, no route reaches it), stories, API keys, metering, scheduled jobs, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
+- Ingest (74): LAS/LAZ, E57, PLY, GeoTIFF, DTED, HGT, USGS DEM, glTF, OBJ, FBX, CityGML, CityJSON and IFC readers, texture and material carrying, CRS detection
 - Terrain (28): quantized mesh generation, global DEM terrain
 - Store (12): local filesystem CRUD, path traversal
 
 GUI: `cd gui && pnpm run test:all` (10 vitest unit tests + 15 Playwright e2e).
 
-Feature-gated tests (`gpu`, `onnx`, `video`, `ml`, `martin`, `wasm-plugins`, cloud
-stores) are not in the 947 and need their feature enabled to run.
+Feature-gated tests (`gpu`, `ml`, `martin`, `wasm-plugins`, cloud stores) are not
+in the 892 and need their feature enabled to run.
 
 ---
 

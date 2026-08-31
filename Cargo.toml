@@ -81,14 +81,13 @@ ifc-lite-geometry = "2.3"
 # XML parsing (CityGML, KML)
 quick-xml = "0.39"
 
-# HTTP client (federation, webhooks, geocoding)
+# HTTP client (webhooks, geocoding)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Image generation (static maps)
 image = "0.25"
 
-# Encryption
-aes-gcm = "0.10"
+# Random bytes (api keys, webhook secrets)
 rand = "0.9"
 
 # HMAC signatures (webhooks)
@@ -104,16 +103,8 @@ petgraph = "0.7"
 # Cron parsing (scheduler)
 cron = "0.15"
 
-# PDF generation (reports)
-printpdf = "0.8"
-
-# Raft consensus (cluster feature)
-
 # WASM plugin runtime (wasm-plugins feature)
 wasmtime = "30"
-
-# Video encoding (video feature, requires system FFmpeg)
-video-rs = { version = "0.11", features = ["ndarray"] }
 
 # Martin tile serving (martin feature — MBTiles, PMTiles, PostGIS tile sources)
 martin-core = { version = "0.5", default-features = false, features = ["mbtiles", "pmtiles", "postgres"] }

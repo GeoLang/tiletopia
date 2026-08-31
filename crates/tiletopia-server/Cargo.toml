@@ -39,24 +39,19 @@ bytes = { workspace = true }
 # client on a blocking thread
 reqwest = { workspace = true, features = ["blocking"] }
 image = { workspace = true }
-aes-gcm = { workspace = true }
 rand = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 argon2 = { workspace = true }
 geo-types = { workspace = true }
 tiff = { workspace = true }
-aws-sdk-s3 = { workspace = true }
-aws-config = { workspace = true }
 sqlx = { workspace = true }
 gltf = { workspace = true }
 petgraph = { workspace = true }
 cron = { workspace = true }
-printpdf = { workspace = true }
 las = { workspace = true, features = ["laz"] }
 zip = { version = "8", default-features = false }
 wasmtime = { workspace = true, optional = true }
-video-rs = { workspace = true, optional = true }
 martin-core = { workspace = true, optional = true }
 martin-tile-utils = { workspace = true, optional = true }
 tilejson = { workspace = true, optional = true }
@@ -70,7 +65,6 @@ libc = { workspace = true }
 [features]
 default = []
 wasm-plugins = ["wasmtime"]
-video = ["video-rs"]
 martin = ["martin-core", "martin-tile-utils", "tilejson", "object_store"]
 
 [dev-dependencies]

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 2026-08-25
 
+### Removed
+
+- 17 parked modules with no callers, per the 2026-08-31 owner triage:
+  scripting, cluster, cloud_store, marketplace, arvr, whitelabel, federation,
+  model_zoo, prediction, onnx_inference, priority_queue, flythrough,
+  dynamic_raster, reports, retention, temporal, encryption. With them went
+  their orphaned dependencies (printpdf, aes-gcm, video-rs, ort, the server's
+  own aws-sdk-s3 and aws-config) and the `onnx` and `video` features. cicd
+  stayed: the CLI's validate subcommand calls it.
+
 ### Fixed
 
 - FBX meshes sit where their model node puts them (2026-08-29). The reader
