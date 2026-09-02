@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- The `tiletopia-cache` crate (2026-09-02). It held a `TileCache` trait with
+  Redis, Memcached and LRU backends that nothing built or called, and with it
+  went the redis, memcache and lru dependencies. The XYZ tile cache the server
+  actually uses is in `map_tiles.rs`.
+- `GET /api/v1/assets/{id}/thumbnail` (2026-09-02). Nothing ever wrote
+  `<data-dir>/<id>/thumbnail.png`, so the route only ever answered 404. Point
+  cloud thumbnails are still generated for the `png` export format.
 - 17 parked modules with no callers, per the 2026-08-31 owner triage:
   scripting, cluster, cloud_store, marketplace, arvr, whitelabel, federation,
   model_zoo, prediction, onnx_inference, priority_queue, flythrough,

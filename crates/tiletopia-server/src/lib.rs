@@ -307,7 +307,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         // auth::is_public_read has to widen with it.
         .route("/api/v1/assets/{id}/tiles/{path}", get(get_tile))
         .route("/api/v1/assets/{id}/data/{path}", get(get_data_file))
-        .route("/api/v1/assets/{id}/thumbnail", get(get_thumbnail))
         .route("/api/v1/assets/{id}/annotations", get(list_annotations))
         .route("/api/v1/assets/{id}/jobs", get(list_asset_jobs))
         .route("/api/v1/jobs/{id}", get(get_job_status))
@@ -749,28 +748,6 @@ async fn delete_annotation(
         return Err(StatusCode::NOT_FOUND);
     }
     Ok(StatusCode::NO_CONTENT)
-}
-
-async fn get_thumbnail(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
-) -> Result<
-    (
-        StatusCode,
-        [(axum::http::header::HeaderName, &'static str); 1],
-        Vec<u8>,
-    ),
-    StatusCode,
-> {
-    let thumb_path = state.data_dir.join(id.to_string()).join("thumbnail.png");
-    let data = tokio::fs::read(&thumb_path)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-    Ok((
-        StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "image/png")],
-        data,
-    ))
 }
 
 /// Generate a simple top-down point cloud thumbnail (256×256 PNG).

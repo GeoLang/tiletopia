@@ -20,7 +20,7 @@ Ingest point clouds, tile them into OGC 3D Tiles 1.1, and serve them with view-d
 - Optional GPU point-cloud decimation via wgpu (`--features gpu`)
 - Draco/meshopt compression for tile delivery
 
-The job queue tiles point clouds and meshes (glTF, glb, OBJ, FBX, CityGML, IFC) with the native tiler, whatever `TILETOPIA_MAGO_JAR` is set to. The readers carry UVs, diffuse textures and diffuse colours through to the tile GLBs, and a tile holding part of a textured mesh carries the crop of the texture its triangles reach. A mesh with a texture the readers cannot find or decode tiles untextured. A mesh is placed by the upload's `longitude` and `latitude`, and one without them fails naming them. IFC falls back to the `IfcSite` reference coordinates, and an IFC with neither fails rather than landing at the centre of the earth. `crs` is ignored on the native path. Vector files (GeoJSON, GeoPackage, KML) go to [mago-3d-tiler](https://github.com/Gaia3D/mago-3d-tiler) (MPL-2.0), which the Docker image bundles with a JRE 21; without the jar they fail naming the variable. The jar ships natives for Linux and Windows x64 only, so on macOS the mago jobs fail inside mago. DAE uploads still fail with an error naming the format: neither tiler takes it. An upload whose extension is not on the list answers 400.
+The job queue tiles point clouds and meshes (glTF, glb, OBJ, FBX, CityGML, IFC) with the native tiler, whatever `TILETOPIA_MAGO_JAR` is set to. The readers carry UVs, diffuse textures and diffuse colours through to the tile GLBs, and a tile holding part of a textured mesh carries the crop of the texture its triangles reach. A mesh with a texture the readers cannot find or decode tiles untextured. A mesh is placed by the upload's `longitude` and `latitude`, and one without them fails naming them. IFC falls back to the `IfcSite` reference coordinates, and an IFC with neither fails rather than landing at the centre of the earth. `crs` is ignored on the native path. Vector files (GeoJSON, GeoPackage, KML) go to [mago-3d-tiler](https://github.com/Gaia3D/mago-3d-tiler) (MPL-2.0), which the Docker image bundles with a JRE 21; without the jar they fail naming the variable. The jar ships natives for Linux and Windows x64 only, so on macOS the mago jobs fail inside mago. DAE uploads still fail with an error naming the format: neither tiler takes it. An upload whose extension is not on the list answers 400. DEM rasters (tif, tiff, hgt, dt0, dt1, dt2) and images (jpg, jpeg, png, jp2) upload and are stored as assets, but no tiler takes them: a tiling request for one answers that terrain and imagery assets are not tiled to 3D Tiles.
 
 A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields beside the file. Longitude and latitude place a model that has local coordinates, and one without the other is refused. The tiles land at `/api/v1/assets/{id}/tileset.json`, with content under `/api/v1/assets/{id}/data/{file}` from mago and `/api/v1/assets/{id}/tiles/{file}` from the native tiler.
 
@@ -31,6 +31,7 @@ A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields 
 - CORS
 - WebSocket at `/api/v1/realtime/{room}` for presence, cursors, chat and view sync. Six message types. Anything else is logged and dropped.
 - JWT authentication (`TILETOPIA_JWT_SECRET`, 32+ bytes, required to serve. `TILETOPIA_AUTH_DISABLED=true` to opt out)
+- `POST /api/v1/auth/signup` and `POST /api/v1/auth/login` answer a token good for 24 hours. A signup lands as `viewer`, and `tiletopia set-role <email> admin` promotes a user against the sqlite database directly, so the first admin needs no admin route
 - 3D annotation layers, persisted, writes are owner-or-admin
 
 ### Terrain
@@ -43,6 +44,8 @@ A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields 
 - `/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` hillshade, slope or ndvi tiles. Defaults to the same DEM the elevation routes read. See Quick Start for the bbox variables that put them on Copernicus GLO-30 instead
 - `/api/v1/elevation/point?lat=&lon=` and `/api/v1/elevation/profile?path=lon,lat;lon,lat` read the same DEM and report which store answered. Ground no DEM covers is a 404, never an invented height
 - `POST /api/v1/analysis/terrain` slope, aspect, hillshade, contours, flow direction, flow accumulation and watershed over a bbox; `POST /api/v1/analysis/viewshed` ray-casts line of sight from an observer and returns the cells it can see
+- `POST /api/v1/analysis/flood` answers the cells under a water level as GeoJSON, with their count and area. `POST /api/v1/analysis/solar` renders daily irradiance for a date over the same bbox
+- `GET /api/v1/analysis/export/{op}?bbox=west,south,east,north&resolution=<m/px>` pulls one analysis op over a whole bbox and answers a web mercator COG, capped at 4096x4096 pixels. It needs a token, unlike the tile route
 
 ### Storage
 - Local filesystem (default)
@@ -122,7 +125,7 @@ GeoLang includes an LLM-powered geospatial agent that lets users control the 3D 
 - **"Load the building survey tileset"** — adds a 3D Tiles dataset to the scene
 - **"Compare elevation profiles between two sites"** — runs terrain analysis and displays results
 
-The agent loop is [sibyl](https://github.com/GeoLang/sibyl), a Rust service that calls an OpenAI-compatible LLM endpoint and keeps sessions and history in sqlite. Tool calls are dispatched over HTTP to the GeoLang service, which runs its 36 geospatial tools in-process: geocoding, isochrones, clustering, Voronoi, terrain profiles, environmental risk assessment, routing, and more. There is no cross-session memory, each session starts clean.
+The agent loop is [sibyl](https://github.com/GeoLang/sibyl), a Rust service that calls an OpenAI-compatible LLM endpoint and keeps sessions and history in sqlite. Tool calls are dispatched over HTTP to the GeoLang service, which runs its 40 geospatial tools in-process: geocoding, isochrones, clustering, Voronoi, terrain profiles, environmental risk assessment, routing, and more. There is no cross-session memory, each session starts clean.
 
 ### Viewer Commands
 
@@ -169,7 +172,7 @@ tiletopia/
 │   ├── tiletopia-ingest/     # LAS, GeoTIFF, glTF readers
 │   ├── tiletopia-terrain/    # Quantized mesh terrain generation
 │   ├── tiletopia-store/      # Storage: local + S3 + GCS + Azure
-│   └── tiletopia-cli/        # CLI binary (tile / serve / info)
+│   └── tiletopia-cli/        # CLI binary (tile / serve / info / validate / set-role / edge)
 ├── gui/                      # Web dashboard (Vite + CesiumJS)
 └── docs/                     # GitHub Pages site
 ```
@@ -220,6 +223,9 @@ tiletopia serve --data-dir ./data --port 3000
   `martin` cargo feature, which the Docker image builds with. These routes sit
   behind the same JWT as the rest of the API, so a tile client has to send a
   token.
+- `TILETOPIA_ION_BASE_URL` sets the origin the Ion-compat endpoints write into
+  the URLs they hand a client, `http://localhost:3000` when unset. Set it to the
+  address clients reach this server at.
 
 ### Vector tilesets
 
@@ -231,7 +237,9 @@ tileset answers at `/martin/{id}/{z}/{x}/{y}` with its TileJSON at
 id, and a client polls `GET /api/v1/tilesets/{id}` until `status` leaves
 `building`. A failed build reports the tail of tippecanoe's stderr in `error`,
 which is the only place it explains a refusal. Nothing rebuilds on its own, so
-re-uploading makes a new archive.
+re-uploading makes a new archive. Both these routes and `/martin` need the
+`martin` cargo feature, which the Docker image builds with. A binary built
+without it serves neither.
 
 The build runs `tippecanoe -o {id}.pmtiles -l {stem} -zg
 --drop-densest-as-needed`, with the layer name taken from the uploaded
@@ -415,12 +423,15 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/v1/health` | Server health check |
+| `POST` | `/api/v1/auth/signup` | Create a viewer account, answers a 24-hour JWT |
+| `POST` | `/api/v1/auth/login` | Exchange email and password for a 24-hour JWT |
 | `GET` | `/api/v1/assets` | List all assets |
 | `POST` | `/api/v1/assets` | Upload asset (multipart) |
 | `GET` | `/api/v1/assets/{id}` | Get asset details |
 | `DELETE` | `/api/v1/assets/{id}` | Delete asset |
 | `POST` | `/api/v1/assets/{id}/tile` | Start tiling job |
 | `GET` | `/api/v1/assets/{id}/jobs` | The asset's tiling jobs, newest first |
+| `GET` | `/api/v1/jobs/{id}` | One tiling job, which is how the `job_id` from an upload is polled |
 | `GET` | `/api/v1/assets/{id}/tileset.json` | Serve tileset |
 | `GET` | `/api/v1/assets/{id}/tiles/{path}` | Serve individual tile |
 | `GET` | `/api/v1/tilesets` | List built vector tilesets |
@@ -440,6 +451,7 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `GET` | `/api/v1/tiles/sources` | List 2D tile sources (OSM, etc.) |
 | `GET` | `/api/v1/tiles/styles` | MapLibre GL style JSON |
 | `GET` | `/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` | Hillshade, slope or ndvi tiles, rendered on demand |
+| `GET` | `/api/v1/analysis/export/{op}` | One analysis op over a bbox as a web mercator COG |
 | `GET` | `/api/v1/audit` | The audit trail, newest first. Instance-admin only |
 | `GET` | `/metrics` | Prometheus metrics |
 
@@ -449,8 +461,10 @@ Tile data reads are anonymous: `tileset.json`, `tiles/{path}`, everything under
 `/api/v1/terrain/` (the generated quantized-mesh routes, the prebuilt bundles
 and their listing, terrain-RGB) and the `/api/v1/analysis/xyz/` analysis tiles,
 none of which a map library can send a header with. The rest of
-`/api/v1/analysis/` is compute and stays gated. Everything else needs
-`Authorization: Bearer <jwt>`, and writes need the editor or admin role.
+`/api/v1/analysis/` is compute and stays gated. `/api/v1/auth/signup` and
+`/api/v1/auth/login` are open, because they are how a caller gets a token.
+Everything else needs `Authorization: Bearer <jwt>`, and writes need the editor
+or admin role.
 
 The `role` claim must be exactly `admin`, `editor` or `viewer`. Any other value
 is refused rather than treated as a default, so a token from a service with its

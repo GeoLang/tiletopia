@@ -6,7 +6,6 @@ members = [
     "crates/tiletopia-ingest",
     "crates/tiletopia-terrain",
     "crates/tiletopia-store",
-    "crates/tiletopia-cache",
     "crates/tiletopia-cli",
 ]
 

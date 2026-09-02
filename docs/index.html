@@ -62,7 +62,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/3D_Tiles-1.1-green" alt="3D Tiles">
 <img src="https://img.shields.io/badge/Rust-2024-orange" alt="Rust">
-<img src="https://img.shields.io/badge/tests-737_passing-brightgreen" alt="Tests">
+<img src="https://img.shields.io/badge/tests-917_passing-brightgreen" alt="Tests">
 </div>
 <div class="hero">
 <a href="https://github.com/GeoLang/tiletopia">GitHub</a>
@@ -71,8 +71,8 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <a href="./api/" class="secondary">API docs</a>
 </div>
 <div class="stats">
-<div class="stat"><div class="num">7</div><div class="label">Rust crates</div></div>
-<div class="stat"><div class="num">737</div><div class="label">Tests</div></div>
+<div class="stat"><div class="num">6</div><div class="label">Rust crates</div></div>
+<div class="stat"><div class="num">917</div><div class="label">Tests</div></div>
 <div class="stat"><div class="num">$0</div><div class="label">Per month</div></div>
 <div class="stat"><div class="num">disk</div><div class="label">Data limit</div></div>
 </div>
@@ -105,6 +105,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <li>GeoJSON, GeoPackage, KML: mago-3d-tiler only, with optional longitude, latitude and crs upload fields</li>
 <li>IFC: the native mesh tiler, placed by the upload's longitude and latitude or the IfcSite coordinates. crs is ignored</li>
 <li>DAE uploads but fails: neither tiler takes it. Any other extension answers 400</li>
+<li>GeoTIFF, HGT and DTED rasters, and JPEG, PNG and JPEG 2000 images, are stored as assets and never tiled</li>
 </ul>
 </div>
 <div class="card">
@@ -113,7 +114,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <li>REST API for asset management</li>
 <li>View-dependent tile streaming</li>
 <li>WebSocket presence, cursors, chat, view sync</li>
-<li>JWT authentication (on by default)</li>
+<li>JWT authentication (on by default), tokens from signup and login, good for 24 hours</li>
 <li>CORS for CesiumJS</li>
 <li>Multipart upload</li>
 <li>3D annotation layers, writes owner-or-admin</li>
@@ -127,6 +128,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <li>Prebuilt ctb-tile bundles</li>
 <li>SRTM fallback, 503 on failed download</li>
 <li>Hillshade / slope / ndvi analysis tiles</li>
+<li>One op over a bbox as a COG download</li>
 </ul>
 </div>
 <div class="card">
@@ -231,7 +233,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 │   ├── tiletopia-ingest/     # Point cloud, DEM and mesh readers
 │   ├── tiletopia-terrain/    # Quantized mesh terrain generation
 │   ├── tiletopia-store/      # Storage: local + S3 + GCS + Azure
-│   └── tiletopia-cli/        # CLI binary (tile / serve / info)
+│   └── tiletopia-cli/        # CLI binary (tile / serve / info / validate / set-role / edge)
 ├── gui/                      # Web dashboard (Vite + CesiumJS)
 └── docs/                     # This page</pre>
 </div>
@@ -243,6 +245,8 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <table>
 <tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/health</code></td><td>Health check</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/v1/auth/signup</code></td><td>New viewer account, answers a JWT</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/v1/auth/login</code></td><td>Email and password for a JWT</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/assets</code></td><td>List all assets</td></tr>
 <tr><td><code>POST</code></td><td><code>/api/v1/assets</code></td><td>Upload asset (multipart)</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/assets/{id}</code></td><td>Asset details</td></tr>
@@ -293,7 +297,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 </table>
 </div>
 </div>
-<p style="margin-top:16px;color:var(--muted)">Powered by <a href="https://github.com/GeoLang/sibyl">sibyl</a>, a Rust agent loop that calls an OpenAI-compatible LLM endpoint and keeps sessions in sqlite. It dispatches tool calls over HTTP to the GeoLang API, which runs 36 geospatial tools in-process (geocoding, isochrones, clustering, terrain profiles, environmental risk, routing). Sessions do not share memory, each one starts clean.</p>
+<p style="margin-top:16px;color:var(--muted)">Powered by <a href="https://github.com/GeoLang/sibyl">sibyl</a>, a Rust agent loop that calls an OpenAI-compatible LLM endpoint and keeps sessions in sqlite. It dispatches tool calls over HTTP to the GeoLang API, which runs 40 geospatial tools in-process (geocoding, isochrones, clustering, terrain profiles, environmental risk, routing). Sessions do not share memory, each one starts clean.</p>
 </div>
 </section>
 
@@ -333,7 +337,7 @@ cargo build --release --features gpu</pre>
 <section style="background:#111827">
 <div class="container">
 <h2>🖥️ ViewTopia — Web Viewer</h2>
-<p style="color:var(--muted);margin-bottom:20px">The official frontend for GeoLang — 50 tool panels (18 still marked preview), Cesium and MapLibre renderers with a deck.gl overlay and a Leaflet map tab, AI agent, and professional GIS tools.</p>
+<p style="color:var(--muted);margin-bottom:20px">The official frontend for GeoLang — 64 tool panels, Cesium and MapLibre renderers with a deck.gl overlay and a Leaflet map tab, AI agent, and professional GIS tools.</p>
 <div class="grid">
 <div class="card">
 <h3>Viewers</h3>
@@ -359,8 +363,8 @@ cargo build --release --features gpu</pre>
 <div class="card">
 <h3>Data</h3>
 <ul>
-<li>Asset catalogue (preview)</li>
-<li>Cesium Ion integration (preview)</li>
+<li>Asset catalogue, uploading to this server</li>
+<li>Cesium Ion assets by token</li>
 <li>OGC layers (WMS/WMTS/WFS/XYZ)</li>
 <li>Drag-and-drop file import</li>
 <li>GPX/KML track import</li>
