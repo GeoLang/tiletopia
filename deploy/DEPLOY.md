@@ -112,7 +112,6 @@ docker compose up
 | `TILETOPIA_PORT` | Server port | `3000` |
 | `TILETOPIA_DATA_DIR` | Local tile storage path | `/data` |
 | `RUST_LOG` | Log level | `info` |
-| `AWS_S3_BUCKET` | S3 bucket for tile storage | — |
 | `AWS_REGION` | AWS region | — |
 
 ## Monitoring

@@ -556,9 +556,9 @@ Price is not a capability. Ion is a hosted product. This is a binary you run.
 cargo test
 ```
 
-917 tests (892 Rust + 25 GUI) on default features, counted per crate:
+904 tests (879 Rust + 25 GUI) on default features, counted per crate:
 - Core (120): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, BIM clash detection, plus 8 stress tests
-- Server (658): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation, story and plugin writes, asset list visibility, annotations, multi-tenancy, offline export, CRDT collaboration, audit log, webhooks, geofencing (module only, no route reaches it), stories, API keys, metering, scheduled jobs, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
+- Server (645): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation, story and plugin writes, asset list visibility, annotations, offline export, audit log, webhooks, stories, API keys, metering, scheduled jobs, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
 - Ingest (74): LAS/LAZ, E57, PLY, GeoTIFF, DTED, HGT, USGS DEM, glTF, OBJ, FBX, CityGML, CityJSON and IFC readers, texture and material carrying, CRS detection
 - Terrain (28): quantized mesh generation, global DEM terrain
 - Store (12): local filesystem CRUD, path traversal
