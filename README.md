@@ -109,9 +109,6 @@ Not implemented, whatever the code in the repository suggests:
 | Subsystem | State |
 |-----------|-------|
 | DAE tiling | Neither the native tiler nor mago-3d-tiler takes DAE, so those jobs fail. Point clouds, meshes, vector files and IFC do tile |
-| CRDT, multi-tenant isolation, geofencing | `pub mod` lines with unit tests. No route, CLI or render loop calls them |
-
-These three are parked deliberately. Wiring them is a product call, recorded in `viewtopia/DESIGN_TODO.md`.
 
 ---
 

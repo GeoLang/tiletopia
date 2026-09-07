@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their orphaned dependencies (printpdf, aes-gcm, video-rs, ort, the server's
   own aws-sdk-s3 and aws-config) and the `onnx` and `video` features. cicd
   stayed: the CLI's validate subcommand calls it.
+- The `crdt`, `geofence` and `tenant` modules (2026-09-07). No route, CLI
+  path or render loop called them, only their own unit tests. Last present at
+  commit 71910e3.
 
 ### Fixed
 
