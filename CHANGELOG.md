@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `crdt`, `geofence` and `tenant` modules (2026-09-07). No route, CLI
   path or render loop called them, only their own unit tests. Last present at
   commit 71910e3.
+- The s3, gcs, azure and hybrid store backends (2026-09-07). Nothing built them,
+  and out went aws-sdk-s3, aws-config, cloud-storage, the two azure_storage
+  crates, the deploy tile bucket and the MinIO compose service. Last at 818e00f.
 
 ### Fixed
 

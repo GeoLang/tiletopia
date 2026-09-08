@@ -8,19 +8,13 @@ Deploy GeoLang to AWS in under 5 minutes.
 ┌─────────────┐     ┌───────────────┐     ┌─────────────────┐
 │  CloudFront │────▶│  ALB (HTTP)   │────▶│  ECS Fargate    │
 │  (CDN)      │     │  Health checks│     │  tiletopia:3000 │
-└─────────────┘     └───────────────┘     └────────┬────────┘
-                                                    │
-                                          ┌─────────▼─────────┐
-                                          │    S3 Bucket       │
-                                          │  (tile storage)    │
-                                          └───────────────────┘
+└─────────────┘     └───────────────┘     └─────────────────┘
 ```
 
 **Components:**
 | Service | Purpose | Cost (small) |
 |---------|---------|-------------|
 | ECS Fargate | Runs GeoLang server (0.5 vCPU, 1GB) | ~$15/mo |
-| S3 | Tile + asset storage | ~$2/mo per 100GB |
 | CloudFront | CDN for global tile delivery | ~$5/mo per 100GB transfer |
 | ALB | Load balancing + health checks | ~$16/mo |
 | CloudWatch | Logs + monitoring | ~$3/mo |
@@ -97,12 +91,11 @@ Add to your GitHub Actions workflow:
 ## Local Development
 
 ```bash
-# Run with Docker Compose (includes MinIO for local S3)
+# Run with Docker Compose
 docker compose up
 
 # Access:
 # - API: http://localhost:3000
-# - MinIO Console: http://localhost:9001 (tiletopia / tiletopia-dev)
 ```
 
 ## Environment Variables
@@ -121,14 +114,13 @@ CloudWatch logs are available at `/ecs/tiletopia-prod`. Set up alerts for:
 - ECS task health check failures
 - High CPU/memory usage
 - 5xx error rate from ALB
-- S3 storage growth
 
 ## Costs at Scale
 
-| Tier | Traffic | Containers | Storage | Cost |
-|------|---------|-----------|---------|------|
-| Starter | 10K req/day | 1× Fargate | 10 GB | ~$40/mo |
-| Growth | 100K req/day | 2× Fargate | 100 GB | ~$100/mo |
-| Enterprise | 1M+ req/day | 4× Fargate | 1 TB | ~$400/mo |
+| Tier | Traffic | Containers | Cost |
+|------|---------|-----------|------|
+| Starter | 10K req/day | 1× Fargate | ~$40/mo |
+| Growth | 100K req/day | 2× Fargate | ~$100/mo |
+| Enterprise | 1M+ req/day | 4× Fargate | ~$400/mo |
 
 All tile serving is edge-cached via CloudFront, so even heavy read traffic is cheap.

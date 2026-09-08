@@ -1,14 +1,7 @@
 //! tiletopia-store: pluggable storage backends
 //!
-//! Abstraction over local filesystem, S3, GCS, and Azure Blob storage
+//! Abstraction over local filesystem storage
 //! for reading/writing tiles and assets.
-
-#[cfg(feature = "azure")]
-pub mod azure;
-#[cfg(feature = "gcs")]
-pub mod gcs;
-pub mod hybrid;
-pub mod s3;
 
 use bytes::Bytes;
 use std::path::PathBuf;

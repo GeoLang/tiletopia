@@ -143,7 +143,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <div class="card">
 <h3>Storage and deploy</h3>
 <ul>
-<li>Local filesystem, S3, GCS, Azure</li>
+<li>Local filesystem</li>
 <li>Single binary, Docker</li>
 <li>JWT roles admin / editor / viewer + per-asset ownership</li>
 <li>Prometheus /metrics</li>
@@ -231,7 +231,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 │   ├── tiletopia-server/     # Axum REST API, WebSocket, JWT auth
 │   ├── tiletopia-ingest/     # Point cloud, DEM and mesh readers
 │   ├── tiletopia-terrain/    # Quantized mesh terrain generation
-│   ├── tiletopia-store/      # Storage: local + S3 + GCS + Azure
+│   ├── tiletopia-store/      # Storage: local filesystem
 │   └── tiletopia-cli/        # CLI binary (tile / serve / info / validate / set-role / edge)
 ├── gui/                      # Web dashboard (Vite + CesiumJS)
 └── docs/                     # This page</pre>

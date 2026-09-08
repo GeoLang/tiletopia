@@ -48,11 +48,7 @@ A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields 
 - `GET /api/v1/analysis/export/{op}?bbox=west,south,east,north&resolution=<m/px>` pulls one analysis op over a whole bbox and answers a web mercator COG, capped at 4096x4096 pixels. It needs a token, unlike the tile route
 
 ### Storage
-- Local filesystem (default)
-- Amazon S3
-- Google Cloud Storage (feature-gated)
-- Azure Blob (feature-gated)
-- Hybrid: hot tiles local, cold tiles in cloud
+- Local filesystem
 
 ### Deployment
 - Single binary
@@ -168,7 +164,7 @@ tiletopia/
 │   ├── tiletopia-server/     # Axum REST API, WebSocket, JWT auth
 │   ├── tiletopia-ingest/     # LAS, GeoTIFF, glTF readers
 │   ├── tiletopia-terrain/    # Quantized mesh terrain generation
-│   ├── tiletopia-store/      # Storage: local + S3 + GCS + Azure
+│   ├── tiletopia-store/      # Storage: local filesystem
 │   └── tiletopia-cli/        # CLI binary (tile / serve / info / validate / set-role / edge)
 ├── gui/                      # Web dashboard (Vite + CesiumJS)
 └── docs/                     # GitHub Pages site

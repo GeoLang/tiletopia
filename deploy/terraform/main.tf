@@ -4,7 +4,6 @@
 #
 # Architecture:
 #   - ECS Fargate (serverless containers) — runs TileTopia server
-#   - S3 — stores tile data + uploaded assets
 #   - CloudFront — CDN for tile delivery (global edge caching)
 #   - ALB — load balancer with health checks
 #   - ECR — container registry
@@ -125,49 +124,6 @@ resource "aws_route_table_association" "public" {
 
 data "aws_availability_zones" "available" {
   state = "available"
-}
-
-# ─── S3 Bucket (Tile Storage) ────────────────────────────────────────────────
-
-resource "aws_s3_bucket" "tiles" {
-  bucket = "${local.name_prefix}-tiles"
-  tags   = local.tags
-}
-
-resource "aws_s3_bucket_versioning" "tiles" {
-  bucket = aws_s3_bucket.tiles.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "tiles" {
-  bucket = aws_s3_bucket.tiles.id
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
-
-resource "aws_s3_bucket_public_access_block" "tiles" {
-  bucket                  = aws_s3_bucket.tiles.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "tiles" {
-  bucket = aws_s3_bucket.tiles.id
-  rule {
-    id     = "archive-old-tiles"
-    status = "Enabled"
-    transition {
-      days          = 90
-      storage_class = "INTELLIGENT_TIERING"
-    }
-  }
 }
 
 # ─── CloudFront CDN ──────────────────────────────────────────────────────────
@@ -332,7 +288,6 @@ resource "aws_ecs_task_definition" "tiletopia" {
       { name = "TILETOPIA_PORT", value = "3000" },
       { name = "TILETOPIA_DATA_DIR", value = "/data" },
       { name = "RUST_LOG", value = "info,tiletopia=debug" },
-      { name = "AWS_S3_BUCKET", value = aws_s3_bucket.tiles.id },
       { name = "AWS_REGION", value = var.aws_region },
     ]
     logConfiguration = {
@@ -503,28 +458,6 @@ resource "aws_iam_role" "ecs_task" {
   tags = local.tags
 }
 
-# S3 access for tile storage
-resource "aws_iam_role_policy" "ecs_s3" {
-  name = "${local.name_prefix}-s3-access"
-  role = aws_iam_role.ecs_task.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject",
-        "s3:ListBucket",
-      ]
-      Resource = [
-        aws_s3_bucket.tiles.arn,
-        "${aws_s3_bucket.tiles.arn}/*",
-      ]
-    }]
-  })
-}
-
 # ─── CloudWatch Logs ──────────────────────────────────────────────────────────
 
 resource "aws_cloudwatch_log_group" "tiletopia" {
@@ -548,11 +481,6 @@ output "cloudfront_domain" {
 output "ecr_repository_url" {
   description = "ECR repository URL (push Docker images here)"
   value       = aws_ecr_repository.tiletopia.repository_url
-}
-
-output "s3_bucket_name" {
-  description = "S3 bucket for tile storage"
-  value       = aws_s3_bucket.tiles.id
 }
 
 output "deploy_commands" {
