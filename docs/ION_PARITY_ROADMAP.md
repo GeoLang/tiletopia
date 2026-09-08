@@ -7,7 +7,7 @@ Tiletopia has **real, working** code for:
 - 20+ format readers (point clouds, meshes, terrain, vector)
 - Quantized-mesh terrain generation from heightmaps
 - HTTP tile server (Axum) with JWT auth, multipart upload, Prometheus metrics
-- Storage backends (local, S3, GCS, Azure) with hot/cold tiering
+- Local filesystem tile store
 - CesiumJS/deck.gl/MapLibre web viewer with asset management
 - Implicit tiling, Draco/meshopt compression
 - CLI: `tile`, `serve`, `info`, `validate`
@@ -45,9 +45,9 @@ Tiletopia has **real, working** code for:
 
 ### 1.5 Wire TileStore into server
 - **Current**: Server reads/writes tiles directly to filesystem, ignoring TileStore trait
-- **Need**: Route all tile I/O through TileStore so S3/GCS/Azure backends work
+- **Need**: Route all tile I/O through TileStore so the CLI and server share one store
 - **Work**: Replace `fs::read`/`fs::write` calls in server with TileStore calls
-- **Impact**: Cloud-native deployment (tiles on S3, server stateless)
+- **Impact**: One code path for every tile read and write
 
 ---
 
@@ -115,7 +115,7 @@ Tiletopia has **real, working** code for:
 
 ### 3.5 Containerized deployment
 - **Current**: Dockerfile exists
-- **Need**: Docker Compose with worker, DB, object store (MinIO). Helm chart for k8s
+- **Need**: Docker Compose with worker and DB. Helm chart for k8s
 - **Work**: Compose file + Helm chart + deployment docs
 - **Impact**: One-command deployment
 
@@ -172,5 +172,4 @@ This gets you: upload → auto-reproject → tile → serve over S3 with terrain
 2. **Open source (AGPL-3.0)** — full code transparency
 3. **Multiple viewer engines** — CesiumJS, deck.gl, MapLibre (Ion locks you to CesiumJS)
 4. **More input formats** — IFC, CityJSON, FBX, GeoPackage, DTED, HGT (Ion supports fewer)
-5. **Pluggable storage** — hot/cold tiering, bring your own S3/GCS/Azure
-6. **Edge deployment** — small binary, runs on a Raspberry Pi
+5. **Edge deployment** — small binary, runs on a Raspberry Pi
