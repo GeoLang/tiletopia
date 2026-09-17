@@ -2418,7 +2418,7 @@ dependencies = [
 [[package]]
 name = "geoplumb"
 version = "0.1.0"
-source = "git+https://github.com/GeoLang/geoplumb.git?branch=master#65bf8d8beca22284dadf3c343f286bb17b8b9281"
+source = "git+https://github.com/GeoLang/geoplumb.git?branch=master#656308787d0403abd85e3580442757582148b9a7"
 dependencies = [
  "futures",
  "nubis-core 0.1.0 (git+https://github.com/GeoLang/nubis.git?branch=master)",
@@ -3607,7 +3607,7 @@ dependencies = [
 [[package]]
 name = "itinera-core"
 version = "0.1.0"
-source = "git+https://github.com/GeoLang/itinera.git#6c4064eff16a49274f3bd2b3a6473af4327b03a8"
+source = "git+https://github.com/GeoLang/itinera.git#b3a9102220df724851235a2f484c75695b42ef42"
 dependencies = [
  "geo",
  "itinera-graph",
@@ -3619,7 +3619,7 @@ dependencies = [
 [[package]]
 name = "itinera-graph"
 version = "0.1.0"
-source = "git+https://github.com/GeoLang/itinera.git#6c4064eff16a49274f3bd2b3a6473af4327b03a8"
+source = "git+https://github.com/GeoLang/itinera.git#b3a9102220df724851235a2f484c75695b42ef42"
 dependencies = [
  "bincode",
  "rstar",
@@ -3630,7 +3630,7 @@ dependencies = [
 [[package]]
 name = "itinera-match"
 version = "0.1.0"
-source = "git+https://github.com/GeoLang/itinera.git#6c4064eff16a49274f3bd2b3a6473af4327b03a8"
+source = "git+https://github.com/GeoLang/itinera.git#b3a9102220df724851235a2f484c75695b42ef42"
 dependencies = [
  "itinera-graph",
  "rstar",
@@ -4683,7 +4683,7 @@ dependencies = [
 [[package]]
 name = "nubis-core"
 version = "0.1.0"
-source = "git+https://github.com/GeoLang/nubis.git?branch=master#83f666a7f8783fe91fdab467ba618648f8076598"
+source = "git+https://github.com/GeoLang/nubis.git?branch=master#af5de15c1d52bc35d86cc4822ad6625a4d1fcfc2"
 dependencies = [
  "thiserror 2.0.20",
 ]
@@ -5461,7 +5461,7 @@ dependencies = [
 [[package]]
 name = "projicio-core"
 version = "0.1.0"
-source = "git+https://github.com/GeoLang/projicio.git?branch=master#4ba21ae2075b5692faaeb7fc658b06e25d5df635"
+source = "git+https://github.com/GeoLang/projicio.git?branch=master#c9da6ba962ef096d833028cbd895356bf6c1a9fc"
 dependencies = [
  "crs-definitions",
  "proj4rs",
@@ -5473,7 +5473,7 @@ dependencies = [
 [[package]]
 name = "projicio-epsg-format"
 version = "0.1.0"
-source = "git+https://github.com/GeoLang/projicio.git?branch=master#4ba21ae2075b5692faaeb7fc658b06e25d5df635"
+source = "git+https://github.com/GeoLang/projicio.git?branch=master#c9da6ba962ef096d833028cbd895356bf6c1a9fc"
 
 [[package]]
 name = "psm"
@@ -6372,7 +6372,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
 dependencies = [
  "annotate-snippets",
- "base64 0.22.1",
+ "base64 0.23.1",
  "encoding_rs_io",
  "granit-parser",
  "miette 7.6.0",
@@ -7415,7 +7415,7 @@ dependencies = [
 [[package]]
 name = "terrano-core"
 version = "0.2.0"
-source = "git+https://github.com/GeoLang/terrano.git?branch=master#9650458c43f3cd037ae60c805abafc227e259f46"
+source = "git+https://github.com/GeoLang/terrano.git?branch=master#a898ad604ff76dca4d98f4c6ad5211dbc983872e"
 dependencies = [
  "flate2",
  "thiserror 2.0.20",
@@ -7932,7 +7932,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 [[package]]
 name = "topoi-core"
 version = "0.1.0"
-source = "git+https://github.com/GeoLang/topoi.git?branch=master#5a885335096fcf053186318dbc1a72d258e7523e"
+source = "git+https://github.com/GeoLang/topoi.git?branch=master#8464d20805635938688b67fda6e82954b35e1c43"
 dependencies = [
  "i_overlay 7.0.3",
  "serde",
@@ -8135,9 +8135,9 @@ checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
 name = "unicode-ident"
-version = "1.0.25"
+version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab72a15cf68d77cb0987d3684aa8a45c5ef827e8cb49ee2f30bfd7ba2feb519f"
+checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 
 [[package]]
 name = "unicode-linebreak"
