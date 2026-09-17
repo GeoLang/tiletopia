@@ -32,6 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The public docs say what the code does (2026-09-16). The 2D map tile
+  section advertised an XYZ proxy with a TTL cache, but no `{z}/{x}/{y}` route
+  is mounted, `fetch_tile` has no caller, the on-disk cache never expires, and
+  `GET /api/v1/tiles/cache/stats` answers numbers compiled into the binary.
+  "Draco/meshopt compression for tile delivery" covered a `draco_encode_mesh`
+  nothing calls, only meshopt simplification runs, for mesh LODs. The
+  anonymous-route list left out the 2D tile metadata, the Ion-compat `/v1/*`
+  reads, `/api/v1/stories/share/{token}` and `/metrics`. Test counts were 904,
+  892 and 917 across the docs, `cargo test -- --list` gives 873 on default
+  features. The GPU table listed a CUDA path and a browser target that do not
+  exist. `ION_PARITY_ROADMAP.md` called seven shipped pieces unbuilt.
+
 - The `aarch64-unknown-linux-gnu` release build links (2026-09-16).
   `manifold-csg-sys` shells out to `cmake` instead of using the cmake crate,
   so the cross image's `CMAKE_TOOLCHAIN_FILE_aarch64_unknown_linux_gnu` never
