@@ -86,6 +86,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
+          # the docker job uploads a *.dockerbuild build record this action cannot extract
+          pattern: "!*.dockerbuild"
           merge-multiple: true
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
