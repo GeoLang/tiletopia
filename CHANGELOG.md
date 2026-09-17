@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `aarch64-unknown-linux-gnu` release build links (2026-09-16).
+  `manifold-csg-sys` shells out to `cmake` instead of using the cmake crate,
+  so the cross image's `CMAKE_TOOLCHAIN_FILE_aarch64_unknown_linux_gnu` never
+  reached it and `manifoldc.cpp` was compiled for x86_64, which the aarch64
+  linker rejected. A new `Cross.toml` passes `CMAKE_TOOLCHAIN_FILE` in
+  unsuffixed.
 - FBX meshes sit where their model node puts them (2026-08-29). The reader
   flattens positions and normals through the node hierarchy with the FBX
   SDK's composition (translation, pivots and offsets, pre and post rotation,
