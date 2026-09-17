@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- The 2D map tile metadata routes and the demo engine behind them
+  (2026-09-16): `GET /api/v1/tiles/sources`, `/styles`, `/layers`,
+  `/{source_id}/tilejson` and `/cache/stats`. The sources and the style were
+  compiled into the binary, the TileJSON named a `{z}/{x}/{y}` route that was
+  never mounted, and the cache stats were fixed numbers. Vector tiles from
+  built tilesets are served under `/martin`. Last present at 79ba8fb.
 - The `tiletopia-cache` crate (2026-09-02). It held a `TileCache` trait with
   Redis, Memcached and LRU backends that nothing built or called, and with it
   went the redis, memcache and lru dependencies. The XYZ tile cache the server

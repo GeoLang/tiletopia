@@ -279,7 +279,6 @@ async fn main() -> anyhow::Result<()> {
                 bim4d_engine: tiletopia_server::bim4d::Bim4DEngine::new(),
                 cog_engine,
                 routing_engine: tiletopia_server::routing::RoutingEngine::new(),
-                map_tile_engine: tiletopia_server::map_tiles::MapTileEngine::new(),
                 feature_service_engine:
                     tiletopia_server::feature_service::FeatureServiceEngine::new(),
                 issue_tracker: tiletopia_server::issue_tracking::IssueTracker::new(),

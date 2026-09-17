@@ -119,7 +119,6 @@ pub struct AppState {
     pub bim4d_engine: bim4d::Bim4DEngine,
     pub cog_engine: cog::CogEngine,
     pub routing_engine: routing::RoutingEngine,
-    pub map_tile_engine: map_tiles::MapTileEngine,
     pub feature_service_engine: feature_service::FeatureServiceEngine,
     pub issue_tracker: issue_tracking::IssueTracker,
     /// Shared, so the analysis tile engines can sample it from their own graph.
@@ -339,7 +338,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::indoor_routes())
         .merge(premium_routes::cog_routes())
         .merge(premium_routes::routing_routes())
-        .merge(premium_routes::map_tile_routes())
         // Batch 2: competitive gap-closing
         .merge(premium_routes::isochrone_routes())
         .merge(premium_routes::geoprocessing_routes())

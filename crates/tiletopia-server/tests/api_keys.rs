@@ -299,7 +299,6 @@ async fn no_key_reaches_an_admin_route_whatever_it_carries() {
         "/api/v1/admin/users",
         "/api/v1/api-keys",
         "/api/v1/orgs",
-        "/api/v1/tiles/cache/stats",
     ] {
         let answer = get_with_key(&state, uri, Some(key)).await;
         assert_eq!(answer.status, StatusCode::FORBIDDEN, "{uri}");
@@ -582,7 +581,7 @@ async fn a_key_is_the_credential_and_a_bearer_token_does_not_rescue_it() {
 async fn public_reads_stay_public_with_no_credential_and_despite_a_bad_key() {
     let state = common::test_state().await;
 
-    for uri in ["/api/v1/terrain/layer.json", "/api/v1/tiles/sources"] {
+    for uri in ["/api/v1/terrain/layer.json"] {
         assert_eq!(
             get_with_key(&state, uri, None).await.status,
             StatusCode::OK,

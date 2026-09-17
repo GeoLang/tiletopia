@@ -106,7 +106,7 @@ pub fn generate_sdk_config(caps: &DeviceCapabilities) -> SdkConfig {
     );
 
     SdkConfig {
-        tile_endpoint: "/api/v1/tiles".into(),
+        tile_endpoint: "/martin".into(),
         terrain_endpoint: "/api/v1/terrain".into(),
         max_concurrent_requests: max_requests,
         tile_cache_size_mb: cache_size,

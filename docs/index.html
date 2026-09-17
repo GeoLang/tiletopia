@@ -154,10 +154,8 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <h3>What does not work</h3>
 <ul>
 <li>DAE tiling: neither tiler takes the format, so those jobs fail</li>
-<li>Fetching a 2D map tile: the sources, style and TileJSON are served, the tile route is not mounted</li>
 <li>Draco compression and implicit tiling: both compile, neither is called when a tile is written</li>
 <li>Photogrammetry, BIM 4D and indoor routes answer example rows compiled into the binary</li>
-<li><code>/api/v1/tiles/cache/stats</code> answers fixed numbers, not a measurement</li>
 </ul>
 </div>
 </div>
@@ -181,7 +179,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td>REST API</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td></tr>
 <tr><td>WebSocket presence / chat</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
 <tr><td>3D annotations</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
-<tr><td>XYZ raster tiles</td><td class="cross">metadata only</td><td class="cross">no</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td></tr>
+<tr><td>XYZ raster tiles</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td></tr>
 <tr><td>Mesh / vector tiling</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
 </tbody>
 </table>
@@ -261,8 +259,6 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td><code>GET</code></td><td><code>/api/v1/terrain/layer.json</code></td><td>Quantized-mesh layer metadata</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/terrain/{z}/{x}/{y}.terrain</code></td><td>Quantized-mesh tile</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/terrain/bundles</code></td><td>Prebuilt terrain bundles</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/tiles/sources</code></td><td>XYZ tile sources (OSM proxy)</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/tiles/styles</code></td><td>MapLibre GL style JSON</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png</code></td><td>Hillshade, slope or ndvi tiles</td></tr>
 <tr><td><code>GET</code></td><td><code>/metrics</code></td><td>Prometheus metrics</td></tr>
 </table>

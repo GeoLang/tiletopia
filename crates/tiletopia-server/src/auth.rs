@@ -269,15 +269,6 @@ pub fn is_public_read(method: &Method, path: &str) -> bool {
         // /api/v1/analysis/ stay gated.
         ["api", "v1", "analysis", "xyz", _, _, _, _] => true,
 
-        // Vector tile source metadata. Public only because the old substring
-        // reached it, so it is listed to keep this change from moving any route.
-        // /api/v1/tiles/cache/stats is deliberately absent: it is operational
-        // telemetry and carries an Admin gate on the route itself.
-        ["api", "v1", "tiles", "sources"] => true,
-        ["api", "v1", "tiles", "styles"] => true,
-        ["api", "v1", "tiles", "layers"] => true,
-        ["api", "v1", "tiles", _, "tilejson"] => true,
-
         // Ion-compat reads
         ["v1", "tokens"] => true,
         ["v1", "assets", ..] => true,
@@ -770,14 +761,6 @@ mod tests {
         ));
     }
 
-    /// Cache hit rates and size are operational telemetry, not map data. The
-    /// route carries an Admin gate, and this keeps the read exemption from
-    /// letting an anonymous caller reach it first.
-    #[test]
-    fn tile_cache_stats_is_not_a_public_read() {
-        assert!(!is_public_read(&Method::GET, "/api/v1/tiles/cache/stats"));
-    }
-
     /// Every GET the router serves anonymously, so a tightening of the matcher
     /// that would break the viewer's golden path fails here first.
     #[test]
@@ -795,11 +778,6 @@ mod tests {
             // analysis_tiles::analysis_tile_routes
             "/api/v1/analysis/xyz/hillshade/12/2132/1493.png",
             "/api/v1/analysis/xyz/slope/12/2132/1493.png",
-            // premium_routes.rs:487-491
-            "/api/v1/tiles/sources",
-            "/api/v1/tiles/styles",
-            "/api/v1/tiles/layers",
-            "/api/v1/tiles/basemap/tilejson",
             // ion_compat.rs:91-94
             "/v1/assets",
             "/v1/assets/42",
@@ -871,7 +849,6 @@ mod tests {
             "/api/v1/assets/8d1f/tileset.json",
             "/api/v1/terrain/12/2200/1400",
             "/api/v1/analysis/xyz/hillshade/12/2132/1493.png",
-            "/api/v1/tiles/sources",
             "/v1/assets/42",
         ] {
             for method in [
@@ -969,7 +946,6 @@ mod tests {
             "/api/v1/admin/users",
             "/api/v1/admin/users/8d1f/role",
             "/api/v1/orgs",
-            "/api/v1/tiles/cache/stats",
             "/api/v1/plugins/registry",
             "/api/v1/users/me",
             "/api/v1/assets",
@@ -1053,7 +1029,6 @@ mod tests {
         for path in [
             "/api/v1/terrain/layer.json",
             "/api/v1/assets/8d1f/tileset.json",
-            "/api/v1/tiles/sources",
         ] {
             assert!(is_public_read(&Method::GET, path), "{path}");
             assert_eq!(

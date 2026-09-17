@@ -59,15 +59,6 @@ A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields 
 - Web dashboard: upload, monitor jobs, preview in CesiumJS
 - Prometheus metrics at `/metrics`
 
-### 2D Map Tiles
-
-Metadata only. `GET /api/v1/tiles/sources` lists four sources compiled into the
-binary, `GET /api/v1/tiles/styles` answers a MapLibre GL style over them, and
-`GET /api/v1/tiles/{source_id}/tilejson` answers TileJSON 3.0.0. No route serves
-a tile: the `{z}/{x}/{y}` URL those documents name is not mounted, and the
-proxy-and-cache code behind it has no caller. `GET /api/v1/tiles/cache/stats`
-answers numbers compiled into the binary, not anything measured.
-
 ### Webhooks
 - `POST /api/v1/webhooks` registers a target URL and the events it wants, and answers a `whsec_` signing secret once. Editor or admin, and a subscription belongs to whoever created it
 - Three events, which are the three the server emits: `job.completed` and `job.failed` when a tiling job settles, `asset.deleted` when an asset is removed
@@ -110,11 +101,9 @@ Not implemented, whatever the code in the repository suggests:
 | Subsystem | State |
 |-----------|-------|
 | DAE tiling | Neither the native tiler nor mago-3d-tiler takes DAE, so those jobs fail. Point clouds, meshes, vector files and IFC do tile |
-| 2D map tile serving | Sources, style and TileJSON are served. The tile route they point at is not mounted, so nothing fetches a tile |
 | Draco tile compression | `draco_encode_mesh` compiles under the default `draco` feature and no tiling code calls it |
 | Implicit tiling | `tiletopia_core::implicit_tiling` has no caller. Tilesets are written with explicit children |
 | Photogrammetry, BIM 4D, indoor | `GET /api/v1/photogrammetry/projects`, `/bim4d/projects` and `/indoor/buildings` answer example rows compiled into the binary. There is no SfM pipeline, no schedule engine and no indoor graph behind them |
-| Tile cache statistics | `GET /api/v1/tiles/cache/stats` answers fixed numbers, not a measurement |
 
 ---
 
@@ -451,8 +440,6 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `GET` | `/api/v1/terrain/bundles/{name}/{z}/{x}/{y}.terrain` | A bundle's quantized-mesh tile |
 | `GET` | `/api/v1/terrain/rgb/{z}/{x}/{y}.png` | Terrain-RGB tile for MapLibre |
 | `WS` | `/api/v1/realtime/{room}` | WebSocket for live data and collaboration |
-| `GET` | `/api/v1/tiles/sources` | List 2D tile sources (OSM, etc.) |
-| `GET` | `/api/v1/tiles/styles` | MapLibre GL style JSON |
 | `GET` | `/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png` | Hillshade, slope or ndvi tiles, rendered on demand |
 | `GET` | `/api/v1/analysis/export/{op}` | One analysis op over a bbox as a web mercator COG |
 | `GET` | `/api/v1/audit` | The audit trail, newest first. Instance-admin only |
@@ -469,7 +456,6 @@ analysis tiles, none of which a map library can send a header with. The rest of
 Anonymous as well, and worth knowing before this is put on the internet:
 
 - `/api/v1/auth/signup` and `/api/v1/auth/login`, which are how a caller gets a token
-- `/api/v1/tiles/sources`, `/styles`, `/layers` and `/{id}/tilejson`, the 2D map metadata
 - `/api/v1/stories/share/{token}`, a story shared by its token
 - `/v1/assets/...` and `/v1/tokens`, the whole Ion-compat read surface
 - `/metrics`, the Prometheus scrape
@@ -572,16 +558,16 @@ Price is not a capability. Ion is a hosted product. This is a binary you run.
 cargo test
 ```
 
-898 tests (873 Rust + 25 GUI) on default features, counted per crate:
+889 tests (864 Rust + 25 GUI) on default features, counted per crate:
 - Core (120): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, BIM clash detection, plus 8 stress tests
-- Server (645): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation, story and plugin writes, asset list visibility, annotations, offline export, audit log, webhooks, stories, API keys, metering, scheduled jobs, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
+- Server (636): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation, story and plugin writes, asset list visibility, annotations, offline export, audit log, webhooks, stories, API keys, metering, scheduled jobs, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, analysis xyz tiles)
 - Ingest (74): LAS/LAZ, E57, PLY, GeoTIFF, DTED, HGT, USGS DEM, glTF, OBJ, FBX, CityGML, CityJSON and IFC readers, texture and material carrying, CRS detection
 - Terrain (28): quantized mesh generation, global DEM terrain
 - Store (6): local filesystem CRUD, path traversal
 
 GUI: `cd gui && pnpm run test:all` (10 vitest unit tests + 15 Playwright e2e).
 
-Feature-gated tests are not in the 873 and need their feature enabled to run.
+Feature-gated tests are not in the 864 and need their feature enabled to run.
 `martin` alone adds 30.
 
 ---
