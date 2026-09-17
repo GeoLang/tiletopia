@@ -101,10 +101,11 @@ cron = "0.15"
 wasmtime = "30"
 
 # Martin tile serving (martin feature — MBTiles, PMTiles, PostGIS tile sources)
-martin-core = { version = "0.5", default-features = false, features = ["mbtiles", "pmtiles", "postgres"] }
+martin-core = { version = "0.11", default-features = false, features = ["mbtiles", "pmtiles", "postgres"] }
 martin-tile-utils = "0.7"
 tilejson = "0.4"
-object_store = { version = "0.13", features = ["fs"] }
+# must be the object_store martin-core hands to pmtiles, or PmtilesSource::new rejects our store
+object_store = { version = "0.14", features = ["fs"] }
 
 # GeoLang ecosystem crates
 itinera-core = { git = "https://github.com/GeoLang/itinera.git" }

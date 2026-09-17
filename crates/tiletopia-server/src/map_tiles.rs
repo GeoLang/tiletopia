@@ -713,7 +713,9 @@ pub mod martin_backend {
     use martin_core::tiles::BoxedSource;
     use martin_core::tiles::mbtiles::MbtSource;
     use martin_core::tiles::pmtiles::{PmtCache, PmtCacheInstance, PmtilesSource};
-    use martin_core::tiles::postgres::{PostgresPool, PostgresSource, PostgresSqlInfo};
+    use martin_core::tiles::postgres::{
+        PostgresPool, PostgresSource, PostgresSqlInfo, RetryTimeout,
+    };
     use martin_tile_utils::{TileCoord as MartinTileCoord, TileInfo};
     use std::collections::HashMap;
     use std::path::Path;
@@ -855,11 +857,20 @@ pub mod martin_backend {
         ) -> Result<(), String> {
             let id = id.into();
 
-            let pool = PostgresPool::new(connection_string, None, None, None, 4)
-                .await
-                .map_err(|e| format!("PostGIS pool error: {e}"))?;
+            let pool = PostgresPool::new(
+                connection_string,
+                None,
+                None,
+                None,
+                4,
+                RetryTimeout::default(),
+            )
+            .await
+            .map_err(|e| format!("PostGIS pool error: {e}"))?;
 
-            let sql_info = PostgresSqlInfo::new(query.to_string(), false, id.clone());
+            // the caller's own sql: an empty tile promises nothing about its children, and
+            // the query answers one mvt column with no etag beside it
+            let sql_info = PostgresSqlInfo::new(query.to_string(), false, false, id.clone(), false);
 
             let mut tilejson = tilejson::tilejson! {
                 tiles: vec![format!("/martin/{id}/{{z}}/{{x}}/{{y}}")],

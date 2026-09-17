@@ -25,6 +25,8 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-latest
             use_cross: false
+            # macos-latest is arm64 and manifold-csg-sys runs cmake itself, which builds for the host
+            osx_architectures: x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
             use_cross: false
@@ -42,6 +44,8 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
       - name: Build (native)
         if: "!matrix.use_cross"
+        env:
+          CMAKE_OSX_ARCHITECTURES: ${{ matrix.osx_architectures }}
         run: cargo build --release -p tiletopia-cli --target ${{ matrix.target }}
       - name: Build (cross)
         if: matrix.use_cross

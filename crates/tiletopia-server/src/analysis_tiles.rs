@@ -625,6 +625,8 @@ async fn analysis_export(
             WindowReq {
                 bbox: bbox_m,
                 resolution: params.resolution,
+                // the DEM sources carry no time dimension, so every pull reads the same ground
+                time: None,
             },
         )
         .await
@@ -865,6 +867,7 @@ mod tests {
         let req = WindowReq {
             bbox: Bbox::new(7.0, 43.0, 7.04, 43.02),
             resolution: 0.001,
+            time: None,
         };
         let chunk = src.read(&req).await.unwrap().into_raster().unwrap();
         assert_eq!(chunk.width(), 40);
@@ -881,6 +884,7 @@ mod tests {
         let req = WindowReq {
             bbox: Bbox::new(7.0, 43.0, 7.04, 43.02),
             resolution: 0.001,
+            time: None,
         };
         let chunk = src.read(&req).await.unwrap().into_raster().unwrap();
         let band = chunk.bands.band(0).unwrap();

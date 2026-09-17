@@ -192,6 +192,32 @@ async fn wait_for_deliveries(received: &ReceivedDeliveries, wanted: usize) -> Ve
     );
 }
 
+/// The history route's answer once the worker has recorded `delivery_id`, which it does after the receiver already has the POST.
+async fn wait_for_recorded_delivery(
+    state: &Arc<AppState>,
+    bearer: &str,
+    delivery_id: &str,
+) -> Answer {
+    let deadline = std::time::Instant::now() + WAIT_LIMIT;
+    loop {
+        let history = send(
+            state,
+            empty_request("GET", "/api/v1/webhooks/deliveries", bearer),
+        )
+        .await;
+        assert_eq!(history.status, StatusCode::OK, "{}", history.text);
+        if history.body["deliveries"][0]["id"] == delivery_id {
+            return history;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "delivery {delivery_id} never reached the history route: {}",
+            history.text
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Drive both workers until the asset's only job settles, so the job's event is
 /// queued for delivery.
 async fn settle_only_job(state: &Arc<AppState>, asset_id: Uuid) -> tiletopia_server::db::JobRecord {
@@ -235,7 +261,6 @@ async fn a_subscription_receives_a_signed_payload_for_the_event_it_asked_for() {
     assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.text);
 
     let deliveries = wait_for_deliveries(&received, 1).await;
-    worker.abort();
     assert_eq!(deliveries.len(), 1);
     let delivery = &deliveries[0];
 
@@ -259,12 +284,8 @@ async fn a_subscription_receives_a_signed_payload_for_the_event_it_asked_for() {
     assert!(payload["occurred_at"].as_str().is_some());
 
     // and the history route answers the real delivery
-    let history = send(
-        &state,
-        empty_request("GET", "/api/v1/webhooks/deliveries", &editor),
-    )
-    .await;
-    assert_eq!(history.status, StatusCode::OK, "{}", history.text);
+    let history = wait_for_recorded_delivery(&state, &editor, &delivery.delivery_id).await;
+    worker.abort();
     let listed = &history.body["deliveries"][0];
     assert_eq!(listed["id"], delivery.delivery_id);
     assert_eq!(listed["subscription_id"], subscription_id.to_string());

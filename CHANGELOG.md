@@ -38,6 +38,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reached it and `manifoldc.cpp` was compiled for x86_64, which the aarch64
   linker rejected. A new `Cross.toml` passes `CMAKE_TOOLCHAIN_FILE` in
   unsuffixed.
+- The `x86_64-apple-darwin` release build links (2026-09-16). `macos-latest` is
+  an arm64 runner, and the same raw `cmake` call built manifold for the runner
+  rather than the target, so the link found arm64 objects. That matrix row now
+  sets `CMAKE_OSX_ARCHITECTURES=x86_64` on the build step.
+- The server builds against current geoplumb (2026-09-16). `WindowReq` grew a
+  `time` field that overrides a source's own interval for one pull. The DEM
+  sources read the same ground whenever they are pulled, so all three analysis
+  tile requests pass `None`.
+- The `martin` feature builds under a refreshed lockfile (2026-09-16). pmtiles
+  0.23.1 moved to object_store 0.14 in a patch release, which martin-core 0.5
+  cannot take. martin-core is now 0.11, object_store 0.14 and the pmtiles dev
+  dependency 0.24, so one object_store version crosses martin's API.
+- `a_subscription_receives_a_signed_payload_for_the_event_it_asked_for` waits
+  for the delivery to be recorded (2026-09-16). It aborted the delivery worker
+  as soon as the receiver had the POST, which is before the worker writes the
+  outcome into the history the test reads next.
 - FBX meshes sit where their model node puts them (2026-08-29). The reader
   flattens positions and normals through the node hierarchy with the FBX
   SDK's composition (translation, pivots and offsets, pre and post rotation,
