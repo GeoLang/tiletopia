@@ -18,7 +18,9 @@ Ingest point clouds, tile them into OGC 3D Tiles 1.1, and serve them with view-d
 - Octree spatial partitioning with geometric error-based LOD
 - Parallel tiling across CPU cores (Rayon)
 - Optional GPU point-cloud decimation via wgpu (`--features gpu`)
-- Draco/meshopt compression for tile delivery
+- meshopt simplification builds a mesh tile's lower LODs. Tiles go out
+  uncompressed: `draco_encode_mesh` exists in `tiletopia-core` and the tiling
+  pipeline never calls it
 
 The job queue tiles point clouds and meshes (glTF, glb, OBJ, FBX, CityGML, IFC) with the native tiler, whatever `TILETOPIA_MAGO_JAR` is set to. The readers carry UVs, diffuse textures and diffuse colours through to the tile GLBs, and a tile holding part of a textured mesh carries the crop of the texture its triangles reach. A mesh with a texture the readers cannot find or decode tiles untextured. A mesh is placed by the upload's `longitude` and `latitude`, and one without them fails naming them. IFC falls back to the `IfcSite` reference coordinates, and an IFC with neither fails rather than landing at the centre of the earth. `crs` is ignored on the native path. Vector files (GeoJSON, GeoPackage, KML) go to [mago-3d-tiler](https://github.com/Gaia3D/mago-3d-tiler) (MPL-2.0), which the Docker image bundles with a JRE 21; without the jar they fail naming the variable. The jar ships natives for Linux and Windows x64 only, so on macOS the mago jobs fail inside mago. DAE uploads still fail with an error naming the format: neither tiler takes it. An upload whose extension is not on the list answers 400. DEM rasters (tif, tiff, hgt, dt0, dt1, dt2) and images (jpg, jpeg, png, jp2) upload and are stored as assets, but no tiler takes them: a tiling request for one answers that terrain and imagery assets are not tiled to 3D Tiles.
 
@@ -58,10 +60,13 @@ A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields 
 - Prometheus metrics at `/metrics`
 
 ### 2D Map Tiles
-- XYZ raster tiles: proxy and cache OSM or another slippy-map source
-- MapLibre GL style JSON
-- TileJSON 3.0.0
-- Tile cache with TTL
+
+Metadata only. `GET /api/v1/tiles/sources` lists four sources compiled into the
+binary, `GET /api/v1/tiles/styles` answers a MapLibre GL style over them, and
+`GET /api/v1/tiles/{source_id}/tilejson` answers TileJSON 3.0.0. No route serves
+a tile: the `{z}/{x}/{y}` URL those documents name is not mounted, and the
+proxy-and-cache code behind it has no caller. `GET /api/v1/tiles/cache/stats`
+answers numbers compiled into the binary, not anything measured.
 
 ### Webhooks
 - `POST /api/v1/webhooks` registers a target URL and the events it wants, and answers a `whsec_` signing secret once. Editor or admin, and a subscription belongs to whoever created it
@@ -105,6 +110,11 @@ Not implemented, whatever the code in the repository suggests:
 | Subsystem | State |
 |-----------|-------|
 | DAE tiling | Neither the native tiler nor mago-3d-tiler takes DAE, so those jobs fail. Point clouds, meshes, vector files and IFC do tile |
+| 2D map tile serving | Sources, style and TileJSON are served. The tile route they point at is not mounted, so nothing fetches a tile |
+| Draco tile compression | `draco_encode_mesh` compiles under the default `draco` feature and no tiling code calls it |
+| Implicit tiling | `tiletopia_core::implicit_tiling` has no caller. Tilesets are written with explicit children |
+| Photogrammetry, BIM 4D, indoor | `GET /api/v1/photogrammetry/projects`, `/bim4d/projects` and `/indoor/buildings` answer example rows compiled into the binary. There is no SfM pipeline, no schedule engine and no indoor graph behind them |
+| Tile cache statistics | `GET /api/v1/tiles/cache/stats` answers fixed numbers, not a measurement |
 
 ---
 
@@ -448,14 +458,22 @@ When the GeoLang server is running on port 3000, the viewer automatically connec
 | `GET` | `/api/v1/audit` | The audit trail, newest first. Instance-admin only |
 | `GET` | `/metrics` | Prometheus metrics |
 
-Other `/api/v1/*` geospatial and premium routes are mounted and real: STAC search proxies `TILETOPIA_STAC_API`, COG windows read `TILETOPIA_COG_SOURCES` over range requests, static maps render the DEM to PNG/JPEG/WebP/SVG/PDF, geostatistics solves kriging systems, geoprocessing runs geo's boolean overlays, webhooks deliver HMAC-signed job and asset events, the scheduler runs the jobs it stores, and API keys authenticate read routes (`X-Api-Key`, admin-minted, hashed at rest). The facades left are in the table above: the pub-mod-only modules have no routes.
+These other `/api/v1/*` routes compute what they say: STAC search proxies `TILETOPIA_STAC_API`, COG windows read `TILETOPIA_COG_SOURCES` over range requests, static maps render the DEM to PNG/JPEG/WebP/SVG/PDF, geostatistics solves kriging systems, geoprocessing runs geo's boolean overlays, elevation and terrain analysis read the DEM, geocoding, routing, isochrones and map matching run their own algorithms, webhooks deliver HMAC-signed job and asset events, the scheduler runs the jobs it stores, and API keys authenticate read routes (`X-Api-Key`, admin-minted, hashed at rest). What answers fixed example data instead is in the table above.
 
-Tile data reads are anonymous: `tileset.json`, `tiles/{path}`, everything under
-`/api/v1/terrain/` (the generated quantized-mesh routes, the prebuilt bundles
-and their listing, terrain-RGB) and the `/api/v1/analysis/xyz/` analysis tiles,
-none of which a map library can send a header with. The rest of
-`/api/v1/analysis/` is compute and stays gated. `/api/v1/auth/signup` and
-`/api/v1/auth/login` are open, because they are how a caller gets a token.
+Tile data reads are anonymous: `tileset.json`, `tiles/{path}`, `data/{path}`,
+everything under `/api/v1/terrain/` (the generated quantized-mesh routes, the
+prebuilt bundles and their listing, terrain-RGB) and the `/api/v1/analysis/xyz/`
+analysis tiles, none of which a map library can send a header with. The rest of
+`/api/v1/analysis/` is compute and stays gated.
+
+Anonymous as well, and worth knowing before this is put on the internet:
+
+- `/api/v1/auth/signup` and `/api/v1/auth/login`, which are how a caller gets a token
+- `/api/v1/tiles/sources`, `/styles`, `/layers` and `/{id}/tilejson`, the 2D map metadata
+- `/api/v1/stories/share/{token}`, a story shared by its token
+- `/v1/assets/...` and `/v1/tokens`, the whole Ion-compat read surface
+- `/metrics`, the Prometheus scrape
+
 Everything else needs `Authorization: Bearer <jwt>`, and writes need the editor
 or admin role.
 
@@ -509,10 +527,12 @@ GPU compute is optional and auto-detected:
 
 | Platform | Backend | Notes |
 |----------|---------|-------|
-| macOS (Apple Silicon) | Metal via wgpu | M1–M5 |
-| Linux/Windows (NVIDIA) | Vulkan via wgpu | Optional CUDA for max perf |
+| macOS (Apple Silicon) | Metal via wgpu | |
+| Linux/Windows (NVIDIA) | Vulkan via wgpu | |
 | Linux/Windows (AMD/Intel) | Vulkan via wgpu | |
-| Web | WebGPU | Browser-native |
+
+wgpu picks the backend. There is no CUDA path and nothing here builds for the
+browser: the `gpu` feature is for `tiletopia serve` and `tiletopia tile`.
 
 ```bash
 cargo build --release --features gpu
@@ -552,17 +572,17 @@ Price is not a capability. Ion is a hosted product. This is a binary you run.
 cargo test
 ```
 
-904 tests (879 Rust + 25 GUI) on default features, counted per crate:
+898 tests (873 Rust + 25 GUI) on default features, counted per crate:
 - Core (120): AABB, octree, LOD, .pnts format, tileset serialization, coordinate transforms, CRS reprojection, diff detection, plugins, spatial queries, point cloud classification, change detection, implicit tiling, colorization, glTF structural metadata, 3D measurement, anomaly detection, BIM clash detection, plus 8 stress tests
 - Server (645): health, assets, tilesets, prebuilt terrain bundles, Ion asset id and endpoint resolution, auth and roles, role and ownership gates on asset, annotation, story and plugin writes, asset list visibility, annotations, offline export, audit log, webhooks, stories, API keys, metering, scheduled jobs, mobile, plus the geospatial services (geocoding, STAC, routing, isochrone, geoprocessing, features, elevation, map matching, static map, flight planning, scan registration, issues, terrain analysis, geostatistics, multispectral, COG, map tiles, analysis xyz tiles)
 - Ingest (74): LAS/LAZ, E57, PLY, GeoTIFF, DTED, HGT, USGS DEM, glTF, OBJ, FBX, CityGML, CityJSON and IFC readers, texture and material carrying, CRS detection
 - Terrain (28): quantized mesh generation, global DEM terrain
-- Store (12): local filesystem CRUD, path traversal
+- Store (6): local filesystem CRUD, path traversal
 
 GUI: `cd gui && pnpm run test:all` (10 vitest unit tests + 15 Playwright e2e).
 
-Feature-gated tests (`gpu`, `ml`, `martin`, `wasm-plugins`, cloud stores) are not
-in the 892 and need their feature enabled to run.
+Feature-gated tests are not in the 873 and need their feature enabled to run.
+`martin` alone adds 30.
 
 ---
 

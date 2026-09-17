@@ -62,7 +62,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/3D_Tiles-1.1-green" alt="3D Tiles">
 <img src="https://img.shields.io/badge/Rust-2024-orange" alt="Rust">
-<img src="https://img.shields.io/badge/tests-917_passing-brightgreen" alt="Tests">
+<img src="https://img.shields.io/badge/tests-898_passing-brightgreen" alt="Tests">
 </div>
 <div class="hero">
 <a href="https://github.com/GeoLang/tiletopia">GitHub</a>
@@ -72,7 +72,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 </div>
 <div class="stats">
 <div class="stat"><div class="num">6</div><div class="label">Rust crates</div></div>
-<div class="stat"><div class="num">917</div><div class="label">Tests</div></div>
+<div class="stat"><div class="num">898</div><div class="label">Tests</div></div>
 <div class="stat"><div class="num">$0</div><div class="label">Per month</div></div>
 <div class="stat"><div class="num">disk</div><div class="label">Data limit</div></div>
 </div>
@@ -90,7 +90,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <li>Octree spatial partitioning with LOD</li>
 <li>Parallel tiling (Rayon)</li>
 <li>Optional GPU via wgpu</li>
-<li>Draco/meshopt compression</li>
+<li>meshopt simplification builds the lower LODs of a mesh tile. Tiles are written uncompressed</li>
 <li>Meshes read and tiled natively, with their UVs, diffuse textures and diffuse colours, placed from the upload's longitude and latitude</li>
 <li>A tile holding part of a textured mesh carries the crop of the texture its triangles reach</li>
 <li>Vector files tiled by mago-3d-tiler (MPL-2.0) only, bundled in the image, needing TILETOPIA_MAGO_JAR</li>
@@ -134,10 +134,10 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <div class="card">
 <h3>2D Map Tiles</h3>
 <ul>
-<li>XYZ raster tiles (proxy + cache OSM)</li>
-<li>MapLibre GL style JSON</li>
-<li>TileJSON 3.0.0</li>
-<li>Tile cache with TTL</li>
+<li>A list of four tile sources compiled into the binary</li>
+<li>MapLibre GL style JSON over them</li>
+<li>TileJSON 3.0.0 per source</li>
+<li>Metadata only. The <code>{z}/{x}/{y}</code> route those documents point at is not mounted</li>
 </ul>
 </div>
 <div class="card">
@@ -154,6 +154,10 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <h3>What does not work</h3>
 <ul>
 <li>DAE tiling: neither tiler takes the format, so those jobs fail</li>
+<li>Fetching a 2D map tile: the sources, style and TileJSON are served, the tile route is not mounted</li>
+<li>Draco compression and implicit tiling: both compile, neither is called when a tile is written</li>
+<li>Photogrammetry, BIM 4D and indoor routes answer example rows compiled into the binary</li>
+<li><code>/api/v1/tiles/cache/stats</code> answers fixed numbers, not a measurement</li>
 </ul>
 </div>
 </div>
@@ -163,7 +167,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <section id="comparison">
 <div class="container">
 <h2>GeoLang vs The Industry</h2>
-<p style="color:var(--muted);margin-bottom:20px">What this server actually does. The premium routes are not in the table and work too: STAC search, COG windows, webhook delivery, scheduled jobs, kriging, geoprocessing, static maps and API keys.</p>
+<p style="color:var(--muted);margin-bottom:20px">What this server actually does. These routes are not in the table and compute what they say: STAC search, COG windows, webhook delivery, scheduled jobs, kriging, geoprocessing, elevation, terrain analysis, geocoding, routing, static maps and API keys.</p>
 <div style="overflow-x:auto">
 <table>
 <thead>
@@ -177,12 +181,12 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td>REST API</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td></tr>
 <tr><td>WebSocket presence / chat</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
 <tr><td>3D annotations</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
-<tr><td>XYZ raster tiles</td><td class="check">yes</td><td class="cross">no</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td></tr>
+<tr><td>XYZ raster tiles</td><td class="cross">metadata only</td><td class="cross">no</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td></tr>
 <tr><td>Mesh / vector tiling</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
 </tbody>
 </table>
 </div>
-<p style="margin-top:16px;color:var(--muted);font-size:.85rem">Ion is a hosted product. This is a binary you run. Scheduler, webhooks, STAC, COG, kriging, geoprocessing, static maps and API keys work and are not scored above.</p>
+<p style="margin-top:16px;color:var(--muted);font-size:.85rem">Ion is a hosted product. This is a binary you run. Scheduler, webhooks, STAC, COG, kriging, geoprocessing, static maps and API keys work and are not scored above. What answers fixed example data is listed under "What does not work".</p>
 
 <div class="grid" style="margin-top:28px">
 <div class="card">
@@ -262,7 +266,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td><code>GET</code></td><td><code>/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png</code></td><td>Hillshade, slope or ndvi tiles</td></tr>
 <tr><td><code>GET</code></td><td><code>/metrics</code></td><td>Prometheus metrics</td></tr>
 </table>
-<p style="margin-top:12px;color:var(--muted);font-size:.85rem">The other <code>/api/v1/*</code> routes are real too: STAC search proxies an upstream catalog, COG windows read range requests, static maps render the DEM, kriging solves its system, geoprocessing runs real overlays, webhooks deliver HMAC-signed events, the scheduler runs the jobs it stores, and API keys authenticate read routes. What is left is in the README "Not implemented" table.</p>
+<p style="margin-top:12px;color:var(--muted);font-size:.85rem">The other <code>/api/v1/*</code> routes compute what they say: STAC search proxies an upstream catalog, COG windows read range requests, static maps render the DEM, kriging solves its system, geoprocessing runs real overlays, webhooks deliver HMAC-signed events, the scheduler runs the jobs it stores, and API keys authenticate read routes. What answers fixed example data instead is in the README "Not implemented" table.</p>
 </div>
 </section>
 
@@ -323,11 +327,11 @@ docker run -p 3000:3000 -v ./data:/data tiletopia serve --data-dir /data</pre>
 <h2>GPU Acceleration</h2>
 <table>
 <tr><th>Platform</th><th>Backend</th><th>Notes</th></tr>
-<tr><td>macOS (Apple Silicon)</td><td>Metal via wgpu</td><td>M1–M5</td></tr>
-<tr><td>Linux/Windows (NVIDIA)</td><td>Vulkan via wgpu</td><td>Optional CUDA FFI</td></tr>
+<tr><td>macOS (Apple Silicon)</td><td>Metal via wgpu</td><td></td></tr>
+<tr><td>Linux/Windows (NVIDIA)</td><td>Vulkan via wgpu</td><td></td></tr>
 <tr><td>Linux/Windows (AMD/Intel)</td><td>Vulkan via wgpu</td><td></td></tr>
-<tr><td>Web</td><td>WebGPU</td><td>Browser-native</td></tr>
 </table>
+<p style="color:var(--muted);font-size:.85rem">wgpu picks the backend. There is no CUDA path and nothing here builds for the browser.</p>
 <pre># Build with GPU compute
 cargo build --release --features gpu</pre>
 </div>
@@ -336,7 +340,7 @@ cargo build --release --features gpu</pre>
 <section style="background:#111827">
 <div class="container">
 <h2>🖥️ ViewTopia — Web Viewer</h2>
-<p style="color:var(--muted);margin-bottom:20px">The official frontend for GeoLang — 64 tool panels, Cesium and MapLibre renderers with a deck.gl overlay and a Leaflet map tab, AI agent, and professional GIS tools.</p>
+<p style="color:var(--muted);margin-bottom:20px">The official frontend for GeoLang. 73 tool panels, Cesium and MapLibre renderers with a deck.gl overlay and a Leaflet map tab, an AI agent, and GIS tools.</p>
 <div class="grid">
 <div class="card">
 <h3>Viewers</h3>
@@ -392,7 +396,7 @@ cargo build --release --features gpu</pre>
 <footer>
 <div class="container">
 <p>GeoLang is free software under the <a href="https://github.com/GeoLang/tiletopia/blob/master/LICENSE">AGPL-3.0 license</a>.</p>
-<p style="margin-top:8px">Made for GIS professionals who refuse to pay $150/month for tile hosting.</p>
+<p style="margin-top:8px">Self-hosted tile serving, with no hosting bill and no upload quota.</p>
 <p>&copy; 2026 Grok Image Compression Inc. Licensed under AGPL-3.0-or-later.</p>
 </div>
 </footer>
