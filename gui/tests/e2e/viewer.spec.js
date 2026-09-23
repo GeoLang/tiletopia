@@ -8,7 +8,7 @@ test.describe('TileTopia Viewer', () => {
   });
 
   test('page loads with correct title', async ({ page }) => {
-    await expect(page).toHaveTitle('TileTopia Dashboard');
+    await expect(page).toHaveTitle('GeoLang Dashboard');
   });
 
   test('sidebar navigation buttons exist', async ({ page }) => {
