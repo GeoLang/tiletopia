@@ -164,33 +164,33 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 
 <section id="comparison">
 <div class="container">
-<h2>Compared with other platforms</h2>
+<h2>Compared with Cesium Ion</h2>
 <p style="color:var(--muted);margin-bottom:20px">What this server does today. Also working and not in the table: STAC search, COG windows, webhook delivery, scheduled jobs, kriging, geoprocessing, elevation, terrain analysis, geocoding, static maps and API keys.</p>
 <div style="overflow-x:auto">
 <table>
 <thead>
-<tr><th>Capability</th><th>TileTopia</th><th>Cesium Ion</th><th>Mapbox</th><th>Google Maps</th><th>Bentley iTwin</th><th>Trimble Clarity</th><th>Potree</th></tr>
+<tr><th>Capability</th><th>TileTopia</th><th>Cesium Ion</th></tr>
 </thead>
 <tbody>
-<tr><td>OGC 3D Tiles 1.1 point clouds</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">viewer</td></tr>
-<tr><td>Terrain generation / bundles</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td></tr>
-<tr><td>Self-hosted / on-prem</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td></tr>
-<tr><td>Open source</td><td class="check">AGPL-3.0</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td></tr>
-<tr><td>REST API</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td></tr>
-<tr><td>WebSocket presence / chat</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
-<tr><td>3D annotations</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
-<tr><td>XYZ raster tiles</td><td class="cross">DEM analysis and terrain-RGB only</td><td class="cross">no</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td></tr>
-<tr><td>Mesh / vector tiling</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
+<tr><td>OGC 3D Tiles 1.1 point clouds</td><td class="check">yes</td><td class="check">yes</td></tr>
+<tr><td>Terrain generation / bundles</td><td class="check">yes</td><td class="check">yes</td></tr>
+<tr><td>Self-hosted / on-prem</td><td class="check">yes</td><td class="check">Cesium ion Self-Hosted</td></tr>
+<tr><td>Open source</td><td class="check">AGPL-3.0</td><td class="cross">no</td></tr>
+<tr><td>REST API</td><td class="check">yes</td><td class="check">yes</td></tr>
+<tr><td>WebSocket presence / chat</td><td class="check">yes</td><td class="cross">no</td></tr>
+<tr><td>3D annotations</td><td class="check">yes</td><td class="cross">no</td></tr>
+<tr><td>XYZ raster tiles</td><td class="cross">DEM analysis and terrain-RGB only</td><td class="cross">no</td></tr>
+<tr><td>Mesh / vector tiling</td><td class="check">yes</td><td class="check">yes</td></tr>
 </tbody>
 </table>
 </div>
-<p style="margin-top:16px;color:var(--muted);font-size:.85rem">Ion is a hosted product. TileTopia is a binary you run. What answers fixed example data is listed under "What does not work".</p>
+<p style="margin-top:16px;color:var(--muted);font-size:.85rem">TileTopia is one AGPL binary you run. What answers fixed example data is listed under "What does not work".</p>
 
 <div class="grid" style="margin-top:28px">
 <div class="card">
 <h3>vs Cesium Ion</h3>
 <ul>
-<li>Ion is cloud-only 3D Tiles hosting</li>
+<li>Ion is 3D Tiles hosting, in Cesium's cloud or as the commercial Cesium ion Self-Hosted</li>
 <li>This binary runs on your machine, AGPL-3.0</li>
 <li>Point-cloud tiles and quantized-mesh terrain</li>
 <li>Mesh, IFC and vector tiling are on the job queue</li>

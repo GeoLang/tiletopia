@@ -362,15 +362,14 @@ The server sets `user_id` on every collaboration message to the sender's JWT `su
 | CesiumJS compatible | yes | yes |
 | REST API | yes | yes |
 | Web dashboard | yes | yes |
-| Self-hosted / on-premises | yes | no |
+| Self-hosted / on-premises | yes | yes, the commercial Cesium ion Self-Hosted |
 | WebSocket presence, cursors, chat | yes | no |
 | 3D annotation layers | yes | no |
-| Local filesystem storage | yes | no |
 | Open source | AGPL-3.0 | proprietary |
 | 3D model / BIM / vector tiling | yes | yes |
 | Temporal versioning | no | mixed |
 
-Ion is a hosted product. TileTopia is a binary you run.
+TileTopia is one AGPL binary you run.
 
 ---
 
