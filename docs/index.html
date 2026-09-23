@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GeoLang — Fast Open-Source 3D Tiles Server</title>
+<title>TileTopia: self-hosted 3D Tiles server</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--heading:#f0f6fc;--accent:#58a6ff;--accent2:#3fb950;--muted:#8b949e;--red:#f85149}
@@ -56,13 +56,13 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <body>
 <header>
 <div class="container">
-<h1>🌍 GeoLang</h1>
-<p class="tagline">Fast open-source 3D Tiles server. Self-hosted Cesium Ion replacement for point clouds and quantized-mesh terrain.</p>
+<h1>TileTopia</h1>
+<p class="tagline">Self-hosted 3D Tiles server, an open-source alternative to Cesium Ion. It tiles point clouds, meshes, IFC and vector files, and serves quantized-mesh terrain.</p>
 <div class="badges">
 <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/3D_Tiles-1.1-green" alt="3D Tiles">
 <img src="https://img.shields.io/badge/Rust-2024-orange" alt="Rust">
-<img src="https://img.shields.io/badge/tests-898_passing-brightgreen" alt="Tests">
+<img src="https://github.com/GeoLang/tiletopia/actions/workflows/ci.yml/badge.svg" alt="CI">
 </div>
 <div class="hero">
 <a href="https://github.com/GeoLang/tiletopia">GitHub</a>
@@ -72,9 +72,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 </div>
 <div class="stats">
 <div class="stat"><div class="num">6</div><div class="label">Rust crates</div></div>
-<div class="stat"><div class="num">898</div><div class="label">Tests</div></div>
-<div class="stat"><div class="num">$0</div><div class="label">Per month</div></div>
-<div class="stat"><div class="num">disk</div><div class="label">Data limit</div></div>
+<div class="stat"><div class="num">1.1</div><div class="label">OGC 3D Tiles</div></div>
 </div>
 </div>
 </header>
@@ -88,8 +86,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <ul>
 <li>OGC 3D Tiles 1.1 point-cloud tiles</li>
 <li>Octree spatial partitioning with LOD</li>
-<li>Parallel tiling (Rayon)</li>
-<li>Optional GPU via wgpu</li>
+<li>Parallel octree build (Rayon)</li>
 <li>meshopt simplification builds the lower LODs of a mesh tile. Tiles are written uncompressed</li>
 <li>Meshes read and tiled natively, with their UVs, diffuse textures and diffuse colours, placed from the upload's longitude and latitude</li>
 <li>A tile holding part of a textured mesh carries the crop of the texture its triangles reach</li>
@@ -111,8 +108,8 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <div class="card">
 <h3>Tile Server</h3>
 <ul>
-<li>REST API for asset management</li>
-<li>View-dependent tile streaming</li>
+<li>REST API for assets, tiling jobs and access control</li>
+<li>tileset.json and tiles for CesiumJS or any 3D Tiles client</li>
 <li>WebSocket presence, cursors, chat, view sync</li>
 <li>JWT authentication (on by default), tokens from signup and login, good for 24 hours</li>
 <li>CORS for CesiumJS</li>
@@ -132,12 +129,12 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 </ul>
 </div>
 <div class="card">
-<h3>2D Map Tiles</h3>
+<h3>Vector Tiles</h3>
 <ul>
-<li>A list of four tile sources compiled into the binary</li>
-<li>MapLibre GL style JSON over them</li>
-<li>TileJSON 3.0.0 per source</li>
-<li>Metadata only. The <code>{z}/{x}/{y}</code> route those documents point at is not mounted</li>
+<li>GeoJSON, FlatGeobuf or CSV built into PMTiles with tippecanoe</li>
+<li>Served as MVT under /martin, with TileJSON per source</li>
+<li>Operator archives from TILETOPIA_PMTILES_DIR</li>
+<li>Needs the martin cargo feature, which the Docker image has</li>
 </ul>
 </div>
 <div class="card">
@@ -154,8 +151,11 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <h3>What does not work</h3>
 <ul>
 <li>DAE tiling: neither tiler takes the format, so those jobs fail</li>
-<li>Draco compression and implicit tiling: both compile, neither is called when a tile is written</li>
+<li>Draco compression, implicit tiling and GPU decimation: all compile, none is called when a tile is written</li>
 <li>Photogrammetry, BIM 4D and indoor routes answer example rows compiled into the binary</li>
+<li>Routing snaps to a small built-in San Francisco graph, and isochrones ignore roads</li>
+<li>Map matching, flight planning, scan registration and the /demo routes run over built-in input</li>
+<li>Features, issues, workspaces, mobile, classification and plugin listings answer built-in rows</li>
 </ul>
 </div>
 </div>
@@ -164,12 +164,12 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 
 <section id="comparison">
 <div class="container">
-<h2>GeoLang vs The Industry</h2>
-<p style="color:var(--muted);margin-bottom:20px">What this server actually does. These routes are not in the table and compute what they say: STAC search, COG windows, webhook delivery, scheduled jobs, kriging, geoprocessing, elevation, terrain analysis, geocoding, routing, static maps and API keys.</p>
+<h2>Compared with other platforms</h2>
+<p style="color:var(--muted);margin-bottom:20px">What this server does today. Also working and not in the table: STAC search, COG windows, webhook delivery, scheduled jobs, kriging, geoprocessing, elevation, terrain analysis, geocoding, static maps and API keys.</p>
 <div style="overflow-x:auto">
 <table>
 <thead>
-<tr><th>Capability</th><th>GeoLang</th><th>Cesium Ion</th><th>Mapbox</th><th>Google Maps</th><th>Bentley iTwin</th><th>Trimble Clarity</th><th>Potree</th></tr>
+<tr><th>Capability</th><th>TileTopia</th><th>Cesium Ion</th><th>Mapbox</th><th>Google Maps</th><th>Bentley iTwin</th><th>Trimble Clarity</th><th>Potree</th></tr>
 </thead>
 <tbody>
 <tr><td>OGC 3D Tiles 1.1 point clouds</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">viewer</td></tr>
@@ -179,12 +179,12 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td>REST API</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td></tr>
 <tr><td>WebSocket presence / chat</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
 <tr><td>3D annotations</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
-<tr><td>XYZ raster tiles</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td></tr>
+<tr><td>XYZ raster tiles</td><td class="cross">DEM analysis and terrain-RGB only</td><td class="cross">no</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="cross">no</td></tr>
 <tr><td>Mesh / vector tiling</td><td class="check">yes</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td><td class="check">yes</td><td class="cross">no</td><td class="cross">no</td></tr>
 </tbody>
 </table>
 </div>
-<p style="margin-top:16px;color:var(--muted);font-size:.85rem">Ion is a hosted product. This is a binary you run. Scheduler, webhooks, STAC, COG, kriging, geoprocessing, static maps and API keys work and are not scored above. What answers fixed example data is listed under "What does not work".</p>
+<p style="margin-top:16px;color:var(--muted);font-size:.85rem">Ion is a hosted product. TileTopia is a binary you run. What answers fixed example data is listed under "What does not work".</p>
 
 <div class="grid" style="margin-top:28px">
 <div class="card">
@@ -229,7 +229,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <h2>Architecture</h2>
 <pre>tiletopia/
 ├── crates/
-│   ├── tiletopia-core/       # Octree tiling engine, LOD, .pnts writer
+│   ├── tiletopia-core/       # Octree tiling engine, LOD, .pnts and .glb writers
 │   ├── tiletopia-server/     # Axum REST API, WebSocket, JWT auth
 │   ├── tiletopia-ingest/     # Point cloud, DEM and mesh readers
 │   ├── tiletopia-terrain/    # Quantized mesh terrain generation
@@ -248,7 +248,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td><code>GET</code></td><td><code>/api/v1/health</code></td><td>Health check</td></tr>
 <tr><td><code>POST</code></td><td><code>/api/v1/auth/signup</code></td><td>New viewer account, answers a JWT</td></tr>
 <tr><td><code>POST</code></td><td><code>/api/v1/auth/login</code></td><td>Email and password for a JWT</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/v1/assets</code></td><td>List all assets</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/v1/assets</code></td><td>List the caller's assets</td></tr>
 <tr><td><code>POST</code></td><td><code>/api/v1/assets</code></td><td>Upload asset (multipart)</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/v1/assets/{id}</code></td><td>Asset details</td></tr>
 <tr><td><code>DELETE</code></td><td><code>/api/v1/assets/{id}</code></td><td>Delete asset</td></tr>
@@ -262,41 +262,14 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><td><code>GET</code></td><td><code>/api/v1/analysis/xyz/{op}/{z}/{x}/{y}.png</code></td><td>Hillshade, slope or ndvi tiles</td></tr>
 <tr><td><code>GET</code></td><td><code>/metrics</code></td><td>Prometheus metrics</td></tr>
 </table>
-<p style="margin-top:12px;color:var(--muted);font-size:.85rem">The other <code>/api/v1/*</code> routes compute what they say: STAC search proxies an upstream catalog, COG windows read range requests, static maps render the DEM, kriging solves its system, geoprocessing runs real overlays, webhooks deliver HMAC-signed events, the scheduler runs the jobs it stores, and API keys authenticate read routes. What answers fixed example data instead is in the README "Not implemented" table.</p>
+<p style="margin-top:12px;color:var(--muted);font-size:.85rem">Other <code>/api/v1/*</code> routes that work on request input: STAC search proxies an upstream catalog, COG windows read range requests, static maps render the DEM, geostatistics interpolates posted samples, geoprocessing runs buffers, simplification and overlays, webhooks deliver HMAC-signed events, the scheduler runs the jobs it stores, and API keys authenticate read routes. Routes that answer fixed example data are listed under "What does not work" above and in the README.</p>
 </div>
 </section>
 
 <section>
 <div class="container">
-<h2>🤖 AI Agent — Natural Language Viewer Control</h2>
-<p style="font-size:1.1rem;color:var(--muted);margin-bottom:20px">Control the 3D viewer through conversation. No GIS expertise required.</p>
-<div class="grid" style="grid-template-columns:1fr 1fr">
-<div>
-<h3 style="color:var(--heading);margin-bottom:12px">Example Prompts</h3>
-<pre style="font-size:.9rem">"Fly to the Sydney Opera House"
-
-"Classify this point cloud by vegetation"
-
-"Show flood risk for warehouses near Manchester"
-
-"Compare elevation between these two sites"
-
-"Load the building survey and add markers"</pre>
-</div>
-<div>
-<h3 style="color:var(--heading);margin-bottom:12px">Viewer Commands</h3>
-<table>
-<tr><th>Command</th><th>Action</th></tr>
-<tr><td><code>fly_to</code></td><td>Animate camera to coordinates</td></tr>
-<tr><td><code>classify</code></td><td>Apply ASPRS classification colors</td></tr>
-<tr><td><code>add_geojson</code></td><td>Overlay GeoJSON layer</td></tr>
-<tr><td><code>load_tileset</code></td><td>Load 3D Tiles dataset</td></tr>
-<tr><td><code>add_marker</code></td><td>Place labeled pins</td></tr>
-<tr><td><code>screenshot</code></td><td>Capture current view</td></tr>
-</table>
-</div>
-</div>
-<p style="margin-top:16px;color:var(--muted)">Powered by <a href="https://github.com/GeoLang/sibyl">sibyl</a>, a Rust agent loop that calls an OpenAI-compatible LLM endpoint and keeps sessions in sqlite. It dispatches tool calls over HTTP to the GeoLang API, which runs 40 geospatial tools in-process (geocoding, isochrones, clustering, terrain profiles, environmental risk, routing). Sessions do not share memory, each one starts clean.</p>
+<h2>Chat Agent</h2>
+<p style="color:var(--muted)">The chat agent is not part of this server. <a href="https://github.com/GeoLang/sibyl">sibyl</a> runs the agent loop against an OpenAI-compatible LLM endpoint and keeps sessions in SQLite, the <a href="https://github.com/GeoLang/geolang">GeoLang API</a> runs the geospatial tools, and <a href="https://github.com/GeoLang/viewtopia">ViewTopia</a> is the viewer it drives. The chat panel in this repository's dashboard posts to an endpoint nothing serves, so it does not work.</p>
 </div>
 </section>
 
@@ -311,32 +284,17 @@ cd tiletopia && cargo build --release
 tiletopia tile --input scan.las --output ./tileset
 
 # Start server
-tiletopia serve --data-dir ./data --port 3000
+TILETOPIA_JWT_SECRET=$(openssl rand -hex 32) tiletopia serve --data-dir ./data --port 3000
 
 # Docker
-docker run -p 3000:3000 -v ./data:/data tiletopia serve --data-dir /data</pre>
-</div>
-</section>
-
-<section>
-<div class="container">
-<h2>GPU Acceleration</h2>
-<table>
-<tr><th>Platform</th><th>Backend</th><th>Notes</th></tr>
-<tr><td>macOS (Apple Silicon)</td><td>Metal via wgpu</td><td></td></tr>
-<tr><td>Linux/Windows (NVIDIA)</td><td>Vulkan via wgpu</td><td></td></tr>
-<tr><td>Linux/Windows (AMD/Intel)</td><td>Vulkan via wgpu</td><td></td></tr>
-</table>
-<p style="color:var(--muted);font-size:.85rem">wgpu picks the backend. There is no CUDA path and nothing here builds for the browser.</p>
-<pre># Build with GPU compute
-cargo build --release --features gpu</pre>
+docker run -p 3000:3000 -e TILETOPIA_JWT_SECRET=$(openssl rand -hex 32) -v ./data:/data ghcr.io/geolang/tiletopia</pre>
 </div>
 </section>
 
 <section style="background:#111827">
 <div class="container">
-<h2>🖥️ ViewTopia — Web Viewer</h2>
-<p style="color:var(--muted);margin-bottom:20px">The official frontend for GeoLang. 73 tool panels, Cesium and MapLibre renderers with a deck.gl overlay and a Leaflet map tab, an AI agent, and GIS tools.</p>
+<h2>ViewTopia Web Viewer</h2>
+<p style="color:var(--muted);margin-bottom:20px">The GeoLang web viewer, in its own repository. Cesium and MapLibre renderers with a deck.gl overlay and a Leaflet map tab, a chat agent, and GIS tool panels.</p>
 <div class="grid">
 <div class="card">
 <h3>Viewers</h3>
@@ -391,9 +349,8 @@ cargo build --release --features gpu</pre>
 
 <footer>
 <div class="container">
-<p>GeoLang is free software under the <a href="https://github.com/GeoLang/tiletopia/blob/master/LICENSE">AGPL-3.0 license</a>.</p>
-<p style="margin-top:8px">Self-hosted tile serving, with no hosting bill and no upload quota.</p>
-<p>&copy; 2026 Grok Image Compression Inc. Licensed under AGPL-3.0-or-later.</p>
+<p>TileTopia is free software under the <a href="https://github.com/GeoLang/tiletopia/blob/master/LICENSE">AGPL-3.0-or-later license</a>.</p>
+<p>&copy; 2026 Grok Image Compression Inc.</p>
 </div>
 </footer>
 

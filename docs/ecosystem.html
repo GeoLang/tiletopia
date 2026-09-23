@@ -73,28 +73,43 @@ h1 {
 <body>
 <div class="container">
   <h1>GeoLang Ecosystem</h1>
-  <p class="subtitle">A modular geospatial platform, AGPL-3.0. The 15 repositories below are Rust apart from viewtopia, which is TypeScript. The platform holds more than these, and its LLM tool API is Python.</p>
+  <p class="subtitle">A modular geospatial platform, AGPL-3.0. The 22 repositories below are Rust apart from viewtopia, which is TypeScript, and terravista, whose Android view is Kotlin. The platform holds more than these, and its LLM tool API is Python.</p>
 
   <h2 class="section-title">Platform</h2>
   <div class="grid">
     <div class="card">
       <h3><a href="https://github.com/GeoLang/tiletopia">tiletopia</a></h3>
-      <p>Geospatial tile server platform with routing, terrain, and point cloud services</p>
+      <p>Self-hosted 3D Tiles server for point clouds, meshes, IFC and terrain</p>
       <span class="badge">server</span>
     </div>
     <div class="card">
       <h3><a href="https://github.com/GeoLang/viewtopia">viewtopia</a></h3>
-      <p>Web-based map viewer with 2D/3D rendering, annotations, and measurement tools</p>
+      <p>Web viewer with a Cesium globe, MapLibre and Leaflet maps, and a chat agent that drives the map</p>
       <span class="badge">frontend</span>
     </div>
     <div class="card">
       <h3><a href="https://github.com/GeoLang/ptolemy">ptolemy</a></h3>
-      <p>Versioned geodatabase on PostGIS with branch, diff, and merge workflows</p>
+      <p>Versioned geodatabase on PostgreSQL and PostGIS with branches, diffs and merges</p>
       <span class="badge">server</span>
     </div>
     <div class="card">
       <h3><a href="https://github.com/GeoLang/fenestra">fenestra</a></h3>
-      <p>OGC services gateway with WMS, WFS, WMTS, and WCS</p>
+      <p>OGC services gateway with WMS, WFS, WMTS, WCS, OGC API Features and MVT tiles</p>
+      <span class="badge">server</span>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/GeoLang/sibyl">sibyl</a></h3>
+      <p>LLM agent loop service that calls an OpenAI-compatible endpoint and sends tool calls to an HTTP executor</p>
+      <span class="badge">server</span>
+    </div>
+    <div class="card">
+      <h3><a href="https://geolang.github.io/agora/">agora</a></h3>
+      <p>Live multiplayer session service that stores composition documents and sends each edit to everyone who has the document open</p>
+      <span class="badge">server</span>
+    </div>
+    <div class="card">
+      <h3><a href="https://geolang.github.io/collecta/">collecta</a></h3>
+      <p>Field data collection server and form library, with ODK Collect over OpenRosa and an offline command line client</p>
       <span class="badge">server</span>
     </div>
   </div>
@@ -103,13 +118,18 @@ h1 {
   <div class="grid">
     <div class="card">
       <h3><a href="https://github.com/GeoLang/itinera">itinera</a></h3>
-      <p>Routing engine with Dijkstra, isochrones, and map matching</p>
-      <span class="badge lib">library</span>
+      <p>Routing engine for OpenStreetMap road networks with isochrones and map matching over HTTP</p>
+      <span class="badge">server</span>
     </div>
     <div class="card">
       <h3><a href="https://github.com/GeoLang/geokode">geokode</a></h3>
-      <p>Geocoding engine with FST text index and R-tree spatial search</p>
-      <span class="badge lib">library</span>
+      <p>Self-hosted geocoding service</p>
+      <span class="badge">server</span>
+    </div>
+    <div class="card">
+      <h3><a href="https://geolang.github.io/interiora/">interiora</a></h3>
+      <p>Indoor mapping and navigation library and HTTP server</p>
+      <span class="badge">server</span>
     </div>
   </div>
 
@@ -117,18 +137,23 @@ h1 {
   <div class="grid">
     <div class="card">
       <h3><a href="https://github.com/GeoLang/terrano">terrano</a></h3>
-      <p>Terrain analysis — hillshade, slope, aspect, and contours</p>
+      <p>Raster algebra and terrain analysis engine</p>
       <span class="badge lib">library</span>
     </div>
     <div class="card">
       <h3><a href="https://github.com/GeoLang/nubis">nubis</a></h3>
-      <p>Point cloud processing, filtering, and classification</p>
+      <p>Point cloud processing engine</p>
       <span class="badge lib">library</span>
     </div>
     <div class="card">
       <h3><a href="https://github.com/GeoLang/panoptes">panoptes</a></h3>
-      <p>Imagery feature extraction with ONNX segmentation (no bundled weights), polygonization, and change detection</p>
+      <p>Library and CLI that segments aerial and satellite imagery into GeoJSON polygons</p>
       <span class="badge lib">library</span>
+    </div>
+    <div class="card">
+      <h3><a href="https://github.com/GeoLang/geoplumb">geoplumb</a></h3>
+      <p>Pull-based geospatial compute pipeline that computes only the requested window, with an XYZ tile server</p>
+      <span class="badge">server</span>
     </div>
   </div>
 
@@ -136,7 +161,7 @@ h1 {
   <div class="grid">
     <div class="card">
       <h3><a href="https://github.com/GeoLang/fluvius">fluvius</a></h3>
-      <p>Real-time stream processor for GPS tracks, IoT sensors, and vehicle telemetry</p>
+      <p>Stream processor for GPS tracks, sensor readings and vehicle telemetry</p>
       <span class="badge lib">library</span>
     </div>
   </div>
@@ -145,12 +170,12 @@ h1 {
   <div class="grid">
     <div class="card">
       <h3><a href="https://github.com/GeoLang/topoi">topoi</a></h3>
-      <p>Topological spatial relationships and operations</p>
+      <p>Computational geometry engine</p>
       <span class="badge lib">library</span>
     </div>
     <div class="card">
       <h3><a href="https://github.com/GeoLang/projicio">projicio</a></h3>
-      <p>Coordinate reference system transformations</p>
+      <p>Coordinate reference system and map projection engine</p>
       <span class="badge lib">library</span>
     </div>
   </div>
@@ -159,17 +184,27 @@ h1 {
   <div class="grid">
     <div class="card">
       <h3><a href="https://github.com/GeoLang/geodukt">geodukt</a></h3>
-      <p>Geospatial data pipeline and format conversion toolkit</p>
+      <p>Declarative ETL pipeline over GeoJSON, GeoPackage, Shapefile and CSV</p>
       <span class="badge lib">library</span>
     </div>
     <div class="card">
       <h3><a href="https://github.com/GeoLang/geogit">geogit</a></h3>
-      <p>Git-based versioned geospatial data store</p>
+      <p>Version control for geospatial data on top of Git</p>
       <span class="badge lib">library</span>
     </div>
     <div class="card">
       <h3><a href="https://github.com/GeoLang/jung">jung</a></h3>
-      <p>Geospatial data visualization and map styling</p>
+      <p>Symbology and cartographic rendering engine</p>
+      <span class="badge lib">library</span>
+    </div>
+    <div class="card">
+      <h3><a href="https://geolang.github.io/verne/">verne</a></h3>
+      <p>Reads KML, Esri file geodatabases and ArcGIS services, reports what GeoLang can hold exactly, and loads them into ptolemy</p>
+      <span class="badge lib">cli</span>
+    </div>
+    <div class="card">
+      <h3><a href="https://geolang.github.io/terravista/">terravista</a></h3>
+      <p>Android map SDK with a Rust core behind a Kotlin MapView</p>
       <span class="badge lib">library</span>
     </div>
   </div>
