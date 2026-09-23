@@ -65,6 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The dashboard works against a server with auth on (2026-09-23). It sent no
+  token, so the asset list, upload and annotation calls answered 401. A login
+  form in the sidebar stores the token from `POST /api/v1/auth/login`, and
+  every call to this server sends it as `Authorization: Bearer`, the
+  collaboration websocket as its subprotocol. Upload now posts the file as
+  multipart, the body the route reads, where it posted JSON with no file. The
+  chat panel is gone: it posted to `/agent/chat/stream`, which nothing serves.
 - A LAS with no GeoKey record is placed by the upload's `crs` field
   (2026-09-23). An upload carries no `.prj`, so such a scan was tiled in its
   own coordinates. The job queue and `tiletopia tile --crs` now take an EPSG

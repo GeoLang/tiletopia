@@ -9,7 +9,7 @@ import { StoryPlayer, fetchStories } from './stories.js';
 import { CollaborationPanel } from './collaboration.js';
 import { applyOpenData, loadOsmBuildings } from './open-data.js';
 import { applyClassificationStyle, clearClassificationStyle, createClassLegend, highlightClass } from './classification-viz.js';
-import { initAgentChat } from './agent-chat.js';
+import { apiFetch, storedToken, logIn, forgetToken, LOGGED_OUT_EVENT } from './api.js';
 
 // API base URL (proxied in dev, same-origin in production)
 const API = '/api/v1';
@@ -39,9 +39,6 @@ const loadedTilesets = new Map();
 
 // Apply zero-config open data sources (terrain, geocoder, etc.)
 applyOpenData(viewer).catch(e => console.warn('Open data setup:', e));
-
-// Initialize agent chat panel
-initAgentChat(viewer);
 
 // Wire up multi-renderer
 setCesiumViewer(viewer);
@@ -109,7 +106,7 @@ async function checkHealth() {
   const dot = document.querySelector('.status-dot');
   const text = document.getElementById('status-text');
   try {
-    const res = await fetch(`${API}/health`);
+    const res = await apiFetch(`${API}/health`);
     if (res.ok) {
       dot.classList.add('connected');
       const data = await res.json();
@@ -125,7 +122,7 @@ async function checkHealth() {
 async function loadAssets() {
   const list = document.getElementById('asset-list');
   try {
-    const res = await fetch(`${API}/assets`);
+    const res = await apiFetch(`${API}/assets`);
     const assets = await res.json();
     list.innerHTML = assets.map(a => `
       <div class="asset-item" data-id="${a.id}">
@@ -174,21 +171,45 @@ document.getElementById('upload-btn').addEventListener('click', async () => {
   const file = input.files[0];
   if (!file) return;
 
-  const ext = file.name.split('.').pop().toLowerCase();
-  const assetType = ['las', 'laz', 'e57', 'ply'].includes(ext) ? 'pointcloud'
-    : ['tif', 'tiff', 'hgt'].includes(ext) ? 'terrain'
-    : 'model';
-
-  const res = await fetch(`${API}/assets`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: file.name, asset_type: assetType }),
-  });
+  const form = new FormData();
+  form.append('file', file);
+  const res = await apiFetch(`${API}/assets`, { method: 'POST', body: form });
 
   if (res.ok) {
     await loadAssets();
   }
 });
+
+function showLoginState() {
+  const loggedIn = Boolean(storedToken());
+  document.getElementById('login-form').hidden = loggedIn;
+  document.getElementById('logged-in').hidden = !loggedIn;
+}
+
+document.getElementById('login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const error = document.getElementById('login-error');
+  error.textContent = '';
+  try {
+    await logIn(
+      document.getElementById('login-email').value,
+      document.getElementById('login-password').value,
+    );
+  } catch (err) {
+    error.textContent = err.message;
+    return;
+  }
+  showLoginState();
+  loadAssets();
+});
+
+document.getElementById('logout-btn').addEventListener('click', () => {
+  forgetToken();
+  showLoginState();
+  loadAssets();
+});
+
+window.addEventListener(LOGGED_OUT_EVENT, showLoginState);
 
 // ─── Panel Navigation ────────────────────────────────────────────────────────
 
@@ -232,7 +253,7 @@ async function loadMeasurement() {
   const panel = document.getElementById('panel-measure');
   panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading...</p></div>';
   try {
-    const res = await fetch(`${API}/demo/measurement`);
+    const res = await apiFetch(`${API}/demo/measurement`);
     const d = await res.json();
     panel.innerHTML = `<div class="feature-panel">
       <h2>📏 Measurement Tools</h2>
@@ -262,7 +283,7 @@ async function loadAnomaly() {
   const panel = document.getElementById('panel-anomaly');
   panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading...</p></div>';
   try {
-    const res = await fetch(`${API}/demo/anomaly`);
+    const res = await apiFetch(`${API}/demo/anomaly`);
     const d = await res.json();
     panel.innerHTML = `<div class="feature-panel">
       <h2>⚠️ Anomaly Detection</h2>
@@ -303,7 +324,7 @@ async function loadClash() {
   const panel = document.getElementById('panel-clash');
   panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading...</p></div>';
   try {
-    const res = await fetch(`${API}/demo/clash`);
+    const res = await apiFetch(`${API}/demo/clash`);
     const d = await res.json();
     panel.innerHTML = `<div class="feature-panel">
       <h2>💥 Clash Analytics</h2>
@@ -338,8 +359,8 @@ async function loadAdmin() {
   panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading...</p></div>';
   try {
     const [auditRes, rbacRes] = await Promise.all([
-      fetch(`${API}/audit`),
-      fetch(`${API}/demo/rbac`),
+      apiFetch(`${API}/audit`),
+      apiFetch(`${API}/demo/rbac`),
     ]);
     // the real trail is admin-only, so a viewer or an unauthenticated page gets
     // an empty table rather than a broken panel
@@ -380,11 +401,11 @@ async function loadStories() {
   panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading...</p></div>';
   try {
     let stories;
-    const apiRes = await fetch(`${API}/stories`);
+    const apiRes = await apiFetch(`${API}/stories`);
     if (apiRes.ok) {
       stories = await apiRes.json();
     } else {
-      const demoRes = await fetch(`${API}/demo/stories`);
+      const demoRes = await apiFetch(`${API}/demo/stories`);
       stories = await demoRes.json();
     }
     panel.innerHTML = `<div class="feature-panel">
@@ -422,7 +443,7 @@ async function loadCatalog() {
   const panel = document.getElementById('panel-catalog');
   panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading...</p></div>';
   try {
-    const res = await fetch(`${API}/catalog`);
+    const res = await apiFetch(`${API}/catalog`);
     const datasets = await res.json();
     const renderers = getRendererInfo();
 
@@ -484,8 +505,8 @@ async function loadTerrain() {
   panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading terrain data...</p></div>';
   try {
     const [terrainRes, elevRes] = await Promise.all([
-      fetch(`${API}/terrain-analysis/operations`),
-      fetch(`${API}/elevation/point?lat=37.7749&lon=-122.4194`),
+      apiFetch(`${API}/terrain-analysis/operations`),
+      apiFetch(`${API}/elevation/point?lat=37.7749&lon=-122.4194`),
     ]);
     const ops = await terrainRes.json();
     // 404 when no DEM is staged for the sample point, and the body is text
@@ -528,7 +549,7 @@ async function loadEntities() {
   const panel = document.getElementById('panel-entities');
   panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading entity links...</p></div>';
   try {
-    const res = await fetch(`${API}/entity-links`);
+    const res = await apiFetch(`${API}/entity-links`);
     const data = await res.json();
     const links = data.links || [];
     panel.innerHTML = `<div class="feature-panel">
@@ -658,6 +679,7 @@ function formatBytes(bytes) {
 }
 
 // Init
+showLoginState();
 checkHealth();
 loadAssets();
 setInterval(checkHealth, 10000);

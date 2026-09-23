@@ -5,6 +5,7 @@
  * shows annotations, and provides playback controls.
  */
 import * as Cesium from 'cesium';
+import { apiFetch } from './api.js';
 
 const API = '/api/v1';
 
@@ -224,14 +225,14 @@ export class StoryPlayer {
 
 /** Fetch stories from the API. */
 export async function fetchStories() {
-  const res = await fetch(`${API}/stories`);
+  const res = await apiFetch(`${API}/stories`);
   if (!res.ok) return [];
   return res.json();
 }
 
 /** Create a new story. */
 export async function createStory(data) {
-  const res = await fetch(`${API}/stories`, {
+  const res = await apiFetch(`${API}/stories`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),

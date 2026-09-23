@@ -1,4 +1,5 @@
 import * as Cesium from 'cesium';
+import { apiFetch } from './api.js';
 
 const API = '/api/v1';
 
@@ -72,7 +73,7 @@ export class AnnotationTool {
   async fetchAnnotations() {
     if (!this.assetId) return;
     try {
-      const res = await fetch(`${API}/assets/${this.assetId}/annotations`);
+      const res = await apiFetch(`${API}/assets/${this.assetId}/annotations`);
       if (!res.ok) return;
       const annotations = await res.json();
       this.loadAnnotations(annotations);
@@ -90,7 +91,7 @@ export class AnnotationTool {
     }
     if (this.assetId) {
       try {
-        await fetch(`${API}/assets/${this.assetId}/annotations/${id}`, { method: 'DELETE' });
+        await apiFetch(`${API}/assets/${this.assetId}/annotations/${id}`, { method: 'DELETE' });
       } catch (e) {
         console.error('Failed to delete annotation:', e);
       }
@@ -170,7 +171,7 @@ export class AnnotationTool {
   async _saveToServer(id, text, lon, lat, height) {
     if (!this.assetId) return;
     try {
-      await fetch(`${API}/assets/${this.assetId}/annotations`, {
+      await apiFetch(`${API}/assets/${this.assetId}/annotations`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, text, longitude: lon, latitude: lat, height }),

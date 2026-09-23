@@ -4,6 +4,7 @@
  * Applies per-point styling to 3D Tiles based on classification attribute.
  */
 import * as Cesium from 'cesium';
+import { apiFetch } from './api.js';
 
 /** ASPRS class colors (matching the server-side palette). */
 const CLASS_COLORS = {
@@ -113,7 +114,7 @@ export async function requestClassification(assetId, modelId, apiBase = '/api/v1
   const body = { asset_id: assetId };
   if (modelId) body.model_id = modelId;
 
-  const res = await fetch(`${apiBase}/classify`, {
+  const res = await apiFetch(`${apiBase}/classify`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

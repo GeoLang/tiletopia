@@ -2,6 +2,9 @@
  * Collaboration panel — real-time presence, cursor sharing, and chat over WebSocket.
  */
 import * as Cesium from 'cesium';
+import { storedToken } from './api.js';
+
+const BEARER_SUBPROTOCOL = 'bearer';
 
 export class CollaborationPanel {
   constructor(viewer) {
@@ -24,7 +27,8 @@ export class CollaborationPanel {
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${proto}//${location.host}/api/v1/realtime/${assetId}`;
-    this.ws = new WebSocket(url);
+    const token = storedToken();
+    this.ws = new WebSocket(url, token ? [BEARER_SUBPROTOCOL, token] : []);
 
     this.ws.addEventListener('open', () => {
       this._send({

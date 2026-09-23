@@ -5,6 +5,7 @@
  * without any API keys or Ion tokens.
  */
 import * as Cesium from 'cesium';
+import { apiFetch } from './api.js';
 
 // ─── Terrain ─────────────────────────────────────────────────────────────────
 
@@ -17,7 +18,7 @@ import * as Cesium from 'cesium';
  */
 export async function createOpenTerrain(apiBase = '/api/v1') {
   try {
-    const res = await fetch(`${apiBase}/terrain/layer.json`, { signal: AbortSignal.timeout(2000) });
+    const res = await apiFetch(`${apiBase}/terrain/layer.json`, { signal: AbortSignal.timeout(2000) });
     if (res.ok) {
       return await Cesium.CesiumTerrainProvider.fromUrl(`${apiBase}/terrain`);
     }

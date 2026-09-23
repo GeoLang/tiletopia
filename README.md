@@ -243,7 +243,7 @@ The globe needs no Cesium Ion token and no API key:
 | Terrain | this server's `/api/v1/terrain/`, or a flat ellipsoid when it does not answer |
 | Photorealistic 3D | Google 3D Tiles, when `VITE_GOOGLE_3D_TILES_KEY` is set |
 
-The dashboard sends no token. Against a server with auth on, its asset list, upload and annotation calls answer 401, so run the server with `TILETOPIA_AUTH_DISABLED=true` for local dashboard use. Its chat panel posts to `/agent/chat/stream`, which nothing serves, so the panel does not work.
+Log in from the sidebar with an account made through `POST /api/v1/auth/signup`. The dashboard keeps the token in `localStorage` and sends it as `Authorization: Bearer` on every call to this server, and as the websocket subprotocol for collaboration. Uploading needs the editor role, which `tiletopia set-role` grants.
 
 ---
 

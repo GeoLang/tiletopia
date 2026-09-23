@@ -23,6 +23,17 @@
       <button class="nav-btn" data-view="terrain">⛰️ Terrain</button>
       <button class="nav-btn" data-view="entities">🔗 Entity Links</button>
     </nav>
+    <form id="login-form">
+      <h3>Log in</h3>
+      <input type="email" id="login-email" placeholder="Email" required>
+      <input type="password" id="login-password" placeholder="Password" required>
+      <button type="submit">Log in</button>
+      <p id="login-error"></p>
+    </form>
+    <div id="logged-in" hidden>
+      <span>Logged in</span>
+      <button id="logout-btn">Log out</button>
+    </div>
     <div id="asset-list"></div>
     <div id="upload-section">
       <h3>Upload</h3>
@@ -34,20 +45,6 @@
       <span id="status-text">No server</span>
     </div>
   </aside>
-  <div id="chat-panel">
-    <div id="chat-header">
-      <span>🤖 GeoLang Agent</span>
-      <button id="chat-toggle" title="Toggle chat">◀</button>
-    </div>
-    <div id="chat-messages"></div>
-    <div id="chat-input-area">
-      <textarea id="chat-input" placeholder="Ask the agent to analyze data, fly to locations, show layers..." rows="2"></textarea>
-      <button id="chat-send">Send</button>
-    </div>
-    <div id="chat-status">
-      <span id="agent-status">Ready</span>
-    </div>
-  </div>
   <main id="main-content">
     <div id="cesium-container" class="panel active"></div>
     <div id="panel-catalog" class="panel"></div>
