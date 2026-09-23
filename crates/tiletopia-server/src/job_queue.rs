@@ -206,7 +206,7 @@ fn tile(
     external_tiler_jar: Option<&Path>,
 ) -> Result<u64, String> {
     match asset_type {
-        AssetType::PointCloud => tile_point_cloud(input_path, asset_dir),
+        AssetType::PointCloud => tile_point_cloud(input_path, asset_dir, placement.crs.as_deref()),
         AssetType::Model | AssetType::Vector => {
             let extension = input_path
                 .extension()
@@ -228,8 +228,20 @@ fn tile(
     }
 }
 
-fn tile_point_cloud(input_path: &Path, asset_dir: &Path) -> Result<u64, String> {
-    let points = tiletopia_ingest::read_point_cloud_ecef(input_path).map_err(|e| e.to_string())?;
+fn tile_point_cloud(
+    input_path: &Path,
+    asset_dir: &Path,
+    upload_crs: Option<&str>,
+) -> Result<u64, String> {
+    let fallback_source_epsg = upload_crs
+        .map(|crs| {
+            tiletopia_ingest::crs_detect::parse_epsg_code(crs).ok_or_else(|| {
+                format!("crs {crs}: point clouds take an EPSG code, such as EPSG:32632")
+            })
+        })
+        .transpose()?;
+    let points = tiletopia_ingest::read_point_cloud_ecef(input_path, fallback_source_epsg)
+        .map_err(|e| e.to_string())?;
     let octree_points: Vec<tiletopia_core::octree::OctreePoint> = points
         .into_iter()
         .map(|p| tiletopia_core::octree::OctreePoint {
@@ -531,6 +543,8 @@ mod tests {
     }
 
     const UTM_32_NORTH_EPSG: u16 = 32632;
+    const UTM_32_NORTH_UPLOAD_CRS: &str = "EPSG:32632";
+    const UTM_33_NORTH_UPLOAD_CRS: &str = "EPSG:32633";
     const LAS_GEO_KEY_DIRECTORY_RECORD_ID: u16 = 34735;
     const PROJECTED_CRS_GEO_KEY: u16 = 3072;
     // UTM 32N (500000, 0) sits exactly on 9 degrees east at the equator
@@ -587,17 +601,17 @@ mod tests {
         writer.close().unwrap();
     }
 
-    fn tile_fixture(dir: &Path, epsg: Option<u16>) -> PathBuf {
+    fn tile_fixture(dir: &Path, epsg: Option<u16>, upload_crs: Option<&str>) -> PathBuf {
         let input = dir.join(FIXTURE_FILE_NAME);
         write_fixture_las(&input, epsg);
         let asset_dir = dir.join("asset");
-        tile_point_cloud(&input, &asset_dir).unwrap();
+        tile_point_cloud(&input, &asset_dir, upload_crs).unwrap();
         asset_dir
     }
 
-    fn tile_fixture_root_box_center(epsg: Option<u16>) -> [f64; 3] {
+    fn tile_fixture_root_box_center(epsg: Option<u16>, upload_crs: Option<&str>) -> [f64; 3] {
         let dir = tempfile::tempdir().unwrap();
-        let asset_dir = tile_fixture(dir.path(), epsg);
+        let asset_dir = tile_fixture(dir.path(), epsg, upload_crs);
 
         let json = std::fs::read_to_string(asset_dir.join("tileset.json")).unwrap();
         let tileset: tiletopia_core::Tileset = serde_json::from_str(&json).unwrap();
@@ -607,9 +621,7 @@ mod tests {
         [r#box[0], r#box[1], r#box[2]]
     }
 
-    #[test]
-    fn projected_point_cloud_is_tiled_at_its_earth_location() {
-        let center = tile_fixture_root_box_center(Some(UTM_32_NORTH_EPSG));
+    fn assert_at_fixture_earth_location(center: [f64; 3]) {
         let expected = tiletopia_core::spatial::geodetic_to_ecef(
             0.0,
             FIXTURE_ORIGIN_LONGITUDE.to_radians(),
@@ -624,9 +636,42 @@ mod tests {
     }
 
     #[test]
+    fn projected_point_cloud_is_tiled_at_its_earth_location() {
+        assert_at_fixture_earth_location(tile_fixture_root_box_center(
+            Some(UTM_32_NORTH_EPSG),
+            None,
+        ));
+    }
+
+    #[test]
+    fn point_cloud_without_a_geo_key_is_placed_by_the_upload_crs() {
+        assert_at_fixture_earth_location(tile_fixture_root_box_center(
+            None,
+            Some(UTM_32_NORTH_UPLOAD_CRS),
+        ));
+    }
+
+    #[test]
+    fn point_cloud_geo_key_wins_over_the_upload_crs() {
+        assert_at_fixture_earth_location(tile_fixture_root_box_center(
+            Some(UTM_32_NORTH_EPSG),
+            Some(UTM_33_NORTH_UPLOAD_CRS),
+        ));
+    }
+
+    #[test]
+    fn point_cloud_upload_crs_that_is_not_an_epsg_code_fails_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join(FIXTURE_FILE_NAME);
+        write_fixture_las(&input, None);
+        let error = tile_point_cloud(&input, &dir.path().join("asset"), Some("utm32")).unwrap_err();
+        assert!(error.contains("utm32"), "{error}");
+    }
+
+    #[test]
     fn point_cloud_tile_positions_plus_rtc_center_are_earth_positions() {
         let dir = tempfile::tempdir().unwrap();
-        let asset_dir = tile_fixture(dir.path(), Some(UTM_32_NORTH_EPSG));
+        let asset_dir = tile_fixture(dir.path(), Some(UTM_32_NORTH_EPSG), None);
         let tile = std::fs::read(asset_dir.join("tiles/root.pnts")).unwrap();
 
         let json_start = PNTS_HEADER_BYTES;
@@ -646,7 +691,8 @@ mod tests {
         let positions = &tile[positions_start..positions_start + point_count * PNTS_POSITION_BYTES];
 
         let earth_positions =
-            tiletopia_ingest::read_point_cloud_ecef(&dir.path().join(FIXTURE_FILE_NAME)).unwrap();
+            tiletopia_ingest::read_point_cloud_ecef(&dir.path().join(FIXTURE_FILE_NAME), None)
+                .unwrap();
         assert_eq!(point_count, earth_positions.len());
         let offsets: Vec<f64> = positions
             .as_chunks::<4>()
@@ -678,7 +724,7 @@ mod tests {
 
     #[test]
     fn point_cloud_without_a_crs_is_tiled_in_its_own_coordinates() {
-        let center = tile_fixture_root_box_center(None);
+        let center = tile_fixture_root_box_center(None, None);
         assert!(
             (center[0] - FIXTURE_ORIGIN_EASTING).abs() < FIXTURE_CENTER_TOLERANCE_METRES,
             "root box center {center:?}"

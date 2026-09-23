@@ -42,6 +42,17 @@ impl DetectedCrs {
     }
 }
 
+const EPSG_PREFIX: &str = "EPSG:";
+
+pub fn parse_epsg_code(text: &str) -> Option<u32> {
+    let text = text.trim();
+    let code = match text.get(..EPSG_PREFIX.len()) {
+        Some(prefix) if prefix.eq_ignore_ascii_case(EPSG_PREFIX) => &text[EPSG_PREFIX.len()..],
+        _ => text,
+    };
+    code.parse().ok()
+}
+
 /// Classify an EPSG code into a DetectedCrs variant.
 fn classify_epsg(code: u32) -> DetectedCrs {
     match code {
@@ -291,6 +302,7 @@ pub fn reproject_to_ecef(points: &mut [[f64; 3]], source_epsg: u32) -> Result<()
         })
         .collect();
     // the source z passes through unchanged as the ellipsoidal height
+    // TODO: orthometric heights are off by the geoid undulation, no geoid grid ships to correct them
     let geodetic = Transformer::new(CrsDef::Epsg(source_epsg), CrsDef::Epsg(WGS84_GEODETIC_EPSG))
         .transform_batch(&coords)?;
     let ecef = Transformer::new(
@@ -310,6 +322,14 @@ pub fn reproject_to_ecef(points: &mut [[f64; 3]], source_epsg: u32) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_epsg_code_takes_a_bare_or_prefixed_code() {
+        assert_eq!(parse_epsg_code("EPSG:32632"), Some(32632));
+        assert_eq!(parse_epsg_code("epsg:32632"), Some(32632));
+        assert_eq!(parse_epsg_code(" 32632 "), Some(32632));
+        assert_eq!(parse_epsg_code("utm32"), None);
+    }
 
     #[test]
     fn classify_wgs84() {

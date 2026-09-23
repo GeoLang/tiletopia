@@ -205,9 +205,15 @@ pub fn read_point_cloud_wgs84(path: &std::path::Path) -> Result<Vec<Point3D>, In
     Ok(points)
 }
 
-pub fn read_point_cloud_ecef(path: &std::path::Path) -> Result<Vec<Point3D>, IngestError> {
+pub fn read_point_cloud_ecef(
+    path: &std::path::Path,
+    fallback_source_epsg: Option<u32>,
+) -> Result<Vec<Point3D>, IngestError> {
     let mut points = read_point_cloud(path)?;
-    let Some(source_epsg) = crs_detect::detect_crs(path).to_epsg() else {
+    let Some(source_epsg) = crs_detect::detect_crs(path)
+        .to_epsg()
+        .or(fallback_source_epsg)
+    else {
         tracing::warn!(
             "{}: no coordinate reference system found, tiling its coordinates unchanged",
             path.display()

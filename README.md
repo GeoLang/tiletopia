@@ -20,7 +20,7 @@ TileTopia tiles point clouds, meshes, IFC and vector files into OGC 3D Tiles 1.1
 
 The job queue tiles point clouds (LAS, LAZ, E57, PLY) and meshes (glTF, GLB, OBJ, FBX, CityGML, IFC) with the native tiler, whatever `TILETOPIA_MAGO_JAR` is set to. The readers carry UVs, diffuse textures and diffuse colours through to the tile GLBs, and a tile holding part of a textured mesh carries the crop of the texture its triangles reach. A mesh with a texture the readers cannot find or decode tiles untextured.
 
-A point cloud is placed by the CRS in its LAS GeoKey record, and `tiletopia tile` also reads a `.prj` file beside the input. Heights are taken as ellipsoidal. A point cloud with no CRS is tiled in its own coordinates, with a warning naming the file. The upload's `crs` field is not used for point clouds.
+A point cloud is placed by the CRS in its LAS GeoKey record, and `tiletopia tile` also reads a `.prj` file beside the input. When the file carries neither, the upload's `crs` field or `tiletopia tile --crs` names the source CRS as an EPSG code, such as `EPSG:32632` or `32632`. Heights are taken as ellipsoidal. A point cloud with no CRS from any of these is tiled in its own coordinates, with a warning naming the file.
 
 A mesh is placed by the upload's `longitude` and `latitude`, and one without them fails naming them. IFC falls back to the `IfcSite` reference coordinates, and an IFC with neither fails. `crs` is ignored on the native path.
 
@@ -28,7 +28,7 @@ Vector files (GeoJSON, GeoPackage, KML) go to [mago-3d-tiler](https://github.com
 
 DAE uploads are accepted and their jobs fail with an error naming the format, since neither tiler takes it. An upload whose extension is not on the list answers 400. DEM rasters (tif, tiff, hgt, dt0, dt1, dt2) and images (jpg, jpeg, png, jp2) are stored as assets and never tiled: a tiling request for one answers that terrain and imagery assets are not tiled to 3D Tiles.
 
-A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields beside the file. One of longitude and latitude without the other is refused. The tiles land at `/api/v1/assets/{id}/tileset.json`, with content under `/api/v1/assets/{id}/tiles/{file}` from the native tiler and `/api/v1/assets/{id}/data/{file}` from mago.
+A mesh or vector upload takes optional `longitude`, `latitude` and `crs` fields beside the file, and a point cloud upload takes `crs`. One of longitude and latitude without the other is refused. The tiles land at `/api/v1/assets/{id}/tileset.json`, with content under `/api/v1/assets/{id}/tiles/{file}` from the native tiler and `/api/v1/assets/{id}/data/{file}` from mago.
 
 ### Tile server
 

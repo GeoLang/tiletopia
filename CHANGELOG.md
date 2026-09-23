@@ -65,6 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A LAS with no GeoKey record is placed by the upload's `crs` field
+  (2026-09-23). An upload carries no `.prj`, so such a scan was tiled in its
+  own coordinates. The job queue and `tiletopia tile --crs` now take an EPSG
+  code as the source CRS when the file names none, and a `crs` that is not an
+  EPSG code fails the job naming it.
 - Point cloud `.pnts` tiles carry `RTC_CENTER` (2026-09-23). Positions were
   stored relative to each tile's first point with no centre to add back, so
   every tile rendered near the centre of the earth. The feature table binary

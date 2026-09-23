@@ -28,6 +28,10 @@ enum Commands {
         /// Maximum geometric error for LOD
         #[arg(long, default_value = "1.0")]
         max_error: f64,
+
+        /// Source CRS as an EPSG code, used when the file carries none
+        #[arg(long)]
+        crs: Option<String>,
     },
 
     /// Start the tile server
@@ -103,12 +107,19 @@ async fn main() -> anyhow::Result<()> {
             input,
             output,
             max_error,
+            crs,
         } => {
             tracing::info!("Tiling {} → {}", input.display(), output.display());
             tracing::info!("Max geometric error: {}", max_error);
 
             // Read source data
-            let points = tiletopia_ingest::read_point_cloud_ecef(&input)?;
+            let fallback_source_epsg = crs
+                .map(|crs| {
+                    tiletopia_ingest::crs_detect::parse_epsg_code(&crs)
+                        .ok_or_else(|| anyhow::anyhow!("--crs {crs}: not an EPSG code"))
+                })
+                .transpose()?;
+            let points = tiletopia_ingest::read_point_cloud_ecef(&input, fallback_source_epsg)?;
             tracing::info!("Read {} points", points.len());
 
             // Convert ingest points to octree points
