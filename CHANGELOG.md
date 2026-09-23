@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Point cloud `.pnts` tiles carry `RTC_CENTER` (2026-09-23). Positions were
+  stored relative to each tile's first point with no centre to add back, so
+  every tile rendered near the centre of the earth. The feature table binary
+  now also starts and ends on 8 bytes from the start of the tile, as the
+  spec asks.
 - Point clouds in a projected CRS, such as UTM, are tiled where they are on
   the globe (2026-09-23). The job queue and `tiletopia tile` read the CRS from
   the LAS GeoKey record or a `.prj` beside the file and convert to ECEF, the

@@ -21,26 +21,29 @@ pub fn write_pnts<W: Write>(points: &[OctreePoint], writer: &mut W) -> io::Resul
     }
 
     let num_points = points.len() as u32;
+    let origin = points[0].position;
 
-    // Feature table JSON
-    let feature_table_json = format!(
-        "{{\"POINTS_LENGTH\":{num_points},\"POSITION\":{{\"byteOffset\":0}},\"RGB\":{{\"byteOffset\":{}}}}}\n",
-        num_points as usize * 12 // 3 * f32
-    );
+    let feature_table_json = serde_json::json!({
+        "POINTS_LENGTH": num_points,
+        "RTC_CENTER": origin,
+        "POSITION": { "byteOffset": 0 },
+        "RGB": { "byteOffset": num_points as usize * 12 }, // 3 * f32
+    })
+    .to_string();
 
-    // Pad JSON to 8-byte alignment
+    let header_size = 28u32; // magic(4) + version(4) + byteLength(4) + ftJSON(4) + ftBinary(4) + btJSON(4) + btBinary(4)
+
+    // the spec wants the binary body to start and end on 8 bytes from the start of the tile
     let json_bytes = feature_table_json.as_bytes();
-    let json_padding = (8 - (json_bytes.len() % 8)) % 8;
+    let json_padding = padding_to_8(header_size as usize + json_bytes.len());
     let padded_json_len = json_bytes.len() + json_padding;
 
-    // Feature table binary: positions (3×f32) + colors (3×u8, padded to 4-byte)
+    // Feature table binary: positions (3×f32) + colors (3×u8)
     let positions_size = num_points as usize * 12; // 3 × f32
     let colors_size = num_points as usize * 3; // 3 × u8
-    let colors_padding = (4 - (colors_size % 4)) % 4;
+    let colors_padding = padding_to_8(positions_size + colors_size);
     let binary_size = positions_size + colors_size + colors_padding;
 
-    // Total size
-    let header_size = 28u32; // magic(4) + version(4) + byteLength(4) + ftJSON(4) + ftBinary(4) + btJSON(4) + btBinary(4)
     let total_size = header_size + padded_json_len as u32 + binary_size as u32;
 
     // Write header
@@ -58,8 +61,7 @@ pub fn write_pnts<W: Write>(points: &[OctreePoint], writer: &mut W) -> io::Resul
         writer.write_all(b" ")?;
     }
 
-    // Write positions as f32 (relative to first point for precision)
-    let origin = points[0].position;
+    // Write positions as f32 relative to RTC_CENTER for precision
     for p in points {
         let x = (p.position[0] - origin[0]) as f32;
         let y = (p.position[1] - origin[1]) as f32;
@@ -78,6 +80,10 @@ pub fn write_pnts<W: Write>(points: &[OctreePoint], writer: &mut W) -> io::Resul
     }
 
     Ok(())
+}
+
+fn padding_to_8(length: usize) -> usize {
+    (8 - length % 8) % 8
 }
 
 /// Write a tileset.json and all .pnts tiles from an octree to a directory.

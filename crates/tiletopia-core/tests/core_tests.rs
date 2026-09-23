@@ -154,6 +154,10 @@ mod tests {
         // Check total size matches buffer
         let total_size = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
         assert_eq!(total_size as usize, buf.len());
+        // the feature table binary starts and ends on an 8-byte boundary
+        let json_length = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]) as usize;
+        assert_eq!((28 + json_length) % 8, 0);
+        assert_eq!(buf.len() % 8, 0);
     }
 
     #[test]

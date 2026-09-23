@@ -538,6 +538,11 @@ mod tests {
     const FIXTURE_ORIGIN_LONGITUDE: f64 = 9.0;
     // every fixture point is within 11.4 m of the origin: 5 m east or west, 10 m north, 2 m up
     const FIXTURE_CENTER_TOLERANCE_METRES: f64 = 12.0;
+    const FIXTURE_FILE_NAME: &str = "scan.las";
+    const PNTS_HEADER_BYTES: usize = 28;
+    const PNTS_FEATURE_TABLE_JSON_LENGTH_OFFSET: usize = 12;
+    const PNTS_POSITION_BYTES: usize = 12;
+    const STORED_POSITION_TOLERANCE_METRES: f64 = 0.01;
 
     fn geo_key_directory(epsg: u16) -> Vec<u8> {
         [1, 1, 0, 1, PROJECTED_CRS_GEO_KEY, 0, 1, epsg]
@@ -582,12 +587,17 @@ mod tests {
         writer.close().unwrap();
     }
 
+    fn tile_fixture(dir: &Path, epsg: Option<u16>) -> PathBuf {
+        let input = dir.join(FIXTURE_FILE_NAME);
+        write_fixture_las(&input, epsg);
+        let asset_dir = dir.join("asset");
+        tile_point_cloud(&input, &asset_dir).unwrap();
+        asset_dir
+    }
+
     fn tile_fixture_root_box_center(epsg: Option<u16>) -> [f64; 3] {
         let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("scan.las");
-        write_fixture_las(&input, epsg);
-        let asset_dir = dir.path().join("asset");
-        tile_point_cloud(&input, &asset_dir).unwrap();
+        let asset_dir = tile_fixture(dir.path(), epsg);
 
         let json = std::fs::read_to_string(asset_dir.join("tileset.json")).unwrap();
         let tileset: tiletopia_core::Tileset = serde_json::from_str(&json).unwrap();
@@ -609,6 +619,59 @@ mod tests {
             assert!(
                 (center[axis] - expected[axis]).abs() < FIXTURE_CENTER_TOLERANCE_METRES,
                 "root box center {center:?}, expected near {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn point_cloud_tile_positions_plus_rtc_center_are_earth_positions() {
+        let dir = tempfile::tempdir().unwrap();
+        let asset_dir = tile_fixture(dir.path(), Some(UTM_32_NORTH_EPSG));
+        let tile = std::fs::read(asset_dir.join("tiles/root.pnts")).unwrap();
+
+        let json_start = PNTS_HEADER_BYTES;
+        let json_length = u32::from_le_bytes(
+            tile[PNTS_FEATURE_TABLE_JSON_LENGTH_OFFSET..PNTS_FEATURE_TABLE_JSON_LENGTH_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let feature_table: serde_json::Value =
+            serde_json::from_slice(&tile[json_start..json_start + json_length]).unwrap();
+        let rtc_center: [f64; 3] = serde_json::from_value(feature_table["RTC_CENTER"].clone())
+            .expect("feature table has an RTC_CENTER");
+        let point_count = feature_table["POINTS_LENGTH"].as_u64().unwrap() as usize;
+        let positions_start = json_start
+            + json_length
+            + feature_table["POSITION"]["byteOffset"].as_u64().unwrap() as usize;
+        let positions = &tile[positions_start..positions_start + point_count * PNTS_POSITION_BYTES];
+
+        let earth_positions =
+            tiletopia_ingest::read_point_cloud_ecef(&dir.path().join(FIXTURE_FILE_NAME)).unwrap();
+        assert_eq!(point_count, earth_positions.len());
+        let offsets: Vec<f64> = positions
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f64::from(f32::from_le_bytes(*bytes)))
+            .collect();
+        for offset in offsets.as_chunks::<3>().0 {
+            let absolute = [
+                rtc_center[0] + offset[0],
+                rtc_center[1] + offset[1],
+                rtc_center[2] + offset[2],
+            ];
+            let nearest = earth_positions
+                .iter()
+                .map(|p| {
+                    ((p.x - absolute[0]).powi(2)
+                        + (p.y - absolute[1]).powi(2)
+                        + (p.z - absolute[2]).powi(2))
+                    .sqrt()
+                })
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                nearest < STORED_POSITION_TOLERANCE_METRES,
+                "{absolute:?} is {nearest} m from the nearest fixture point"
             );
         }
     }
