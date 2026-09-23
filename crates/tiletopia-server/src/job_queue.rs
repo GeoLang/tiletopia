@@ -229,7 +229,7 @@ fn tile(
 }
 
 fn tile_point_cloud(input_path: &Path, asset_dir: &Path) -> Result<u64, String> {
-    let points = tiletopia_ingest::read_point_cloud(input_path).map_err(|e| e.to_string())?;
+    let points = tiletopia_ingest::read_point_cloud_ecef(input_path).map_err(|e| e.to_string())?;
     let octree_points: Vec<tiletopia_core::octree::OctreePoint> = points
         .into_iter()
         .map(|p| tiletopia_core::octree::OctreePoint {
@@ -528,5 +528,97 @@ mod tests {
             assert!(error.contains("native tiler"), "{error}");
             assert!(error.contains("external one"), "{error}");
         }
+    }
+
+    const UTM_32_NORTH_EPSG: u16 = 32632;
+    const LAS_GEO_KEY_DIRECTORY_RECORD_ID: u16 = 34735;
+    const PROJECTED_CRS_GEO_KEY: u16 = 3072;
+    // UTM 32N (500000, 0) sits exactly on 9 degrees east at the equator
+    const FIXTURE_ORIGIN_EASTING: f64 = 500_000.0;
+    const FIXTURE_ORIGIN_LONGITUDE: f64 = 9.0;
+    // every fixture point is within 11.4 m of the origin: 5 m east or west, 10 m north, 2 m up
+    const FIXTURE_CENTER_TOLERANCE_METRES: f64 = 12.0;
+
+    fn geo_key_directory(epsg: u16) -> Vec<u8> {
+        [1, 1, 0, 1, PROJECTED_CRS_GEO_KEY, 0, 1, epsg]
+            .iter()
+            .flat_map(|value: &u16| value.to_le_bytes())
+            .collect()
+    }
+
+    fn write_fixture_las(path: &Path, epsg: Option<u16>) {
+        let mut builder = las::Builder::new(Default::default()).unwrap();
+        builder.version = las::Version::new(1, 2);
+        let millimetres = |offset| las::Transform {
+            scale: 0.001,
+            offset,
+        };
+        builder.transforms = las::Vector {
+            x: millimetres(FIXTURE_ORIGIN_EASTING),
+            y: millimetres(0.0),
+            z: millimetres(0.0),
+        };
+        if let Some(epsg) = epsg {
+            builder.vlrs.push(las::Vlr {
+                user_id: "LASF_Projection".to_string(),
+                record_id: LAS_GEO_KEY_DIRECTORY_RECORD_ID,
+                description: String::new(),
+                data: geo_key_directory(epsg),
+            });
+        }
+        let mut writer = las::Writer::from_path(path, builder.into_header().unwrap()).unwrap();
+        for east in -5..=5 {
+            for north in 0..=10 {
+                writer
+                    .write_point(las::Point {
+                        x: FIXTURE_ORIGIN_EASTING + f64::from(east),
+                        y: f64::from(north),
+                        z: f64::from(north % 3),
+                        ..Default::default()
+                    })
+                    .unwrap();
+            }
+        }
+        writer.close().unwrap();
+    }
+
+    fn tile_fixture_root_box_center(epsg: Option<u16>) -> [f64; 3] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("scan.las");
+        write_fixture_las(&input, epsg);
+        let asset_dir = dir.path().join("asset");
+        tile_point_cloud(&input, &asset_dir).unwrap();
+
+        let json = std::fs::read_to_string(asset_dir.join("tileset.json")).unwrap();
+        let tileset: tiletopia_core::Tileset = serde_json::from_str(&json).unwrap();
+        let tiletopia_core::BoundingVolume::Box { r#box } = tileset.root.bounding_volume else {
+            panic!("point cloud root is not a box");
+        };
+        [r#box[0], r#box[1], r#box[2]]
+    }
+
+    #[test]
+    fn projected_point_cloud_is_tiled_at_its_earth_location() {
+        let center = tile_fixture_root_box_center(Some(UTM_32_NORTH_EPSG));
+        let expected = tiletopia_core::spatial::geodetic_to_ecef(
+            0.0,
+            FIXTURE_ORIGIN_LONGITUDE.to_radians(),
+            0.0,
+        );
+        for axis in 0..3 {
+            assert!(
+                (center[axis] - expected[axis]).abs() < FIXTURE_CENTER_TOLERANCE_METRES,
+                "root box center {center:?}, expected near {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn point_cloud_without_a_crs_is_tiled_in_its_own_coordinates() {
+        let center = tile_fixture_root_box_center(None);
+        assert!(
+            (center[0] - FIXTURE_ORIGIN_EASTING).abs() < FIXTURE_CENTER_TOLERANCE_METRES,
+            "root box center {center:?}"
+        );
     }
 }

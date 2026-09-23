@@ -30,6 +30,8 @@ pub enum IngestError {
     ParseError(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("reprojection error: {0}")]
+    Reprojection(#[from] tiletopia_core::crs::ReprojError),
 }
 
 /// A 3D point with optional colour and classification.
@@ -196,15 +198,40 @@ pub fn read_point_cloud_wgs84(path: &std::path::Path) -> Result<Vec<Point3D>, In
         crs,
         crs_detect::DetectedCrs::Wgs84 | crs_detect::DetectedCrs::Unknown
     ) {
-        let mut coords: Vec<[f64; 3]> = points.iter().map(|p| [p.x, p.y, p.z]).collect();
-        crs_detect::reproject_to_wgs84(&mut coords, &crs);
-        for (p, c) in points.iter_mut().zip(coords.iter()) {
-            p.x = c[0];
-            p.y = c[1];
-            p.z = c[2];
-        }
+        reproject_positions(&mut points, |coords| {
+            crs_detect::reproject_to_wgs84(coords, &crs)
+        });
     }
     Ok(points)
+}
+
+pub fn read_point_cloud_ecef(path: &std::path::Path) -> Result<Vec<Point3D>, IngestError> {
+    let mut points = read_point_cloud(path)?;
+    let Some(source_epsg) = crs_detect::detect_crs(path).to_epsg() else {
+        tracing::warn!(
+            "{}: no coordinate reference system found, tiling its coordinates unchanged",
+            path.display()
+        );
+        return Ok(points);
+    };
+    reproject_positions(&mut points, |coords| {
+        crs_detect::reproject_to_ecef(coords, source_epsg)
+    })?;
+    Ok(points)
+}
+
+fn reproject_positions<T>(
+    points: &mut [Point3D],
+    reproject: impl FnOnce(&mut [[f64; 3]]) -> T,
+) -> T {
+    let mut coords: Vec<[f64; 3]> = points.iter().map(|p| [p.x, p.y, p.z]).collect();
+    let result = reproject(&mut coords);
+    for (p, c) in points.iter_mut().zip(coords.iter()) {
+        p.x = c[0];
+        p.y = c[1];
+        p.z = c[2];
+    }
+    result
 }
 
 /// Read a heightmap from a GeoTIFF, DTED, or HGT file.

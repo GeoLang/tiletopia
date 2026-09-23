@@ -4,7 +4,10 @@
 //! and .prj sidecar files, then reprojects to WGS84 when needed.
 
 use std::path::Path;
-use tiletopia_core::crs::{Coord3D, CrsDef, Transformer};
+use tiletopia_core::crs::{Coord3D, CrsDef, ReprojError, Transformer};
+
+const WGS84_GEODETIC_EPSG: u32 = 4326;
+const EARTH_CENTERED_EARTH_FIXED_EPSG: u32 = 4978;
 
 /// Detected coordinate reference system.
 #[derive(Debug, Clone)]
@@ -22,7 +25,7 @@ pub enum DetectedCrs {
 }
 
 impl DetectedCrs {
-    fn to_epsg(&self) -> Option<u32> {
+    pub fn to_epsg(&self) -> Option<u32> {
         match self {
             Self::Wgs84 => Some(4326),
             Self::Ecef => Some(4978),
@@ -276,6 +279,32 @@ pub fn reproject_to_wgs84(points: &mut [[f64; 3]], from: &DetectedCrs) {
         pt[1] = out.y;
         pt[2] = out.z;
     }
+}
+
+pub fn reproject_to_ecef(points: &mut [[f64; 3]], source_epsg: u32) -> Result<(), ReprojError> {
+    let coords: Vec<Coord3D> = points
+        .iter()
+        .map(|pt| Coord3D {
+            x: pt[0],
+            y: pt[1],
+            z: pt[2],
+        })
+        .collect();
+    // the source z passes through unchanged as the ellipsoidal height
+    let geodetic = Transformer::new(CrsDef::Epsg(source_epsg), CrsDef::Epsg(WGS84_GEODETIC_EPSG))
+        .transform_batch(&coords)?;
+    let ecef = Transformer::new(
+        CrsDef::Epsg(WGS84_GEODETIC_EPSG),
+        CrsDef::Epsg(EARTH_CENTERED_EARTH_FIXED_EPSG),
+    )
+    .transform_batch(&geodetic)?;
+
+    for (pt, out) in points.iter_mut().zip(ecef) {
+        pt[0] = out.x;
+        pt[1] = out.y;
+        pt[2] = out.z;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

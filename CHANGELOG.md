@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Point clouds in a projected CRS, such as UTM, are tiled where they are on
+  the globe (2026-09-23). The job queue and `tiletopia tile` read the CRS from
+  the LAS GeoKey record or a `.prj` beside the file and convert to ECEF, the
+  frame the tileset's bounding boxes are read in. Before, UTM metres were written as
+  ECEF, so a scan landed near the centre of the earth. A file with no CRS is
+  tiled unchanged, with a warning naming it.
 - The public docs say what the code does (2026-09-16). The 2D map tile
   section advertised an XYZ proxy with a TTL cache, but no `{z}/{x}/{y}` route
   is mounted, `fetch_tile` has no caller, the on-disk cache never expires, and

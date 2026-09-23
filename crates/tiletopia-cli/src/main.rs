@@ -15,9 +15,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Tile a geospatial dataset into 3D Tiles
+    /// Tile a point cloud into 3D Tiles
     Tile {
-        /// Input file (LAS, LAZ, GeoTIFF, glTF, CityGML, etc.)
+        /// Input point cloud: .las, .laz, .e57 or .ply
         #[arg(short, long)]
         input: PathBuf,
 
@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("Max geometric error: {}", max_error);
 
             // Read source data
-            let points = tiletopia_ingest::read_point_cloud(&input)?;
+            let points = tiletopia_ingest::read_point_cloud_ecef(&input)?;
             tracing::info!("Read {} points", points.len());
 
             // Convert ingest points to octree points

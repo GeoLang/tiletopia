@@ -20,6 +20,8 @@ TileTopia tiles point clouds, meshes, IFC and vector files into OGC 3D Tiles 1.1
 
 The job queue tiles point clouds (LAS, LAZ, E57, PLY) and meshes (glTF, GLB, OBJ, FBX, CityGML, IFC) with the native tiler, whatever `TILETOPIA_MAGO_JAR` is set to. The readers carry UVs, diffuse textures and diffuse colours through to the tile GLBs, and a tile holding part of a textured mesh carries the crop of the texture its triangles reach. A mesh with a texture the readers cannot find or decode tiles untextured.
 
+A point cloud is placed by the CRS in its LAS GeoKey record, and `tiletopia tile` also reads a `.prj` file beside the input. Heights are taken as ellipsoidal. A point cloud with no CRS is tiled in its own coordinates, with a warning naming the file. The upload's `crs` field is not used for point clouds.
+
 A mesh is placed by the upload's `longitude` and `latitude`, and one without them fails naming them. IFC falls back to the `IfcSite` reference coordinates, and an IFC with neither fails. `crs` is ignored on the native path.
 
 Vector files (GeoJSON, GeoPackage, KML) go to [mago-3d-tiler](https://github.com/Gaia3D/mago-3d-tiler) (MPL-2.0), which the Docker image bundles with a JRE 21. Without the jar they fail naming the variable. The jar ships natives for Linux and Windows x64 only, so on macOS the mago jobs fail inside mago.
