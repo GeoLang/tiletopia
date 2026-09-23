@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- 2026-09-23: the routes that answered rows or input compiled into the
+  binary. `/api/v1/demo/*`, `/features/*`, `/issues/*`, `/workspaces/*`,
+  `/mobile/*`, `/classification/classes`, `/collaboration/sessions`,
+  `/plugins` and `/plugins/pipelines`, `/routing/*` on a built-in San
+  Francisco graph, `/isochrone/*` on a uniform grid, `/map-matching/match` on
+  a fixed trace, `/flight-planning/*`, `/scan-registration/*`,
+  `/osm-buildings/*`, and the `/geoprocessing`, `/terrain-analysis`,
+  `/geostatistics` and `/multispectral` demo routes. The seeded
+  `ClassificationEngine` jobs went with `/classification/classes`, the itinera
+  crates with routing, and the `gpu` feature, wgpu and pollster with
+  `tiletopia_core::gpu`, which nothing called. Removed modules, each at the
+  last commit that held it:
+  - `crates/tiletopia-server/src/demo.rs` at d5d3b86
+  - `crates/tiletopia-server/src/stories.rs` at 4927f17
+  - `crates/tiletopia-server/src/feature_service.rs` at ea1ca0f
+  - `crates/tiletopia-server/src/issue_tracking.rs` at 4927f17
+  - `crates/tiletopia-server/src/workspaces.rs` at 32bdd18
+  - `crates/tiletopia-server/src/mobile.rs` at fbc65bd
+  - `crates/tiletopia-server/src/collaboration.rs` at dc2ae50
+  - `crates/tiletopia-server/src/plugins.rs` at f8ad746
+  - `crates/tiletopia-server/src/flight_planning.rs` at 5904175
+  - `crates/tiletopia-server/src/scan_registration.rs` at ea1ca0f
+  - `crates/tiletopia-server/src/osm_buildings.rs` at a80ad72
+  - `crates/tiletopia-server/src/routing.rs` at a3d4683
+  - `crates/tiletopia-server/src/isochrone.rs` at 2fcb152
+  - `crates/tiletopia-server/src/map_matching.rs` at befcb54
+  - `crates/tiletopia-core/src/gpu.rs` at 3e25739
 - The 2D map tile metadata routes and the demo engine behind them
   (2026-09-16): `GET /api/v1/tiles/sources`, `/styles`, `/layers`,
   `/{source_id}/tilejson` and `/cache/stats`. The sources and the style were
