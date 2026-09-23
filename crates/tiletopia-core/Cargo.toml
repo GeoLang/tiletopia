@@ -7,7 +7,6 @@ description = "Core tiling engine — spatial indexing, LOD generation, 3D Tiles
 
 [features]
 default = ["draco"]
-gpu = ["dep:wgpu", "dep:pollster"]
 draco = ["dep:draco-rs"]
 plugin-dylib = ["dep:libloading"]
 ml = ["dep:reqwest"]
@@ -21,8 +20,6 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 bytes = { workspace = true }
 memmap2 = { workspace = true }
-wgpu = { workspace = true, optional = true }
-pollster = { version = "0.4", optional = true }
 projicio-core = { workspace = true }
 meshopt = { workspace = true }
 bytemuck = { workspace = true }

@@ -12,7 +12,6 @@ pub mod crs;
 pub mod diff;
 pub mod diff_viz;
 pub mod glb_writer;
-pub mod gpu;
 pub mod implicit_tiling;
 pub mod lod;
 pub mod measurement;
