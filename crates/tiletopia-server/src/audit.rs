@@ -10,7 +10,7 @@
 //! being refused in a loop, and this log is meant to say what happened to the
 //! data. Recording every mutating method instead of a list would bury those
 //! writes under the compute-only POSTs, which this server has many of
-//! (isochrones, geoprocessing, static maps).
+//! (geoprocessing, geostatistics, static maps).
 //!
 //! An audit write that fails is logged and dropped. The user's write has already
 //! happened and its response is already built by the time this runs.

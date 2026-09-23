@@ -15,44 +15,31 @@ pub mod catalog;
 pub mod cicd;
 pub mod classification;
 pub mod cog;
-pub mod collaboration;
 pub mod db;
-pub mod demo;
 pub mod elevation;
 pub mod entity_linking;
 pub mod export;
-pub mod feature_service;
-pub mod flight_planning;
 pub mod geocoding;
 pub mod geoprocessing;
 pub mod geostatistics;
 pub mod http_cache;
 pub mod indoor;
 pub mod ion_compat;
-pub mod isochrone;
-pub mod issue_tracking;
 pub mod job_queue;
-pub mod map_matching;
 pub mod map_tiles;
 pub mod metering;
 pub mod metrics;
-pub mod mobile;
 pub mod model_registry;
 pub mod multispectral;
 pub mod offline_export;
-pub mod osm_buildings;
 pub mod photogrammetry;
 pub mod plugin_registry;
-pub mod plugins;
 pub mod portal;
 pub mod premium_routes;
 pub mod realtime;
-pub mod routing;
-pub mod scan_registration;
 pub mod scheduler;
 pub mod stac;
 pub mod static_map;
-pub mod stories;
 pub mod stories_api;
 pub mod terrain_analysis;
 pub mod terrain_api;
@@ -63,7 +50,6 @@ pub mod tilesets;
 pub mod upload;
 pub mod users;
 pub mod webhooks;
-pub mod workspaces;
 
 use audit::AuditedResource;
 use axum::{
@@ -93,7 +79,6 @@ pub struct AppState {
     /// Records the mutations that answered 2xx, written by
     /// [`audit::audit_middleware`] and read by `GET /api/v1/audit`.
     pub audit_log: Arc<audit::AuditLog>,
-    pub demo: demo::DemoState,
     pub catalog: catalog::OpenDataCatalog,
     pub started_at: Instant,
     /// Per-key request budgets. Process-local and fed by
@@ -103,7 +88,6 @@ pub struct AppState {
     /// Queues and delivers webhook events. Shared with [`job_queue::JobQueue`],
     /// which emits the job lifecycle events.
     pub webhooks: Arc<webhooks::WebhookQueue>,
-    pub workspace_store: workspaces::WorkspaceStore,
     /// Shared with [`scheduler::Scheduler`], whose `prune_export_files` action
     /// reads the same job records the export routes do.
     pub export_engine: Arc<export::ExportEngine>,
@@ -111,16 +95,10 @@ pub struct AppState {
     /// [`job_queue::JobQueue`] the routes use, so a scheduled re-tile lands on
     /// the same queue an uploader's does.
     pub scheduler: Arc<scheduler::Scheduler>,
-    pub plugin_registry: plugins::PluginRegistry,
     pub photogrammetry_engine: photogrammetry::PhotogrammetryEngine,
-    pub classification_engine: classification::ClassificationEngine,
     pub model_registry: model_registry::ModelRegistry,
-    pub collaboration_engine: collaboration::CollaborationEngine,
     pub bim4d_engine: bim4d::Bim4DEngine,
     pub cog_engine: cog::CogEngine,
-    pub routing_engine: routing::RoutingEngine,
-    pub feature_service_engine: feature_service::FeatureServiceEngine,
-    pub issue_tracker: issue_tracking::IssueTracker,
     /// Shared, so the analysis tile engines can sample it from their own graph.
     pub elevation_store: Arc<elevation::DemStore>,
     pub analysis_engines: analysis_tiles::AnalysisEngines,
@@ -314,7 +292,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(org_routes)
         .route("/api/v1/health", get(health))
         .route("/metrics", get(metrics::metrics_handler))
-        .merge(demo::demo_routes())
         .merge(audit::audit_routes())
         .merge(catalog::catalog_routes())
         .merge(terrain_api::terrain_routes())
@@ -323,37 +300,25 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::api_key_routes())
         .merge(premium_routes::metering_routes())
         .merge(premium_routes::webhook_routes())
-        .merge(premium_routes::workspace_routes())
         .merge(premium_routes::export_routes())
         .merge(premium_routes::scheduler_routes())
-        .merge(premium_routes::plugin_routes())
-        .merge(premium_routes::mobile_routes())
         .merge(premium_routes::photogrammetry_routes())
         .merge(premium_routes::classification_routes())
         .merge(model_registry::model_registry_routes())
-        .merge(premium_routes::collaboration_routes())
         .merge(premium_routes::bim4d_routes())
         .merge(premium_routes::geocoding_routes())
         .merge(premium_routes::stac_routes())
         .merge(premium_routes::indoor_routes())
         .merge(premium_routes::cog_routes())
-        .merge(premium_routes::routing_routes())
         // Batch 2: competitive gap-closing
-        .merge(premium_routes::isochrone_routes())
         .merge(premium_routes::geoprocessing_routes())
-        .merge(premium_routes::feature_service_routes())
         .merge(premium_routes::elevation_routes())
-        .merge(premium_routes::map_matching_routes())
         .merge(premium_routes::static_map_routes())
-        .merge(premium_routes::flight_planning_routes())
-        .merge(premium_routes::scan_registration_routes())
-        .merge(premium_routes::issue_tracking_routes())
         .merge(premium_routes::terrain_analysis_routes())
         .merge(analysis::analysis_routes())
         .merge(analysis_tiles::analysis_tile_routes())
         .merge(premium_routes::geostatistics_routes())
         .merge(premium_routes::multispectral_routes())
-        .merge(premium_routes::osm_buildings_routes())
         .merge(premium_routes::entity_linking_routes())
         .merge(stories_api::story_routes())
         .merge(portal::portal_routes())

@@ -20,9 +20,8 @@ use crate::{
     audit::AuditedResource,
     classification, cog, elevation,
     export::{EXPORT_FORMATS, ExportFormat, ExportJob, ExportStatus},
-    feature_service, flight_planning, geocoding, geoprocessing, geostatistics, indoor, isochrone,
-    map_matching, metering, mobile, multispectral, osm_buildings, routing, scan_registration,
-    scheduler, stac, static_map, terrain_analysis,
+    geocoding, geoprocessing, geostatistics, indoor, metering, multispectral, scheduler, stac,
+    static_map, terrain_analysis,
     terrain_api::Refusal,
     users, webhooks,
 };
@@ -587,42 +586,6 @@ async fn webhook_event_types() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "event_types": names }))
 }
 
-/// Routes for workspaces/organizations.
-pub fn workspace_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/workspaces", get(list_orgs))
-        .route("/api/v1/workspaces/teams", get(list_teams))
-        .route("/api/v1/workspaces/projects", get(list_projects))
-}
-
-async fn list_orgs(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let store = &state.workspace_store;
-    let orgs = store.list_orgs().await;
-    Json(serde_json::json!({ "organizations": orgs }))
-}
-
-async fn list_teams(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let store = &state.workspace_store;
-    let orgs = store.list_orgs().await;
-    if let Some(org) = orgs.first() {
-        let teams = store.list_teams(org.id).await;
-        Json(serde_json::json!({ "teams": teams }))
-    } else {
-        Json(serde_json::json!({ "teams": [] }))
-    }
-}
-
-async fn list_projects(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let store = &state.workspace_store;
-    let orgs = store.list_orgs().await;
-    if let Some(org) = orgs.first() {
-        let projects = store.list_projects(org.id).await;
-        Json(serde_json::json!({ "projects": projects }))
-    } else {
-        Json(serde_json::json!({ "projects": [] }))
-    }
-}
-
 /// Routes for export jobs.
 pub fn export_routes() -> Router<Arc<AppState>> {
     // starting an export is compute against an asset, so it sits in the Edit
@@ -1026,53 +989,6 @@ async fn scheduler_action_kinds() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "action_kinds": scheduler::ScheduledAction::KINDS }))
 }
 
-/// Routes for plugins/marketplace.
-pub fn plugin_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/plugins", get(list_plugins))
-        .route("/api/v1/plugins/pipelines", get(list_pipelines))
-}
-
-async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let registry = &state.plugin_registry;
-    let all = registry.list_plugins(None).await;
-    Json(serde_json::json!({ "plugins": all }))
-}
-
-async fn list_pipelines(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let registry = &state.plugin_registry;
-    let pipelines = registry.list_pipelines().await;
-    Json(serde_json::json!({ "pipelines": pipelines }))
-}
-
-/// Routes for mobile SDK.
-pub fn mobile_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/mobile/config", get(mobile_config))
-        .route("/api/v1/mobile/offline", get(offline_packages))
-}
-
-async fn mobile_config() -> Json<mobile::SdkConfig> {
-    // Default high-end config for demo
-    let caps = mobile::DeviceCapabilities {
-        platform: mobile::Platform::Ios,
-        sdk_version: "1.0.0".into(),
-        screen_density: 3.0,
-        gpu_tier: mobile::GpuTier::High,
-        available_memory_mb: 4096,
-        network_type: mobile::NetworkType::Wifi,
-        supports_webgl2: true,
-        supports_3d_tiles: true,
-        max_texture_size: 4096,
-    };
-    Json(mobile::generate_sdk_config(&caps))
-}
-
-async fn offline_packages() -> Json<serde_json::Value> {
-    let packages = mobile::available_offline_packages();
-    Json(serde_json::json!({ "packages": packages }))
-}
-
 // ─── Gap-closing feature routes ─────────────────────────────────────────────
 
 /// Routes for photogrammetry pipeline.
@@ -1101,39 +1017,15 @@ async fn quality_presets() -> Json<serde_json::Value> {
 
 /// Routes for point cloud classification.
 pub fn classification_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/api/v1/classification/models",
-            get(list_classification_models),
-        )
-        .route("/api/v1/classification/classes", get(list_classes))
-}
-
-async fn list_classification_models() -> Json<serde_json::Value> {
-    let models = classification::ClassificationEngine::available_models();
-    Json(serde_json::json!({ "models": models }))
-}
-
-async fn list_classes(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let engine = &state.classification_engine;
-    let jobs = engine.list_jobs(None).await;
-    Json(serde_json::json!({ "jobs": jobs }))
-}
-
-/// Routes for real-time collaboration.
-pub fn collaboration_routes() -> Router<Arc<AppState>> {
     Router::new().route(
-        "/api/v1/collaboration/sessions",
-        get(list_collaboration_sessions),
+        "/api/v1/classification/models",
+        get(list_classification_models),
     )
 }
 
-async fn list_collaboration_sessions(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    let engine = &state.collaboration_engine;
-    let sessions = engine.list_sessions().await;
-    Json(serde_json::json!({ "sessions": sessions }))
+async fn list_classification_models() -> Json<serde_json::Value> {
+    let models = classification::available_models();
+    Json(serde_json::json!({ "models": models }))
 }
 
 /// Routes for BIM 4D scheduling.
@@ -1315,156 +1207,16 @@ async fn cog_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Value
     }))
 }
 
-/// Routes for routing/navigation.
-pub fn routing_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/routing/stats", get(routing_stats))
-        .route("/api/v1/routing/route", get(compute_route))
-}
-
-async fn routing_stats(State(state): State<Arc<AppState>>) -> Json<routing::RoutingStats> {
-    let engine = &state.routing_engine;
-    Json(engine.stats())
-}
-
-#[derive(Deserialize)]
-struct RouteQuery {
-    origin_lon: Option<f64>,
-    origin_lat: Option<f64>,
-    dest_lon: Option<f64>,
-    dest_lat: Option<f64>,
-    profile: Option<String>,
-}
-
-async fn compute_route(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<RouteQuery>,
-) -> Json<serde_json::Value> {
-    let engine = &state.routing_engine;
-    let profile = match params.profile.as_deref() {
-        Some("walking") => routing::RoutingProfile::Walking,
-        Some("cycling") => routing::RoutingProfile::Cycling,
-        _ => routing::RoutingProfile::Driving,
-    };
-    let req = routing::RouteRequest {
-        origin: [
-            params.origin_lon.unwrap_or(-122.4194),
-            params.origin_lat.unwrap_or(37.7749),
-        ],
-        destination: [
-            params.dest_lon.unwrap_or(-122.4100),
-            params.dest_lat.unwrap_or(37.7800),
-        ],
-        profile,
-        alternatives: false,
-    };
-    match engine.compute_route(&req) {
-        Some(route) => Json(serde_json::json!(route)),
-        None => Json(serde_json::json!({"error": "No route found"})),
-    }
-}
-
 // ─── Batch 2: Competitive gap-closing routes ────────────────────────────────
-
-/// Routes for isochrone/travel-time analysis.
-pub fn isochrone_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/isochrone/compute", get(compute_isochrone))
-        .route("/api/v1/isochrone/profiles", get(isochrone_profiles))
-}
-
-#[derive(Deserialize)]
-struct IsochroneQuery {
-    lon: f64,
-    lat: f64,
-    minutes: Option<String>, // comma-separated: "5,10,15"
-    profile: Option<String>,
-    concavity: Option<f64>,
-}
-
-const DEFAULT_CONTOUR_MINUTES: &str = "5,10,15";
-const ISOCHRONE_PROFILES: [&str; 3] = ["driving", "walking", "cycling"];
-const ISOCHRONE_DENOISE: f32 = 0.5;
 
 fn bad_request(reason: String) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, reason)
-}
-
-fn parse_travel_profile(name: &str) -> Option<isochrone::TravelProfile> {
-    match name {
-        "driving" => Some(isochrone::TravelProfile::Driving),
-        "walking" => Some(isochrone::TravelProfile::Walking),
-        "cycling" => Some(isochrone::TravelProfile::Cycling),
-        _ => None,
-    }
-}
-
-impl IsochroneQuery {
-    fn into_request(self) -> Result<isochrone::IsochroneRequest, (StatusCode, String)> {
-        if !(-180.0..=180.0).contains(&self.lon) || !(-90.0..=90.0).contains(&self.lat) {
-            return Err(bad_request(format!(
-                "lon must be within -180..180 and lat within -90..90, got {},{}",
-                self.lon, self.lat
-            )));
-        }
-
-        let contours_minutes = self
-            .minutes
-            .as_deref()
-            .unwrap_or(DEFAULT_CONTOUR_MINUTES)
-            .split(',')
-            .map(|entry| {
-                entry.trim().parse::<u32>().map_err(|_| {
-                    bad_request(format!(
-                        "minutes must be a comma-separated list of whole numbers, got '{entry}'"
-                    ))
-                })
-            })
-            .collect::<Result<Vec<u32>, _>>()?;
-
-        let profile = match self.profile.as_deref() {
-            Some(name) => parse_travel_profile(name).ok_or_else(|| {
-                bad_request(format!(
-                    "unknown profile '{name}'; valid options: {}",
-                    ISOCHRONE_PROFILES.join(", ")
-                ))
-            })?,
-            None => isochrone::TravelProfile::Driving,
-        };
-
-        let concavity = self.concavity.unwrap_or(itinera_core::DEFAULT_CONCAVITY);
-        if concavity < 0.0 || concavity.is_nan() {
-            return Err(bad_request(format!(
-                "concavity must be zero or greater, got {concavity}"
-            )));
-        }
-
-        Ok(isochrone::IsochroneRequest {
-            origin: [self.lon, self.lat],
-            profile,
-            contours_minutes,
-            denoise: ISOCHRONE_DENOISE,
-            concavity,
-        })
-    }
-}
-
-async fn compute_isochrone(
-    Query(params): Query<IsochroneQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let result = isochrone::compute_isochrone(&params.into_request()?);
-    Ok(Json(serde_json::json!(result)))
-}
-
-async fn isochrone_profiles() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "profiles": ISOCHRONE_PROFILES }))
 }
 
 /// Routes for geoprocessing operations.
 pub fn geoprocessing_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
         .route("/api/v1/geoprocessing/operations", get(list_geo_operations))
-        .route("/api/v1/geoprocessing/demo", get(geoprocessing_demo))
         .route("/api/v1/geoprocessing/run", post(run_geoprocessing))
 }
 
@@ -1496,89 +1248,6 @@ async fn run_geoprocessing(
     geoprocessing::run(&operation, &request.geometry, request.other.as_ref())
         .map(Json)
         .map_err(|error| bad_request(error.to_string()))
-}
-
-async fn geoprocessing_demo() -> Json<serde_json::Value> {
-    let square = geoprocessing::Geometry::Polygon(vec![vec![
-        [0.0, 0.0],
-        [0.01, 0.0],
-        [0.01, 0.01],
-        [0.0, 0.01],
-        [0.0, 0.0],
-    ]]);
-    let buffered = geoprocessing::run(
-        &geoprocessing::GeoOperation::Buffer { distance_m: 100.0 },
-        &square,
-        None,
-    )
-    .expect("the demo's own square buffers");
-    Json(serde_json::json!({
-        "demo": "one invented square near 0,0 buffered by 100 m, not your data. \
-                 POST /api/v1/geoprocessing/run to run an operation on your own geometry.",
-        "operation": buffered.operation,
-        "geometry": buffered.geometry,
-        "area_m2": buffered.area_m2,
-        "length_m": buffered.length_m
-    }))
-}
-
-/// Routes for feature service (WFS-like).
-pub fn feature_service_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/features/layers", get(list_feature_layers))
-        .route("/api/v1/features/query", get(query_features))
-}
-
-async fn list_feature_layers(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let engine = &state.feature_service_engine;
-    let layers = engine.list_layers();
-    Json(serde_json::json!({ "layers": layers }))
-}
-
-#[derive(Deserialize)]
-struct FeatureQuery {
-    layer: Option<String>,
-    bbox: Option<String>, // "minx,miny,maxx,maxy"
-    limit: Option<usize>,
-    offset: Option<usize>,
-    #[serde(rename = "where")]
-    where_clause: Option<String>,
-}
-
-async fn query_features(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<FeatureQuery>,
-) -> Json<serde_json::Value> {
-    let engine = &state.feature_service_engine;
-    let layers = engine.list_layers();
-    let layer = if let Some(name) = &params.layer {
-        layers.iter().find(|l| l.name == *name)
-    } else {
-        layers.first()
-    };
-    if let Some(layer) = layer {
-        let bbox = params.bbox.and_then(|b| {
-            let parts: Vec<f64> = b.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-            if parts.len() == 4 {
-                Some([parts[0], parts[1], parts[2], parts[3]])
-            } else {
-                None
-            }
-        });
-        let query = feature_service::SpatialQuery {
-            bbox,
-            intersects: None,
-            within_distance_m: None,
-            where_clause: params.where_clause,
-            limit: params.limit.unwrap_or(100),
-            offset: params.offset.unwrap_or(0),
-            order_by: None,
-        };
-        let features = engine.query_features(layer.id, &query);
-        Json(serde_json::json!({ "type": "FeatureCollection", "features": features }))
-    } else {
-        Json(serde_json::json!({ "type": "FeatureCollection", "features": [] }))
-    }
 }
 
 /// Routes for elevation service.
@@ -1670,54 +1339,6 @@ fn bad_coordinates() -> Refusal {
 /// A 400 in the refusal type the elevation handlers answer with.
 fn refuse_request(reason: String) -> Refusal {
     bad_request(reason).into_response().into()
-}
-
-/// Routes for map matching.
-pub fn map_matching_routes() -> Router<Arc<AppState>> {
-    Router::new().route("/api/v1/map-matching/match", get(map_match_demo))
-}
-
-async fn map_match_demo() -> Json<serde_json::Value> {
-    let request = map_matching::MapMatchRequest {
-        trace: vec![
-            map_matching::GpsPoint {
-                latitude: 37.7749,
-                longitude: -122.4194,
-                timestamp: None,
-                accuracy_m: Some(5.0),
-                speed_mps: None,
-                bearing_deg: None,
-            },
-            map_matching::GpsPoint {
-                latitude: 37.7755,
-                longitude: -122.4180,
-                timestamp: None,
-                accuracy_m: Some(5.0),
-                speed_mps: None,
-                bearing_deg: None,
-            },
-            map_matching::GpsPoint {
-                latitude: 37.7760,
-                longitude: -122.4165,
-                timestamp: None,
-                accuracy_m: Some(5.0),
-                speed_mps: None,
-                bearing_deg: None,
-            },
-            map_matching::GpsPoint {
-                latitude: 37.7768,
-                longitude: -122.4150,
-                timestamp: None,
-                accuracy_m: Some(5.0),
-                speed_mps: None,
-                bearing_deg: None,
-            },
-        ],
-        profile: map_matching::MatchProfile::Driving,
-        search_radius_m: 50.0,
-    };
-    let result = map_matching::match_trace(&request);
-    Json(serde_json::json!(result))
 }
 
 /// The DEM stores a static map draws its base layer from. Lets the render
@@ -1882,123 +1503,17 @@ async fn static_map_formats() -> Json<serde_json::Value> {
     }))
 }
 
-/// Routes for drone flight planning.
-pub fn flight_planning_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/api/v1/flight-planning/generate",
-            get(generate_flight_demo),
-        )
-        .route("/api/v1/flight-planning/patterns", get(flight_patterns))
-}
-
-async fn generate_flight_demo() -> Json<serde_json::Value> {
-    let area = vec![
-        [-122.42, 37.77],
-        [-122.41, 37.77],
-        [-122.41, 37.78],
-        [-122.42, 37.78],
-        [-122.42, 37.77],
-    ];
-    let plan = flight_planning::generate_grid_plan(&area, 80.0, 0.8, 0.7);
-    Json(serde_json::json!({
-        "waypoints": plan.waypoints.len(),
-        "total_distance_m": plan.statistics.total_distance_m,
-        "estimated_duration_min": plan.statistics.estimated_flight_time_min,
-        "gsd_cm": plan.parameters.gsd_cm_per_px,
-        "coverage_area_m2": plan.statistics.coverage_area_m2
-    }))
-}
-
-async fn flight_patterns() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "patterns": ["Grid/Lawnmower", "Double Grid/Crosshatch", "Orbit/POI", "Corridor", "Free Flight"]
-    }))
-}
-
-/// Routes for scan registration (ICP).
-pub fn scan_registration_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/api/v1/scan-registration/demo",
-            get(scan_registration_demo),
-        )
-        .route(
-            "/api/v1/scan-registration/methods",
-            get(registration_methods),
-        )
-}
-
-async fn scan_registration_demo() -> Json<serde_json::Value> {
-    let reg = scan_registration::demo_registration();
-    Json(serde_json::json!({
-        "id": reg.id,
-        "scans": reg.scans.len(),
-        "method": format!("{:?}", reg.method),
-        "status": format!("{:?}", reg.status),
-        "result": reg.result
-    }))
-}
-
-async fn registration_methods() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "methods": ["PointToPoint", "PointToPlane", "GeneralizedIcp", "Ndt", "FeatureBased"]
-    }))
-}
-
-/// Routes for issue/defect tracking.
-pub fn issue_tracking_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/issues", get(list_issues))
-        .route("/api/v1/issues/stats", get(issue_stats))
-}
-
-async fn list_issues(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let tracker = &state.issue_tracker;
-    let issues = tracker.list_issues(None);
-    Json(serde_json::json!({ "issues": issues }))
-}
-
-async fn issue_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let tracker = &state.issue_tracker;
-    let stats = tracker.stats();
-    Json(serde_json::json!(stats))
-}
-
 /// Routes for terrain analysis.
 pub fn terrain_analysis_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/api/v1/terrain-analysis/operations",
-            get(terrain_operations),
-        )
-        .route("/api/v1/terrain-analysis/demo", get(terrain_analysis_demo))
+    Router::new().route(
+        "/api/v1/terrain-analysis/operations",
+        get(terrain_operations),
+    )
 }
 
 async fn terrain_operations() -> Json<serde_json::Value> {
     let ops = terrain_analysis::available_analyses();
     Json(serde_json::json!({ "operations": ops }))
-}
-
-async fn terrain_analysis_demo() -> Json<serde_json::Value> {
-    // Simple 5x5 DEM
-    let dem = vec![
-        vec![100.0, 105.0, 110.0, 108.0, 103.0],
-        vec![102.0, 108.0, 115.0, 112.0, 106.0],
-        vec![105.0, 112.0, 120.0, 118.0, 110.0],
-        vec![103.0, 110.0, 116.0, 114.0, 108.0],
-        vec![100.0, 106.0, 112.0, 110.0, 105.0],
-    ];
-    let slope_params = terrain_analysis::SlopeParams {
-        output_unit: terrain_analysis::SlopeUnit::Degrees,
-        method: terrain_analysis::SlopeMethod::Horn,
-    };
-    let result = terrain_analysis::compute_slope(&dem, 10.0, &slope_params);
-    Json(serde_json::json!({
-        "analysis": "slope",
-        "statistics": result.statistics,
-        "resolution_m": result.resolution_m
-    }))
 }
 
 /// Routes for geostatistics.
@@ -2008,7 +1523,6 @@ async fn terrain_analysis_demo() -> Json<serde_json::Value> {
 pub fn geostatistics_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
         .route("/api/v1/geostatistics/methods", get(geostat_methods))
-        .route("/api/v1/geostatistics/demo", get(geostat_demo))
         .route(
             "/api/v1/geostatistics/interpolate",
             post(geostat_interpolate),
@@ -2045,57 +1559,11 @@ async fn geostat_interpolate(
     .map_err(|refusal| (refusal.status(), refusal.to_string()))
 }
 
-async fn geostat_demo() -> Json<serde_json::Value> {
-    let samples = vec![
-        geostatistics::SamplePoint {
-            x: 0.0,
-            y: 0.0,
-            value: 10.0,
-        },
-        geostatistics::SamplePoint {
-            x: 1.0,
-            y: 0.0,
-            value: 12.0,
-        },
-        geostatistics::SamplePoint {
-            x: 0.0,
-            y: 1.0,
-            value: 11.0,
-        },
-        geostatistics::SamplePoint {
-            x: 1.0,
-            y: 1.0,
-            value: 13.0,
-        },
-        geostatistics::SamplePoint {
-            x: 0.5,
-            y: 0.5,
-            value: 11.5,
-        },
-    ];
-    let result = geostatistics::interpolate_grid(
-        &samples,
-        [0.0, 0.0, 1.0, 1.0],
-        0.25,
-        &geostatistics::InterpolationMethod::Idw { power: 2.0 },
-    )
-    .expect("the demo's own five samples interpolate");
-    Json(serde_json::json!({
-        "demo": "five invented samples on a unit square, not measured data. \
-                 POST /api/v1/geostatistics/interpolate to interpolate your own.",
-        "grid_rows": result.grid_rows,
-        "grid_cols": result.grid_cols,
-        "statistics": result.statistics,
-        "morans_i": geostatistics::morans_i(&samples, 1.5)
-    }))
-}
-
 /// Routes for multispectral imagery.
 pub fn multispectral_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/multispectral/indices", get(spectral_indices))
         .route("/api/v1/multispectral/sensors", get(spectral_sensors))
-        .route("/api/v1/multispectral/demo", get(multispectral_demo))
 }
 
 async fn spectral_indices() -> Json<serde_json::Value> {
@@ -2106,379 +1574,6 @@ async fn spectral_indices() -> Json<serde_json::Value> {
 async fn spectral_sensors() -> Json<serde_json::Value> {
     let sensors = multispectral::supported_sensors();
     Json(serde_json::json!({ "sensors": sensors }))
-}
-
-async fn multispectral_demo() -> Json<serde_json::Value> {
-    let red = vec![0.1, 0.2, 0.3, 0.05, 0.15, 0.25, 0.08, 0.12, 0.18];
-    let nir = vec![0.5, 0.4, 0.3, 0.8, 0.6, 0.35, 0.7, 0.55, 0.45];
-    let ndvi = multispectral::compute_ndvi(&red, &nir);
-    let blue = [0.05; 9];
-    let evi = multispectral::compute_evi(&nir, &red, &blue);
-    let classification = multispectral::classify_ndvi(&ndvi, 0.25);
-    Json(serde_json::json!({
-        "ndvi_values": ndvi,
-        "evi_values": evi,
-        "classification": classification,
-        "statistics": {
-            "ndvi_min": ndvi.iter().cloned().fold(f64::INFINITY, f64::min),
-            "ndvi_max": ndvi.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
-            "ndvi_mean": ndvi.iter().sum::<f64>() / ndvi.len() as f64,
-        }
-    }))
-}
-
-// ─── OSM Buildings Routes ────────────────────────────────────────────────────
-
-/// Routes for OSM building extrusion and 3D generation.
-pub fn osm_buildings_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/osm-buildings/extrude", get(extrude_osm_buildings))
-        .route("/api/v1/osm-buildings/parse", get(parse_osm_data))
-        .route("/api/v1/osm-buildings/info", get(osm_buildings_info))
-}
-
-async fn extrude_osm_buildings() -> Json<serde_json::Value> {
-    // Demo: extrude a sample set of buildings with Empire State Building tiers + neighbors
-    let c = |x: f64, y: f64| osm_buildings::Coord2D { x, y };
-
-    // Empire State Building — tiered profile (base, setback 1, setback 2, tower)
-    let esb_base = osm_buildings::OsmBuilding {
-        osm_id: 1001,
-        footprint: vec![
-            c(-73.9868, 40.7475),
-            c(-73.9838, 40.7475),
-            c(-73.9838, 40.7495),
-            c(-73.9868, 40.7495),
-            c(-73.9868, 40.7475),
-        ],
-        tags: osm_buildings::BuildingTags {
-            building: "commercial".to_string(),
-            height: Some(86.0),
-            min_height: None,
-            building_levels: Some(6),
-            building_min_level: None,
-            roof_shape: Some(osm_buildings::RoofShape::Flat),
-            roof_height: None,
-            name: Some("Empire State Building (base)".to_string()),
-            building_colour: Some("#d4c5a9".to_string()),
-            roof_colour: Some("#c4b599".to_string()),
-        },
-    };
-    let esb_setback1 = osm_buildings::OsmBuilding {
-        osm_id: 1002,
-        footprint: vec![
-            c(-73.9863, 40.7478),
-            c(-73.9843, 40.7478),
-            c(-73.9843, 40.7492),
-            c(-73.9863, 40.7492),
-            c(-73.9863, 40.7478),
-        ],
-        tags: osm_buildings::BuildingTags {
-            building: "commercial".to_string(),
-            height: Some(186.0),
-            min_height: Some(86.0),
-            building_levels: Some(25),
-            building_min_level: Some(6),
-            roof_shape: Some(osm_buildings::RoofShape::Flat),
-            roof_height: None,
-            name: Some("Empire State Building (setback 1)".to_string()),
-            building_colour: Some("#cbb89c".to_string()),
-            roof_colour: Some("#baa88c".to_string()),
-        },
-    };
-    let esb_mid = osm_buildings::OsmBuilding {
-        osm_id: 1003,
-        footprint: vec![
-            c(-73.9858, 40.7481),
-            c(-73.9848, 40.7481),
-            c(-73.9848, 40.7490),
-            c(-73.9858, 40.7490),
-            c(-73.9858, 40.7481),
-        ],
-        tags: osm_buildings::BuildingTags {
-            building: "commercial".to_string(),
-            height: Some(320.0),
-            min_height: Some(186.0),
-            building_levels: Some(50),
-            building_min_level: Some(31),
-            roof_shape: Some(osm_buildings::RoofShape::Flat),
-            roof_height: None,
-            name: Some("Empire State Building (mid)".to_string()),
-            building_colour: Some("#c0a880".to_string()),
-            roof_colour: Some("#b0987a".to_string()),
-        },
-    };
-    let esb_tower = osm_buildings::OsmBuilding {
-        osm_id: 1004,
-        footprint: vec![
-            c(-73.9856, 40.7483),
-            c(-73.9850, 40.7483),
-            c(-73.9850, 40.7488),
-            c(-73.9856, 40.7488),
-            c(-73.9856, 40.7483),
-        ],
-        tags: osm_buildings::BuildingTags {
-            building: "commercial".to_string(),
-            height: Some(443.0),
-            min_height: Some(320.0),
-            building_levels: Some(22),
-            building_min_level: Some(81),
-            roof_shape: Some(osm_buildings::RoofShape::Pyramidal),
-            roof_height: Some(20.0),
-            name: Some("Empire State Building (tower)".to_string()),
-            building_colour: Some("#b89870".to_string()),
-            roof_colour: Some("#8b7355".to_string()),
-        },
-    };
-
-    // Surrounding buildings
-    let neighbors = vec![
-        osm_buildings::OsmBuilding {
-            osm_id: 2001,
-            footprint: vec![
-                c(-73.9835, 40.7488),
-                c(-73.9825, 40.7488),
-                c(-73.9825, 40.7495),
-                c(-73.9835, 40.7495),
-                c(-73.9835, 40.7488),
-            ],
-            tags: osm_buildings::BuildingTags {
-                building: "commercial".to_string(),
-                height: Some(80.0),
-                min_height: None,
-                building_levels: Some(16),
-                building_min_level: None,
-                roof_shape: Some(osm_buildings::RoofShape::Flat),
-                roof_height: None,
-                name: Some("Office Tower A".to_string()),
-                building_colour: Some("#b8c4d0".to_string()),
-                roof_colour: None,
-            },
-        },
-        osm_buildings::OsmBuilding {
-            osm_id: 2002,
-            footprint: vec![
-                c(-73.9875, 40.7476),
-                c(-73.9865, 40.7476),
-                c(-73.9865, 40.7484),
-                c(-73.9875, 40.7484),
-                c(-73.9875, 40.7476),
-            ],
-            tags: osm_buildings::BuildingTags {
-                building: "commercial".to_string(),
-                height: Some(120.0),
-                min_height: None,
-                building_levels: Some(28),
-                building_min_level: None,
-                roof_shape: Some(osm_buildings::RoofShape::Flat),
-                roof_height: None,
-                name: Some("Office Tower B".to_string()),
-                building_colour: Some("#a0b0c0".to_string()),
-                roof_colour: None,
-            },
-        },
-        osm_buildings::OsmBuilding {
-            osm_id: 2003,
-            footprint: vec![
-                c(-73.9840, 40.7468),
-                c(-73.9830, 40.7468),
-                c(-73.9830, 40.7476),
-                c(-73.9840, 40.7476),
-                c(-73.9840, 40.7468),
-            ],
-            tags: osm_buildings::BuildingTags {
-                building: "residential".to_string(),
-                height: Some(65.0),
-                min_height: None,
-                building_levels: Some(14),
-                building_min_level: None,
-                roof_shape: Some(osm_buildings::RoofShape::Gabled),
-                roof_height: Some(3.0),
-                name: Some("Residential Block".to_string()),
-                building_colour: Some("#c8b090".to_string()),
-                roof_colour: Some("#8b4513".to_string()),
-            },
-        },
-        osm_buildings::OsmBuilding {
-            osm_id: 2004,
-            footprint: vec![
-                c(-73.9870, 40.7492),
-                c(-73.9860, 40.7492),
-                c(-73.9860, 40.7500),
-                c(-73.9870, 40.7500),
-                c(-73.9870, 40.7492),
-            ],
-            tags: osm_buildings::BuildingTags {
-                building: "commercial".to_string(),
-                height: Some(95.0),
-                min_height: None,
-                building_levels: Some(20),
-                building_min_level: None,
-                roof_shape: Some(osm_buildings::RoofShape::Hipped),
-                roof_height: Some(5.0),
-                name: Some("Hotel Plaza".to_string()),
-                building_colour: Some("#d0c8b0".to_string()),
-                roof_colour: Some("#6b5b47".to_string()),
-            },
-        },
-        osm_buildings::OsmBuilding {
-            osm_id: 2005,
-            footprint: vec![
-                c(-73.9828, 40.7478),
-                c(-73.9818, 40.7478),
-                c(-73.9818, 40.7485),
-                c(-73.9828, 40.7485),
-                c(-73.9828, 40.7478),
-            ],
-            tags: osm_buildings::BuildingTags {
-                building: "commercial".to_string(),
-                height: Some(150.0),
-                min_height: None,
-                building_levels: Some(35),
-                building_min_level: None,
-                roof_shape: Some(osm_buildings::RoofShape::Flat),
-                roof_height: None,
-                name: Some("Glass Tower".to_string()),
-                building_colour: Some("#90b8d8".to_string()),
-                roof_colour: None,
-            },
-        },
-        osm_buildings::OsmBuilding {
-            osm_id: 2006,
-            footprint: vec![
-                c(-73.9880, 40.7488),
-                c(-73.9872, 40.7488),
-                c(-73.9872, 40.7496),
-                c(-73.9880, 40.7496),
-                c(-73.9880, 40.7488),
-            ],
-            tags: osm_buildings::BuildingTags {
-                building: "office".to_string(),
-                height: Some(50.0),
-                min_height: None,
-                building_levels: Some(12),
-                building_min_level: None,
-                roof_shape: Some(osm_buildings::RoofShape::Flat),
-                roof_height: None,
-                name: Some("Low-rise Office".to_string()),
-                building_colour: Some("#c0c0c0".to_string()),
-                roof_colour: None,
-            },
-        },
-    ];
-
-    let mut buildings = vec![esb_base, esb_setback1, esb_mid, esb_tower];
-    buildings.extend(neighbors);
-    let request = osm_buildings::ExtrudeBuildingsRequest {
-        min_lon: -74.0,
-        min_lat: 40.7,
-        max_lon: -73.9,
-        max_lat: 40.8,
-        level_height_meters: None,
-        default_height_meters: None,
-        include_roof_geometry: Some(true),
-        output_format: None,
-    };
-    let result = osm_buildings::extrude_buildings(&buildings, &request);
-    let meshes: Vec<serde_json::Value> = result
-        .buildings
-        .iter()
-        .map(|b| {
-            serde_json::json!({
-                "osm_id": b.osm_id,
-                "name": b.name,
-                "height": b.height,
-                "min_height": b.min_height,
-                "wall_color": b.wall_color,
-                "roof_color": b.roof_color,
-                "roof_shape": format!("{:?}", b.roof_shape),
-                "vertices": b.vertices.iter().map(|v| [v.x, v.y, v.z]).collect::<Vec<_>>(),
-                "normals": b.normals,
-                "triangles": b.triangles.iter().map(|t| [t.v0, t.v1, t.v2]).collect::<Vec<_>>(),
-            })
-        })
-        .collect();
-    Json(serde_json::json!({
-        "buildings_extruded": result.buildings.len(),
-        "total_vertices": result.total_vertices,
-        "total_triangles": result.total_triangles,
-        "bounding_box": {
-            "min": result.bounding_box.min,
-            "max": result.bounding_box.max,
-        },
-        "meshes": meshes,
-        "sample": result.buildings.first().map(|b| serde_json::json!({
-            "osm_id": b.osm_id,
-            "name": b.name,
-            "height": b.height,
-            "wall_color": b.wall_color,
-            "roof_color": b.roof_color,
-            "vertex_count": b.vertices.len(),
-            "triangle_count": b.triangles.len(),
-        })),
-    }))
-}
-
-async fn parse_osm_data() -> Json<serde_json::Value> {
-    // Demo: parse sample Overpass response
-    let sample = serde_json::json!({
-        "elements": [
-            {
-                "type": "way",
-                "id": 2001,
-                "tags": {
-                    "building": "residential",
-                    "building:levels": "5",
-                    "roof:shape": "gabled",
-                    "name": "Sample Apartment"
-                },
-                "geometry": [
-                    {"lon": 2.349, "lat": 48.864},
-                    {"lon": 2.350, "lat": 48.864},
-                    {"lon": 2.350, "lat": 48.865},
-                    {"lon": 2.349, "lat": 48.865},
-                    {"lon": 2.349, "lat": 48.864}
-                ]
-            }
-        ]
-    });
-    let buildings = osm_buildings::parse_overpass_buildings(&sample);
-    Json(serde_json::json!({
-        "parsed_count": buildings.len(),
-        "buildings": buildings.iter().map(|b| serde_json::json!({
-            "osm_id": b.osm_id,
-            "name": b.tags.name,
-            "building_type": b.tags.building,
-            "levels": b.tags.building_levels,
-            "roof_shape": b.tags.roof_shape,
-            "footprint_vertices": b.footprint.len(),
-        })).collect::<Vec<_>>()
-    }))
-}
-
-async fn osm_buildings_info() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "feature": "OSM Building Extrusion",
-        "description": "Parse OpenStreetMap building footprints and extrude them into 3D meshes for visualization as 3D Tiles",
-        "capabilities": [
-            "Parse OSM Overpass API building data",
-            "Extrude 2D polygons to 3D meshes with walls and caps",
-            "Support building:levels, height, min_height tags",
-            "Multiple roof shapes: flat, gabled, hipped, pyramidal, skillion, dome",
-            "Custom building and roof colors from OSM tags",
-            "Output as 3D Tiles, GLB, or GeoJSON",
-            "Batch extrusion for entire city regions",
-            "Multi-view consistency for depth fusion"
-        ],
-        "supported_tags": [
-            "building", "height", "min_height", "building:levels",
-            "building:min_level", "roof:shape", "roof:height",
-            "building:colour", "roof:colour", "name"
-        ],
-        "output_formats": ["3dtiles", "glb", "geojson"],
-        "roof_shapes": ["flat", "gabled", "hipped", "pyramidal", "skillion", "dome"],
-        "competitive_note": "Equivalent to Cesium Ion OSM Buildings — fully self-hosted, no per-tile streaming fees"
-    }))
 }
 
 // ─── Entity Linking Routes ──────────────────────────────────────────────────
@@ -2533,78 +1628,6 @@ async fn query_entity_links_by_position(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn isochrone_query(minutes: Option<&str>, profile: Option<&str>) -> IsochroneQuery {
-        IsochroneQuery {
-            lon: -122.4194,
-            lat: 37.7749,
-            minutes: minutes.map(str::to_string),
-            profile: profile.map(str::to_string),
-            concavity: None,
-        }
-    }
-
-    fn reason(result: Result<isochrone::IsochroneRequest, (StatusCode, String)>) -> String {
-        let (status, reason) = result.expect_err("expected a rejection");
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        reason
-    }
-
-    #[test]
-    fn test_isochrone_query_defaults() {
-        let request = isochrone_query(None, None).into_request().unwrap();
-
-        assert_eq!(request.origin, [-122.4194, 37.7749]);
-        assert_eq!(request.contours_minutes, vec![5, 10, 15]);
-        assert_eq!(request.profile, isochrone::TravelProfile::Driving);
-        assert_eq!(request.concavity, itinera_core::DEFAULT_CONCAVITY);
-    }
-
-    #[test]
-    fn test_isochrone_query_accepts_every_listed_profile() {
-        for name in ISOCHRONE_PROFILES {
-            assert!(
-                isochrone_query(None, Some(name)).into_request().is_ok(),
-                "profiles endpoint lists '{name}' but compute rejects it"
-            );
-        }
-    }
-
-    #[test]
-    fn test_isochrone_query_rejects_unknown_profile() {
-        let rejection = reason(isochrone_query(None, Some("teleport")).into_request());
-        assert!(rejection.contains("teleport"), "{rejection}");
-    }
-
-    #[test]
-    fn test_isochrone_query_rejects_unparseable_minutes() {
-        let rejection = reason(isochrone_query(Some("5,soon,15"), None).into_request());
-        assert!(rejection.contains("soon"), "{rejection}");
-    }
-
-    #[test]
-    fn test_isochrone_query_rejects_out_of_range_origin() {
-        let mut query = isochrone_query(None, None);
-        query.lat = 91.0;
-        reason(query.into_request());
-    }
-
-    #[test]
-    fn test_isochrone_query_rejects_bad_concavity() {
-        for concavity in [-1.0, f64::NAN] {
-            let mut query = isochrone_query(None, None);
-            query.concavity = Some(concavity);
-            reason(query.into_request());
-        }
-    }
-
-    #[test]
-    fn test_isochrone_query_keeps_a_valid_concavity() {
-        let mut query = isochrone_query(None, None);
-        query.concavity = Some(0.5);
-
-        assert_eq!(query.into_request().unwrap().concavity, 0.5);
-    }
 
     /// POST a body to the real geostatistics route table and read the answer.
     async fn interpolate(body: serde_json::Value) -> (StatusCode, String) {
@@ -2988,18 +2011,6 @@ mod tests {
             geoprocessing::GeoOperation::parse(&name, Some(100.0), Some(0.5))
                 .unwrap_or_else(|error| panic!("/operations lists '{name}' but run said {error}"));
         }
-    }
-
-    #[tokio::test]
-    async fn geoprocessing_demo_says_it_is_a_demo() {
-        let (status, body) = geoprocessing_request("GET", "/api/v1/geoprocessing/demo", None).await;
-
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let demo = serde_json::from_str::<serde_json::Value>(&body).unwrap();
-        assert!(
-            demo["demo"].as_str().unwrap().contains("invented"),
-            "the demo payload must say it is a demo: {body}"
-        );
     }
 
     // ── static map ──────────────────────────────────────────────────────────

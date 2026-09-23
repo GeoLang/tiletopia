@@ -103,11 +103,7 @@ These exist in the code or answer on a route, and do not do what their names say
 | DAE tiling | Neither the native tiler nor mago-3d-tiler takes DAE, so those jobs fail |
 | Draco tile compression | `draco_encode_mesh` compiles under the default `draco` feature and no tiling code calls it |
 | Implicit tiling | `tiletopia_core::implicit_tiling` has no caller. Tilesets are written with explicit children |
-| GPU tiling | `tiletopia_core::gpu` compiles under the `gpu` feature and no tiling code calls it |
 | Photogrammetry, BIM 4D, indoor | `GET /api/v1/photogrammetry/projects`, `/bim4d/projects` and `/indoor/buildings` answer example rows compiled into the binary. There is no SfM pipeline, schedule engine or indoor graph behind them |
-| Routing and isochrones | `/api/v1/routing/route` snaps to a small graph of San Francisco nodes compiled into the binary. `/api/v1/isochrone/compute` spreads over a uniform grid at a fixed speed per profile, with no road network |
-| Fixed-input demos | `/api/v1/map-matching/match`, `/flight-planning/generate`, `/scan-registration/demo`, `/osm-buildings/*` and every `/api/v1/*/demo` route run over input compiled into the binary and take none from the request |
-| Seeded example data | `/api/v1/demo/*`, `/features/*`, `/issues`, `/workspaces/*`, `/mobile/*`, `/classification/classes`, `/collaboration/sessions` and `/plugins` answer rows compiled into the binary |
 | Catalog add | `POST /api/v1/catalog/{id}/add` queues a job whose input is the dataset URL, and the job queue only reads local files, so the job fails |
 
 The `gui/` globe extrudes OpenStreetMap building footprints in the browser from Overpass. That path does not use the server.

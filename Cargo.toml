@@ -14,7 +14,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["GeoLang <tiletopia@proton.me>"]
 repository = "https://github.com/GeoLang/tiletopia"
-description = "Geospatial tile server platform with routing, terrain, and point cloud services"
+description = "Geospatial tile server platform with terrain and point cloud services"
 license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
@@ -36,7 +36,6 @@ clap = { version = "4", features = ["derive"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 bytes = "1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
-wgpu = "24"
 memmap2 = "0.9"
 las = "0.9"
 tiff = "0.9"
@@ -108,9 +107,6 @@ tilejson = "0.4"
 object_store = { version = "0.14", features = ["fs"] }
 
 # GeoLang ecosystem crates
-itinera-core = { git = "https://github.com/GeoLang/itinera.git" }
-itinera-graph = { git = "https://github.com/GeoLang/itinera.git" }
-itinera-match = { git = "https://github.com/GeoLang/itinera.git" }
 geokode-core = { git = "https://github.com/GeoLang/geokode.git", tag = "v0.1.0" }
 nubis-core = { git = "https://github.com/GeoLang/nubis.git", tag = "v0.1.0" }
 terrano-core = { git = "https://github.com/GeoLang/terrano.git", branch = "master" }

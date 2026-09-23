@@ -9,7 +9,7 @@ Tiletopia has **real, working** code for:
 - HTTP tile server (Axum) with JWT auth, multipart upload, Prometheus metrics
 - Local filesystem tile store
 - CesiumJS/deck.gl/MapLibre web viewer with asset management
-- meshopt simplification for mesh LODs. `implicit_tiling`, `draco_encode_mesh` and the `gpu` decimation module compile but nothing in the tiling pipeline calls any of them
+- meshopt simplification for mesh LODs. `implicit_tiling` and `draco_encode_mesh` compile but nothing in the tiling pipeline calls either
 - CLI: `tile`, `serve`, `info`, `validate`, `set-role`, `edge`
 
 Each item below says whether it is done or still open.
