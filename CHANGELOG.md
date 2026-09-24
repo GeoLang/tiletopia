@@ -75,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - 2026-09-24: a realtime message over 64 KiB closes its connection.
+  A room keeps at most 32 unread messages, so one account holds about 64 MiB.
 - 2026-09-24: failed logins lock an account only for the client address they
   came from, so a stranger can no longer keep the owner locked out. The account
   locks for every address after 20 times `TILETOPIA_LOGIN_LOCKOUT_FAILURES`, and

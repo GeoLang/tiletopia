@@ -285,7 +285,7 @@ impl RealtimeState {
         if owned >= MAX_ROOMS_PER_USER {
             return None;
         }
-        let (tx, _) = broadcast::channel(256);
+        let (tx, _) = broadcast::channel(ROOM_BROADCAST_CAPACITY);
         rooms.by_id.insert(
             room.to_string(),
             Room {
@@ -342,6 +342,8 @@ impl Default for RealtimeState {
 const MAX_ROOM_ID_LEN: usize = 128;
 
 pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
+
+const ROOM_BROADCAST_CAPACITY: usize = 32;
 
 /// Room join gate: any valid JWT may connect, viewer role included, because
 /// collaboration is presence, cursors and chat rather than a write to stored
