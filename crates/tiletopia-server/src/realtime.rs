@@ -229,8 +229,11 @@ impl Default for PresenceTracker {
 /// couple of dozen covers legitimate multi-tab, multi-asset use.
 pub const MAX_ROOMS_PER_USER: usize = 32;
 
-/// Close code sent to a connection refused by [`MAX_ROOMS_PER_USER`]. In the
-/// private-use range 4000-4999, picked to echo HTTP 429.
+// every room full of max-size messages holds 240 MiB
+pub const MAX_ROOMS: usize = 120;
+
+/// Close code sent to a connection refused by [`MAX_ROOMS_PER_USER`] or
+/// [`MAX_ROOMS`]. In the private-use range 4000-4999, picked to echo HTTP 429.
 pub const ROOM_LIMIT_CLOSE_CODE: u16 = 4029;
 
 /// A live room: its broadcast channel, the account charged for it, and how many
@@ -273,7 +276,8 @@ impl RealtimeState {
 
     /// Take one connection's hold on a room, creating it if this is the first
     /// connection. `None` when `user` already holds [`MAX_ROOMS_PER_USER`]
-    /// rooms; joining a room someone else created is not charged to `user`.
+    /// rooms or the server holds [`MAX_ROOMS`]; joining a room someone else
+    /// created is not charged to `user`.
     /// Every success must be paired with a [`Self::release_room`].
     async fn acquire_room(&self, room: &str, user: &str) -> Option<broadcast::Sender<String>> {
         let mut rooms = self.rooms.write().await;
@@ -282,7 +286,7 @@ impl RealtimeState {
             return Some(existing.tx.clone());
         }
         let owned = rooms.owned.get(user).copied().unwrap_or(0);
-        if owned >= MAX_ROOMS_PER_USER {
+        if owned >= MAX_ROOMS_PER_USER || rooms.by_id.len() >= MAX_ROOMS {
             return None;
         }
         let (tx, _) = broadcast::channel(ROOM_BROADCAST_CAPACITY);

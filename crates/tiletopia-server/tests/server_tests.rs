@@ -2991,6 +2991,46 @@ mod tests {
         assert!(accepted, "a freed room slot must let a new room through");
     }
 
+    #[tokio::test]
+    async fn realtime_rejects_rooms_past_the_server_cap_but_joins_existing_ones() {
+        use futures::StreamExt;
+        use tiletopia_server::realtime::{MAX_ROOMS, MAX_ROOMS_PER_USER, ROOM_LIMIT_CLOSE_CODE};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let state = test_state().await;
+        let addr = serve(&state).await;
+
+        let mut held = Vec::new();
+        for account in 0..MAX_ROOMS.div_ceil(MAX_ROOMS_PER_USER) {
+            let (token, _uid) = signup(&state, &format!("collab-fill-{account}@example.com")).await;
+            let rooms = MAX_ROOMS_PER_USER.min(MAX_ROOMS - held.len());
+            for i in 0..rooms {
+                held.push(connect_room(addr, &format!("room-{account}-{i}"), &token).await);
+            }
+        }
+
+        // a fresh account is under its own cap, so only the server-wide one refuses it
+        let (newcomer, _uid) = signup(&state, "collab-newcomer@example.com").await;
+        let mut over = connect_room(addr, "over-the-server-cap", &newcomer).await;
+        send_join(&mut over, "over-the-server-cap", "Newcomer").await;
+        match over.next().await {
+            Some(Ok(Message::Close(Some(frame)))) => {
+                assert_eq!(u16::from(frame.code), ROOM_LIMIT_CLOSE_CODE);
+            }
+            other => panic!("expected a room-limit close, got {other:?}"),
+        }
+
+        let mut joiner = connect_room(addr, "room-0-0", &newcomer).await;
+        send_join(&mut joiner, "room-0-0", "Newcomer").await;
+        match joiner.next().await {
+            Some(Ok(Message::Text(text))) => {
+                let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(v["type"], "Presence");
+            }
+            other => panic!("an existing room must still take joins, got {other:?}"),
+        }
+    }
+
     fn chat_with(message: &str) -> String {
         serde_json::json!({
             "type": "Chat",
