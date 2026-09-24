@@ -128,7 +128,7 @@ export class CollaborationPanel {
     list.innerHTML = users.map(u =>
       `<div class="collab-user">
         <span class="collab-dot" style="background:${u.color}"></span>
-        ${u.user_name}${u.user_id === this.userId ? ' (you)' : ''}
+        ${this._escapeHtml(u.user_name)}${u.user_id === this.userId ? ' (you)' : ''}
       </div>`
     ).join('');
   }
@@ -173,7 +173,7 @@ export class CollaborationPanel {
     if (!log) return;
     const div = document.createElement('div');
     div.className = 'chat-msg';
-    div.innerHTML = `<strong>${msg.user_name}:</strong> ${this._escapeHtml(msg.message)}`;
+    div.innerHTML = `<strong>${this._escapeHtml(msg.user_name)}:</strong> ${this._escapeHtml(msg.message)}`;
     log.appendChild(div);
     log.scrollTop = log.scrollHeight;
   }

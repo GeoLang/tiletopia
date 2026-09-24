@@ -81,6 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   queues, and refuses a new room past that with the per-account close code.
 - 2026-09-24: a realtime Join whose `user_name` is over 64 characters gets the
   same close, so a presence broadcast stays small.
+- 2026-09-24: the dashboard's collaboration panel shows member names as text,
+  where markup in a name used to run in every other member's browser.
 - 2026-09-24: failed logins lock an account only for the client address they
   came from, so a stranger can no longer keep the owner locked out. The account
   locks for every address after 20 times `TILETOPIA_LOGIN_LOCKOUT_FAILURES`, and
