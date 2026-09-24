@@ -155,6 +155,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 2026-09-23: signup and login limits. `TILETOPIA_MAX_USERS` closes signup
+  with a 403 once the users table holds that many accounts, and
+  `TILETOPIA_SIGNUPS_PER_HOUR` answers 429 past that many signups in the last
+  hour across everyone. Both are off when unset. Consecutive failed logins lock
+  the account with a 429 for `TILETOPIA_LOGIN_LOCKOUT_MINUTES`, after
+  `TILETOPIA_LOGIN_LOCKOUT_FAILURES` of them, 10 and 15 minutes by default.
+  The count is taken before the password is checked, so a burst of parallel
+  guesses gets no more tries than the limit. Every count lives in the users
+  table and survives a restart.
 - IFC element ids reach the tiles (2026-08-25). The IFC reader keeps each
   element's GlobalId and the mesh tiler makes every source mesh one feature:
   each vertex carries its feature id as `_FEATURE_ID_0` under

@@ -1437,6 +1437,208 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
+    // -- signup and login limits --
+
+    async fn try_signup(state: &Arc<AppState>, email: &str) -> (StatusCode, serde_json::Value) {
+        let body =
+            serde_json::json!({ "email": email, "password": "pw123456", "name": "Test User" })
+                .to_string();
+        let resp = router(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/signup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, v)
+    }
+
+    async fn insert_user_created_at(
+        state: &Arc<AppState>,
+        email: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        use tiletopia_server::users::{User, UserRole};
+        let user = User {
+            id: uuid::Uuid::new_v4(),
+            email: email.to_string(),
+            name: "Seeded".into(),
+            role: UserRole::Viewer,
+            org_id: None,
+            created_at,
+            last_login: None,
+        };
+        state
+            .db
+            .create_user(&user, &tiletopia_server::users::hash_password("pw123456"))
+            .await
+            .unwrap();
+    }
+
+    fn account_limits() -> tiletopia_server::users::AccountLimits {
+        tiletopia_server::users::AccountLimits {
+            max_users: None,
+            signups_per_hour: None,
+            login_lockout_failures: None,
+            login_lockout: chrono::Duration::minutes(15),
+        }
+    }
+
+    #[tokio::test]
+    async fn signup_is_refused_once_the_store_holds_max_users() {
+        let state =
+            crate::common::test_state_with_account_limits(tiletopia_server::users::AccountLimits {
+                max_users: Some(2),
+                ..account_limits()
+            })
+            .await;
+        insert_user_created_at(&state, "seeded@example.com", chrono::Utc::now()).await;
+        let (status, _) = try_signup(&state, "second@example.com").await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (status, body) = try_signup(&state, "third@example.com").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let reason = body["error"].as_str().unwrap();
+        assert!(reason.contains("full at 2 accounts"), "{reason}");
+        assert_eq!(state.db.count_users().await.unwrap(), 2);
+
+        // the accounts already there are untouched
+        let (status, _) = login(&state, "seeded@example.com", "pw123456").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn signup_rate_counts_only_the_last_hour() {
+        let state =
+            crate::common::test_state_with_account_limits(tiletopia_server::users::AccountLimits {
+                signups_per_hour: Some(2),
+                ..account_limits()
+            })
+            .await;
+        insert_user_created_at(
+            &state,
+            "yesterday@example.com",
+            chrono::Utc::now() - chrono::Duration::hours(2),
+        )
+        .await;
+        for email in ["rate-a@example.com", "rate-b@example.com"] {
+            let (status, body) = try_signup(&state, email).await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+        }
+
+        let (status, body) = try_signup(&state, "rate-c@example.com").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        let reason = body["error"].as_str().unwrap();
+        assert!(reason.contains("2 an hour"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn failed_logins_lock_the_account_even_for_the_right_password() {
+        let state =
+            crate::common::test_state_with_account_limits(tiletopia_server::users::AccountLimits {
+                login_lockout_failures: Some(3),
+                ..account_limits()
+            })
+            .await;
+        let (_token, uid) = signup(&state, "locked@example.com").await;
+        signup(&state, "bystander@example.com").await;
+
+        for _ in 0..3 {
+            let (status, _) = login(&state, "locked@example.com", "wrong-password").await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, body) = login(&state, "locked@example.com", "pw123456").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        let reason = body["error"].as_str().unwrap();
+        assert!(
+            reason.contains("15 minutes after 3 failed logins"),
+            "{reason}"
+        );
+
+        // another account is not affected
+        let (status, _) = login(&state, "bystander@example.com", "pw123456").await;
+        assert_eq!(status, StatusCode::OK);
+
+        // the lock is a row in the store, so it outlives the process that set it
+        let locked_until: Option<i64> =
+            sqlx::query_scalar("SELECT login_locked_until FROM users WHERE id = ?")
+                .bind(&uid)
+                .fetch_one(&state.db.pool)
+                .await
+                .unwrap();
+        assert!(locked_until.unwrap() > chrono::Utc::now().timestamp());
+
+        sqlx::query("UPDATE users SET login_locked_until = ? WHERE id = ?")
+            .bind(chrono::Utc::now().timestamp() - 1)
+            .bind(&uid)
+            .execute(&state.db.pool)
+            .await
+            .unwrap();
+        let (status, _) = login(&state, "locked@example.com", "pw123456").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_successful_login_resets_the_failure_count() {
+        let state =
+            crate::common::test_state_with_account_limits(tiletopia_server::users::AccountLimits {
+                login_lockout_failures: Some(3),
+                ..account_limits()
+            })
+            .await;
+        signup(&state, "forgetful@example.com").await;
+        for _ in 0..3 {
+            for _ in 0..2 {
+                let (status, _) = login(&state, "forgetful@example.com", "wrong").await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
+            let (status, _) = login(&state, "forgetful@example.com", "pw123456").await;
+            assert_eq!(status, StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_guesses_gets_no_more_password_checks_than_the_limit() {
+        const FAILURES_TO_LOCK: u32 = 3;
+        const GUESSES: usize = 12;
+        let state =
+            crate::common::test_state_with_account_limits(tiletopia_server::users::AccountLimits {
+                login_lockout_failures: Some(FAILURES_TO_LOCK),
+                ..account_limits()
+            })
+            .await;
+        signup(&state, "burst@example.com").await;
+
+        let mut guesses = tokio::task::JoinSet::new();
+        for guess in 0..GUESSES {
+            let state = Arc::clone(&state);
+            guesses.spawn(async move {
+                login(&state, "burst@example.com", &format!("guess-{guess}"))
+                    .await
+                    .0
+            });
+        }
+        let checked = guesses
+            .join_all()
+            .await
+            .into_iter()
+            .filter(|status| *status == StatusCode::UNAUTHORIZED)
+            .count();
+        assert!(
+            checked <= FAILURES_TO_LOCK as usize,
+            "{checked} guesses were checked"
+        );
+    }
+
     // -- ion-compat auth --
 
     // signup a user, promote to editor in the db, then log in for a token

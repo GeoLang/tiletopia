@@ -110,6 +110,13 @@ pub struct Database {
     pub pool: SqlitePool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignupOutcome {
+    Created,
+    Full { max_users: u64 },
+    RateLimited { signups_per_hour: u64 },
+}
+
 const ASSET_COLUMNS: &str =
     "id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id";
 
@@ -362,6 +369,24 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
+
+        // users predates the login lockout, login_locked_until is unix seconds
+        for column in [
+            "failed_logins INTEGER NOT NULL DEFAULT 0",
+            "login_locked_until INTEGER",
+        ] {
+            let name = column.split(' ').next().unwrap_or_default();
+            let present = sqlx::query("SELECT 1 FROM pragma_table_info('users') WHERE name = ?")
+                .bind(name)
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some();
+            if !present {
+                sqlx::query(&format!("ALTER TABLE users ADD COLUMN {column}"))
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS organizations (
@@ -1233,6 +1258,92 @@ impl Database {
     }
 
     // -- User management --
+
+    // one statement, so two signups racing for the last place cannot both get it
+    pub async fn create_user_within_signup_limits(
+        &self,
+        user: &User,
+        password_hash: &str,
+        max_users: Option<u64>,
+        signups_per_hour: Option<u64>,
+        rate_window_start: DateTime<Utc>,
+    ) -> Result<SignupOutcome, sqlx::Error> {
+        let no_limit = |limit: Option<u64>| {
+            limit
+                .and_then(|limit| i64::try_from(limit).ok())
+                .unwrap_or(i64::MAX)
+        };
+        let id = user.id.to_string();
+        let role = enum_to_str(&user.role);
+        let created_at = user.created_at.to_rfc3339();
+        let last_login = user.last_login.map(|dt| dt.to_rfc3339());
+        let org_id = user.org_id.map(|id| id.to_string());
+
+        // created_at is rfc3339 in utc, which sorts as text
+        let inserted = sqlx::query(
+            "INSERT INTO users (id, email, name, password_hash, role, org_id, created_at, last_login)
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?
+             WHERE (SELECT COUNT(*) FROM users) < ?
+               AND (SELECT COUNT(*) FROM users WHERE created_at > ?) < ?",
+        )
+        .bind(&id)
+        .bind(&user.email)
+        .bind(&user.name)
+        .bind(password_hash)
+        .bind(&role)
+        .bind(&org_id)
+        .bind(&created_at)
+        .bind(&last_login)
+        .bind(no_limit(max_users))
+        .bind(rate_window_start.to_rfc3339())
+        .bind(no_limit(signups_per_hour))
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if inserted == 1 {
+            return Ok(SignupOutcome::Created);
+        }
+        match (max_users, signups_per_hour) {
+            (Some(max_users), _) if self.count_users().await? >= max_users => {
+                Ok(SignupOutcome::Full { max_users })
+            }
+            (_, Some(signups_per_hour)) => Ok(SignupOutcome::RateLimited { signups_per_hour }),
+            _ => Err(sqlx::Error::RowNotFound),
+        }
+    }
+
+    // false while the account is locked, the failure that reaches the limit starts the lockout
+    pub async fn claim_login_attempt(
+        &self,
+        id: Uuid,
+        now: DateTime<Utc>,
+        failures_to_lock: u32,
+        lockout: chrono::Duration,
+    ) -> Result<bool, sqlx::Error> {
+        let claimed = sqlx::query(
+            "UPDATE users SET
+                 failed_logins = CASE WHEN failed_logins + 1 >= ? THEN 0 ELSE failed_logins + 1 END,
+                 login_locked_until = CASE WHEN failed_logins + 1 >= ? THEN ? ELSE login_locked_until END
+             WHERE id = ? AND (login_locked_until IS NULL OR login_locked_until <= ?)",
+        )
+        .bind(failures_to_lock)
+        .bind(failures_to_lock)
+        .bind((now + lockout).timestamp())
+        .bind(id.to_string())
+        .bind(now.timestamp())
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(claimed == 1)
+    }
+
+    pub async fn clear_failed_logins(&self, id: Uuid) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE users SET failed_logins = 0, login_locked_until = NULL WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 
     pub async fn create_user(&self, user: &User, password_hash: &str) -> Result<(), sqlx::Error> {
         let id = user.id.to_string();

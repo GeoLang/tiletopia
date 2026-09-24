@@ -84,6 +84,7 @@ pub struct AppState {
     /// Per-key request budgets. Process-local and fed by
     /// [`auth::auth_middleware`]; the keys themselves live in the database.
     pub api_key_rate_limiter: api_keys::RateLimiter,
+    pub account_limits: users::AccountLimits,
     pub metering_store: metering::MeteringStore,
     /// Queues and delivers webhook events. Shared with [`job_queue::JobQueue`],
     /// which emits the job lifecycle events.

@@ -139,6 +139,11 @@ TILETOPIA_JWT_SECRET=$(openssl rand -hex 32) tiletopia serve --data-dir ./data -
 - `TILETOPIA_CESIUM_DIR`: a CesiumJS `Build/Cesium` directory copied into every `offline_viewer` export. The Docker image sets it. Outside the image, unzip `Build/Cesium` from a [CesiumJS release](https://github.com/CesiumGS/cesium/releases), or run `pnpm --dir gui build` and use `gui/dist/cesium`.
 - `TILETOPIA_PMTILES_DIR`: directory of PMTiles archives to serve under `/martin`. Each `*.pmtiles` file directly in it, subdirectories excluded, is registered under its filename stem: `basemap.pmtiles` answers at `/martin/basemap/{z}/{x}/{y}`. Unset serves nothing. A directory that cannot be read refuses startup, and a single archive that fails to open is logged and skipped. Needs the `martin` feature. These routes need a JWT like the rest of the API, so a tile client has to send a token.
 - `TILETOPIA_ION_BASE_URL`: the origin the Ion-compat endpoints write into the URLs they return, `http://localhost:3000` when unset. Set it to the address clients reach this server at.
+- `TILETOPIA_MAX_USERS`: the most accounts the users table may hold before `/api/v1/auth/signup` answers 403 with `{"error": ...}`. Existing accounts log in as before. Unset leaves signup open.
+- `TILETOPIA_SIGNUPS_PER_HOUR`: signups accepted in the last hour across everyone, counted from account creation times. Past it signup answers 429. Unset is no limit. There is no per-address limit, because the address behind a proxy comes from `X-Forwarded-For`, which a caller can forge.
+- `TILETOPIA_LOGIN_LOCKOUT_FAILURES`: consecutive failed logins that lock an account, 10 by default, `0` for no lockout. A locked account answers 429 to every login, the right password included, until `TILETOPIA_LOGIN_LOCKOUT_MINUTES` pass, 15 by default. A successful login resets the count. Anyone who knows an account's email can lock it this way.
+
+The signup and lockout limits are counted from the users table, so a restart resets none of them. A value that is not a whole number refuses startup.
 
 ### Docker
 

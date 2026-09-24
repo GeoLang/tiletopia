@@ -263,6 +263,9 @@ async fn main() -> anyhow::Result<()> {
                     .await?
                     .map_err(anyhow::Error::msg)?;
 
+            let account_limits =
+                tiletopia_server::users::AccountLimits::from_env().map_err(anyhow::Error::msg)?;
+
             let state = Arc::new(tiletopia_server::AppState {
                 db,
                 store,
@@ -274,6 +277,7 @@ async fn main() -> anyhow::Result<()> {
                 catalog: tiletopia_server::catalog::OpenDataCatalog::new(),
                 started_at: std::time::Instant::now(),
                 api_key_rate_limiter: tiletopia_server::api_keys::RateLimiter::new(),
+                account_limits,
                 metering_store: tiletopia_server::metering::MeteringStore::new(),
                 webhooks,
                 export_engine,

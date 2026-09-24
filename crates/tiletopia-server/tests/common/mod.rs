@@ -97,6 +97,30 @@ pub async fn build_state(
     analysis_engines: tiletopia_server::analysis_tiles::AnalysisEngines,
     external_tiler_jar: Option<std::path::PathBuf>,
 ) -> Arc<AppState> {
+    build_state_with_account_limits(
+        analysis_engines,
+        external_tiler_jar,
+        tiletopia_server::users::AccountLimits::default(),
+    )
+    .await
+}
+
+pub async fn test_state_with_account_limits(
+    account_limits: tiletopia_server::users::AccountLimits,
+) -> Arc<AppState> {
+    build_state_with_account_limits(
+        tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+        None,
+        account_limits,
+    )
+    .await
+}
+
+async fn build_state_with_account_limits(
+    analysis_engines: tiletopia_server::analysis_tiles::AnalysisEngines,
+    external_tiler_jar: Option<std::path::PathBuf>,
+    account_limits: tiletopia_server::users::AccountLimits,
+) -> Arc<AppState> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -170,6 +194,7 @@ pub async fn build_state(
         catalog: tiletopia_server::catalog::OpenDataCatalog::new(),
         started_at: std::time::Instant::now(),
         api_key_rate_limiter: tiletopia_server::api_keys::RateLimiter::new(),
+        account_limits,
         metering_store: tiletopia_server::metering::MeteringStore::new(),
         webhooks,
         export_engine,

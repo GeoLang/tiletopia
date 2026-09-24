@@ -8,7 +8,7 @@ use axum::{
     extract::{Request, State},
     http::StatusCode,
     middleware::Next,
-    response::{Json, Response},
+    response::{IntoResponse, Json, Response},
 };
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::audit::AuditedResource;
 use crate::auth::Claims;
+use crate::db::SignupOutcome;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
@@ -113,6 +114,99 @@ pub struct CreateOrgRequest {
     pub name: String,
     pub max_storage_bytes: Option<u64>,
     pub max_assets: Option<u32>,
+}
+
+pub const MAX_USERS_ENV: &str = "TILETOPIA_MAX_USERS";
+pub const SIGNUPS_PER_HOUR_ENV: &str = "TILETOPIA_SIGNUPS_PER_HOUR";
+pub const LOGIN_LOCKOUT_FAILURES_ENV: &str = "TILETOPIA_LOGIN_LOCKOUT_FAILURES";
+pub const LOGIN_LOCKOUT_MINUTES_ENV: &str = "TILETOPIA_LOGIN_LOCKOUT_MINUTES";
+
+const DEFAULT_LOGIN_LOCKOUT_FAILURES: u32 = 10;
+const DEFAULT_LOGIN_LOCKOUT_MINUTES: u32 = 15;
+const SIGNUP_RATE_WINDOW: chrono::Duration = chrono::Duration::hours(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountLimits {
+    pub max_users: Option<u64>,
+    pub signups_per_hour: Option<u64>,
+    pub login_lockout_failures: Option<u32>,
+    pub login_lockout: chrono::Duration,
+}
+
+impl Default for AccountLimits {
+    fn default() -> Self {
+        Self {
+            max_users: None,
+            signups_per_hour: None,
+            login_lockout_failures: Some(DEFAULT_LOGIN_LOCKOUT_FAILURES),
+            login_lockout: chrono::Duration::minutes(DEFAULT_LOGIN_LOCKOUT_MINUTES.into()),
+        }
+    }
+}
+
+impl AccountLimits {
+    // a typo must not silently open signup
+    pub fn from_env() -> Result<Self, String> {
+        Self::resolve(|name| std::env::var(name).ok())
+    }
+
+    pub fn resolve(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let failures = count_from(
+            LOGIN_LOCKOUT_FAILURES_ENV,
+            lookup(LOGIN_LOCKOUT_FAILURES_ENV),
+        )?
+        .unwrap_or(DEFAULT_LOGIN_LOCKOUT_FAILURES.into());
+        let minutes = count_from(LOGIN_LOCKOUT_MINUTES_ENV, lookup(LOGIN_LOCKOUT_MINUTES_ENV))?;
+        Ok(Self {
+            max_users: count_from(MAX_USERS_ENV, lookup(MAX_USERS_ENV))?,
+            signups_per_hour: count_from(SIGNUPS_PER_HOUR_ENV, lookup(SIGNUPS_PER_HOUR_ENV))?,
+            // zero failures would lock before the first try
+            login_lockout_failures: (failures > 0)
+                .then(|| u32::try_from(failures))
+                .transpose()
+                .map_err(|_| format!("{LOGIN_LOCKOUT_FAILURES_ENV}={failures} is too large"))?,
+            login_lockout: match minutes {
+                None => Self::default().login_lockout,
+                Some(minutes) => i64::try_from(minutes)
+                    .ok()
+                    .and_then(chrono::Duration::try_minutes)
+                    .ok_or_else(|| format!("{LOGIN_LOCKOUT_MINUTES_ENV}={minutes} is too large"))?,
+            },
+        })
+    }
+}
+
+fn count_from(name: &str, raw: Option<String>) -> Result<Option<u64>, String> {
+    match raw.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(value) => value
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| format!("{name}={value} is not a whole number, unset it for the default")),
+    }
+}
+
+#[derive(Debug)]
+pub enum AccountError {
+    Status(StatusCode),
+    Refused(StatusCode, String),
+}
+
+impl From<StatusCode> for AccountError {
+    fn from(status: StatusCode) -> Self {
+        Self::Status(status)
+    }
+}
+
+impl IntoResponse for AccountError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Status(status) => status.into_response(),
+            Self::Refused(status, reason) => {
+                (status, Json(serde_json::json!({ "error": reason }))).into_response()
+            }
+        }
+    }
 }
 
 pub(crate) fn to_hex(bytes: &[u8]) -> String {
@@ -250,14 +344,14 @@ pub async fn require_editor(request: Request, next: Next) -> Result<Response, St
 pub async fn signup(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SignupRequest>,
-) -> Result<(StatusCode, Json<AuthResponse>), StatusCode> {
+) -> Result<(StatusCode, Json<AuthResponse>), AccountError> {
     if req.email.is_empty() || req.password.is_empty() || req.name.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into());
     }
 
     // Check if user already exists
     if let Ok(Some(_)) = state.db.get_user_by_email(&req.email).await {
-        return Err(StatusCode::CONFLICT);
+        return Err(StatusCode::CONFLICT.into());
     }
 
     let password_hash = hash_password(&req.password);
@@ -271,11 +365,35 @@ pub async fn signup(
         last_login: Some(Utc::now()),
     };
 
-    state
+    let limits = state.account_limits;
+    let outcome = state
         .db
-        .create_user(&user, &password_hash)
+        .create_user_within_signup_limits(
+            &user,
+            &password_hash,
+            limits.max_users,
+            limits.signups_per_hour,
+            Utc::now() - SIGNUP_RATE_WINDOW,
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match outcome {
+        SignupOutcome::Created => {}
+        SignupOutcome::Full { max_users } => {
+            return Err(AccountError::Refused(
+                StatusCode::FORBIDDEN,
+                format!("signups are closed: this server is full at {max_users} accounts"),
+            ));
+        }
+        SignupOutcome::RateLimited { signups_per_hour } => {
+            return Err(AccountError::Refused(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "too many signups: this server takes {signups_per_hour} an hour, try again later"
+                ),
+            ));
+        }
+    }
 
     let token = create_jwt(&user)?;
     Ok((StatusCode::CREATED, Json(AuthResponse { token, user })))
@@ -284,7 +402,7 @@ pub async fn signup(
 pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<AuthResponse>, StatusCode> {
+) -> Result<Json<AuthResponse>, AccountError> {
     let Some((mut user, password_hash)) = state
         .db
         .get_user_by_email(&req.email)
@@ -293,8 +411,27 @@ pub async fn login(
     else {
         // spend the same work on an unknown email so timing doesn't leak it
         let _ = verify_password(&req.password, &DUMMY_HASH);
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(StatusCode::UNAUTHORIZED.into());
     };
+
+    let limits = state.account_limits;
+    if let Some(failures) = limits.login_lockout_failures {
+        // counted before the password is checked, so a burst of guesses cannot all pass
+        let claimed = state
+            .db
+            .claim_login_attempt(user.id, Utc::now(), failures, limits.login_lockout)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if !claimed {
+            let minutes = limits.login_lockout.num_minutes();
+            return Err(AccountError::Refused(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "this account is locked for up to {minutes} minutes after {failures} failed logins"
+                ),
+            ));
+        }
+    }
 
     let ok = if is_legacy_hash(&password_hash) {
         if verify_legacy_password(&req.password, &password_hash) {
@@ -313,7 +450,14 @@ pub async fn login(
         verify_password(&req.password, &password_hash)
     };
     if !ok {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(StatusCode::UNAUTHORIZED.into());
+    }
+    if limits.login_lockout_failures.is_some() {
+        state
+            .db
+            .clear_failed_logins(user.id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
     user.last_login = Some(Utc::now());
@@ -429,6 +573,57 @@ mod tests {
         assert!(!is_legacy_hash(&hash_password("hunter2")));
         assert!(verify_legacy_password("hunter2", &legacy));
         assert!(!verify_legacy_password("nope", &legacy));
+    }
+
+    #[test]
+    fn unset_limits_leave_signup_open_and_keep_a_generous_lockout() {
+        let limits = AccountLimits::resolve(|_| None).unwrap();
+        assert_eq!(limits, AccountLimits::default());
+        assert_eq!(limits.max_users, None);
+        assert_eq!(limits.signups_per_hour, None);
+        assert_eq!(
+            limits.login_lockout_failures,
+            Some(DEFAULT_LOGIN_LOCKOUT_FAILURES)
+        );
+    }
+
+    #[test]
+    fn demo_limits_are_read_and_zero_failures_turns_the_lockout_off() {
+        let demo = AccountLimits::resolve(|name| {
+            match name {
+                MAX_USERS_ENV => Some("500"),
+                SIGNUPS_PER_HOUR_ENV => Some(" 30 "),
+                LOGIN_LOCKOUT_FAILURES_ENV => Some("5"),
+                LOGIN_LOCKOUT_MINUTES_ENV => Some("20"),
+                _ => None,
+            }
+            .map(str::to_string)
+        })
+        .unwrap();
+        assert_eq!(demo.max_users, Some(500));
+        assert_eq!(demo.signups_per_hour, Some(30));
+        assert_eq!(demo.login_lockout_failures, Some(5));
+        assert_eq!(demo.login_lockout, chrono::Duration::minutes(20));
+
+        let off = AccountLimits::resolve(|name| {
+            (name == LOGIN_LOCKOUT_FAILURES_ENV).then(|| "0".to_string())
+        })
+        .unwrap();
+        assert_eq!(off.login_lockout_failures, None);
+    }
+
+    #[test]
+    fn a_limit_that_is_not_a_count_refuses_startup() {
+        for name in [
+            MAX_USERS_ENV,
+            SIGNUPS_PER_HOUR_ENV,
+            LOGIN_LOCKOUT_FAILURES_ENV,
+            LOGIN_LOCKOUT_MINUTES_ENV,
+        ] {
+            let error = AccountLimits::resolve(|asked| (asked == name).then(|| "5OO".to_string()))
+                .unwrap_err();
+            assert!(error.contains(name), "{error}");
+        }
     }
 
     #[test]
