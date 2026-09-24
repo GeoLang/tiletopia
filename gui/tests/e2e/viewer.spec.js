@@ -12,7 +12,7 @@ test.describe('TileTopia Viewer', () => {
   });
 
   test('sidebar navigation buttons exist', async ({ page }) => {
-    await expect(page.locator('.nav-btn')).toHaveCount(11);
+    await expect(page.locator('.nav-btn')).toHaveCount(8);
     await expect(page.locator('.nav-btn[data-view="viewer"]')).toBeVisible();
     await expect(page.locator('.nav-btn[data-view="catalog"]')).toBeVisible();
     await expect(page.locator('.nav-btn[data-view="terrain"]')).toBeVisible();

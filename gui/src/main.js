@@ -218,9 +218,6 @@ const panelMap = {
   catalog: 'panel-catalog',
   assets: 'cesium-container',
   jobs: 'cesium-container',
-  measure: 'panel-measure',
-  anomaly: 'panel-anomaly',
-  clash: 'panel-clash',
   admin: 'panel-admin',
   stories: 'panel-stories',
   terrain: 'panel-terrain',
@@ -237,9 +234,6 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     if (targetId) document.getElementById(targetId).classList.add('active');
     // Load data for panels
     if (view === 'catalog') loadCatalog();
-    if (view === 'measure') loadMeasurement();
-    if (view === 'anomaly') loadAnomaly();
-    if (view === 'clash') loadClash();
     if (view === 'admin') loadAdmin();
     if (view === 'stories') loadStories();
     if (view === 'terrain') loadTerrain();
@@ -247,136 +241,19 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
   });
 });
 
-// ─── Measurement Panel ───────────────────────────────────────────────────────
-
-async function loadMeasurement() {
-  const panel = document.getElementById('panel-measure');
-  panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading...</p></div>';
-  try {
-    const res = await apiFetch(`${API}/demo/measurement`);
-    const d = await res.json();
-    panel.innerHTML = `<div class="feature-panel">
-      <h2>📏 Measurement Tools</h2>
-      <p class="subtitle">Real-time 3D measurements computed from survey data</p>
-      <div class="card-grid">
-        <div class="metric-card"><div class="label">3D Distance</div><div class="value">${d.distance_m}<span class="unit"> m</span></div></div>
-        <div class="metric-card"><div class="label">Polyline Length</div><div class="value">${d.polyline_length_m}<span class="unit"> m</span></div></div>
-        <div class="metric-card"><div class="label">Polygon Area</div><div class="value">${d.area_m2}<span class="unit"> m²</span></div></div>
-        <div class="metric-card"><div class="label">Mesh Volume</div><div class="value">${d.volume_m3}<span class="unit"> m³</span></div></div>
-      </div>
-      <h3 class="section-title">Earthwork Analysis</h3>
-      <div class="card-grid">
-        <div class="metric-card"><div class="label">Cut Volume</div><div class="value">${d.cut_volume_m3}<span class="unit"> m³</span></div></div>
-        <div class="metric-card"><div class="label">Fill Volume</div><div class="value">${d.fill_volume_m3}<span class="unit"> m³</span></div></div>
-        <div class="metric-card"><div class="label">Slope</div><div class="value">${d.slope_percent}<span class="unit"> %</span></div></div>
-        <div class="metric-card"><div class="label">Bearing</div><div class="value">${d.bearing_degrees}<span class="unit"> °</span></div></div>
-      </div>
-    </div>`;
-  } catch(e) {
-    panel.innerHTML = `<div class="feature-panel"><p style="color:#f85149">Error: ${e.message}</p></div>`;
-  }
-}
-
-// ─── Anomaly Detection Panel ─────────────────────────────────────────────────
-
-async function loadAnomaly() {
-  const panel = document.getElementById('panel-anomaly');
-  panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading...</p></div>';
-  try {
-    const res = await apiFetch(`${API}/demo/anomaly`);
-    const d = await res.json();
-    panel.innerHTML = `<div class="feature-panel">
-      <h2>⚠️ Anomaly Detection</h2>
-      <p class="subtitle">AI-powered structural monitoring & change detection</p>
-      <div class="card-grid">
-        <div class="metric-card"><div class="label">Deformation Alerts</div><div class="value">${d.deformation_alerts.length}</div></div>
-        <div class="metric-card"><div class="label">Encroachment Zones</div><div class="value">${d.encroachment_alerts.length}</div></div>
-        <div class="metric-card"><div class="label">Outliers Removed</div><div class="value">${d.outlier_stats.removed}<span class="unit"> / ${d.outlier_stats.total_points}</span></div></div>
-        <div class="metric-card"><div class="label">Z-Score Threshold</div><div class="value">${d.outlier_stats.z_threshold}σ</div></div>
-      </div>
-      <h3 class="section-title">Deformation Alerts</h3>
-      <table class="data-table">
-        <thead><tr><th>Grid Cell</th><th>Delta</th><th>Severity</th></tr></thead>
-        <tbody>${d.deformation_alerts.slice(0,10).map(a => `<tr>
-          <td>[${a.grid_cell[0]}, ${a.grid_cell[1]}]</td>
-          <td>${a.delta_m} m</td>
-          <td><span class="badge ${a.severity === 'HIGH' ? 'badge-critical' : 'badge-warning'}">${a.severity}</span></td>
-        </tr>`).join('')}</tbody>
-      </table>
-      <h3 class="section-title">Encroachment Zones</h3>
-      <table class="data-table">
-        <thead><tr><th>Zone</th><th>Points in Buffer</th><th>Min Distance</th></tr></thead>
-        <tbody>${d.encroachment_alerts.map(a => `<tr>
-          <td>${a.zone_name}</td>
-          <td>${a.points_in_buffer}</td>
-          <td>${a.min_distance_m} m</td>
-        </tr>`).join('')}</tbody>
-      </table>
-    </div>`;
-  } catch(e) {
-    panel.innerHTML = `<div class="feature-panel"><p style="color:#f85149">Error: ${e.message}</p></div>`;
-  }
-}
-
-// ─── Clash Detection Panel ───────────────────────────────────────────────────
-
-async function loadClash() {
-  const panel = document.getElementById('panel-clash');
-  panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading...</p></div>';
-  try {
-    const res = await apiFetch(`${API}/demo/clash`);
-    const d = await res.json();
-    panel.innerHTML = `<div class="feature-panel">
-      <h2>💥 Clash Analytics</h2>
-      <p class="subtitle">BIM vs reality clash detection across ${d.total_elements} elements</p>
-      <div class="card-grid">
-        <div class="metric-card"><div class="label">Hard Clashes</div><div class="value" style="color:#f85149">${d.hard_count}</div></div>
-        <div class="metric-card"><div class="label">Soft Clashes</div><div class="value" style="color:#d29922">${d.soft_count}</div></div>
-        <div class="metric-card"><div class="label">Total Elements</div><div class="value">${d.total_elements}</div></div>
-        <div class="metric-card"><div class="label">Total Clashes</div><div class="value">${d.clashes.length}</div></div>
-      </div>
-      <h3 class="section-title">Clash Details</h3>
-      <table class="data-table">
-        <thead><tr><th>Type</th><th>Element A</th><th>Element B</th><th>Detail</th><th>Severity</th></tr></thead>
-        <tbody>${d.clashes.map(c => `<tr>
-          <td><span class="badge ${c.clash_type === 'HARD' ? 'badge-critical' : 'badge-warning'}">${c.clash_type}</span></td>
-          <td>${c.element_a}</td>
-          <td>${c.element_b}</td>
-          <td>${c.detail}</td>
-          <td>${c.severity}</td>
-        </tr>`).join('')}</tbody>
-      </table>
-    </div>`;
-  } catch(e) {
-    panel.innerHTML = `<div class="feature-panel"><p style="color:#f85149">Error: ${e.message}</p></div>`;
-  }
-}
-
 // ─── Enterprise Admin Panel ──────────────────────────────────────────────────
 
 async function loadAdmin() {
   const panel = document.getElementById('panel-admin');
   panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading...</p></div>';
   try {
-    const [auditRes, rbacRes] = await Promise.all([
-      apiFetch(`${API}/audit`),
-      apiFetch(`${API}/demo/rbac`),
-    ]);
+    const auditRes = await apiFetch(`${API}/audit`);
     // the real trail is admin-only, so a viewer or an unauthenticated page gets
     // an empty table rather than a broken panel
     const audit = auditRes.ok ? await auditRes.json() : [];
-    const rbac = await rbacRes.json();
     panel.innerHTML = `<div class="feature-panel">
       <h2>🔒 Enterprise Admin</h2>
-      <p class="subtitle">RBAC, OIDC SSO, and full audit trail — Provider: ${rbac.provider}</p>
-      <h3 class="section-title">Users & Roles</h3>
-      <table class="data-table">
-        <thead><tr><th>Email</th><th>Role</th></tr></thead>
-        <tbody>${rbac.users.map(u => `<tr>
-          <td>${u.email}</td>
-          <td><span class="badge badge-info">${u.role}</span></td>
-        </tr>`).join('')}</tbody>
-      </table>
+      <p class="subtitle">RBAC, OIDC SSO, and full audit trail</p>
       <h3 class="section-title">Audit Trail (last ${audit.length} events)</h3>
       <table class="data-table">
         <thead><tr><th>Time</th><th>User</th><th>Action</th><th>Resource</th><th>Status</th></tr></thead>
@@ -400,14 +277,7 @@ async function loadStories() {
   const panel = document.getElementById('panel-stories');
   panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading...</p></div>';
   try {
-    let stories;
-    const apiRes = await apiFetch(`${API}/stories`);
-    if (apiRes.ok) {
-      stories = await apiRes.json();
-    } else {
-      const demoRes = await apiFetch(`${API}/demo/stories`);
-      stories = await demoRes.json();
-    }
+    const stories = await fetchStories();
     panel.innerHTML = `<div class="feature-panel">
       <h2>🎬 Narrated Presentations (Stories)</h2>
       <p class="subtitle">Cinematic 3D walkthroughs with camera paths and narration</p>

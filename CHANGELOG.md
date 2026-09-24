@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- 2026-09-24: the dashboard parts that called a route removed on 2026-09-23
+  and got a 404. The measure, anomaly and clash panels, the admin panel's
+  users table, the stories panel's `/demo/stories` fallback and
+  `gui/osm-buildings-demo.html`.
 - 2026-09-23: the routes that answered rows or input compiled into the
   binary. `/api/v1/demo/*`, `/features/*`, `/issues/*`, `/workspaces/*`,
   `/mobile/*`, `/classification/classes`, `/collaboration/sessions`,
