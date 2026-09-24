@@ -115,6 +115,7 @@ pub enum SignupOutcome {
     Created,
     Full { max_users: u64 },
     RateLimited { signups_per_hour: u64 },
+    AddressRateLimited { signups_per_address_per_hour: u64 },
 }
 
 const ASSET_COLUMNS: &str =
@@ -374,6 +375,7 @@ impl Database {
         for column in [
             "failed_logins INTEGER NOT NULL DEFAULT 0",
             "login_locked_until INTEGER",
+            "signup_address TEXT",
         ] {
             let name = column.split(' ').next().unwrap_or_default();
             let present = sqlx::query("SELECT 1 FROM pragma_table_info('users') WHERE name = ?")
@@ -1280,6 +1282,7 @@ impl Database {
         password_hash: &str,
         max_users: Option<u64>,
         signups_per_hour: Option<u64>,
+        signups_per_address_per_hour: Option<(&str, u64)>,
         rate_window_start: DateTime<Utc>,
     ) -> Result<SignupOutcome, sqlx::Error> {
         let no_limit = |limit: Option<u64>| {
@@ -1292,12 +1295,24 @@ impl Database {
         let created_at = user.created_at.to_rfc3339();
         let last_login = user.last_login.map(|dt| dt.to_rfc3339());
         let org_id = user.org_id.map(|id| id.to_string());
+        let rate_window_start = rate_window_start.to_rfc3339();
+        let signup_address = signups_per_address_per_hour.map(|(address, _)| address);
+
+        // an address is kept only while it counts toward the hourly limit
+        sqlx::query(
+            "UPDATE users SET signup_address = NULL
+             WHERE signup_address IS NOT NULL AND created_at <= ?",
+        )
+        .bind(&rate_window_start)
+        .execute(&self.pool)
+        .await?;
 
         // created_at is rfc3339 in utc, which sorts as text
         let inserted = sqlx::query(
-            "INSERT INTO users (id, email, name, password_hash, role, org_id, created_at, last_login)
-             SELECT ?, ?, ?, ?, ?, ?, ?, ?
+            "INSERT INTO users (id, email, name, password_hash, role, org_id, created_at, last_login, signup_address)
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
              WHERE (SELECT COUNT(*) FROM users) < ?
+               AND (SELECT COUNT(*) FROM users WHERE created_at > ? AND signup_address = ?) < ?
                AND (SELECT COUNT(*) FROM users WHERE created_at > ?) < ?",
         )
         .bind(&id)
@@ -1308,8 +1323,14 @@ impl Database {
         .bind(&org_id)
         .bind(&created_at)
         .bind(&last_login)
+        .bind(signup_address)
         .bind(no_limit(max_users))
-        .bind(rate_window_start.to_rfc3339())
+        .bind(&rate_window_start)
+        .bind(signup_address)
+        .bind(no_limit(
+            signups_per_address_per_hour.map(|(_, limit)| limit),
+        ))
+        .bind(&rate_window_start)
         .bind(no_limit(signups_per_hour))
         .execute(&self.pool)
         .await?
@@ -1317,12 +1338,28 @@ impl Database {
         if inserted == 1 {
             return Ok(SignupOutcome::Created);
         }
-        match (max_users, signups_per_hour) {
-            (Some(max_users), _) if self.count_users().await? >= max_users => {
-                Ok(SignupOutcome::Full { max_users })
+        if let Some(max_users) = max_users
+            && self.count_users().await? >= max_users
+        {
+            return Ok(SignupOutcome::Full { max_users });
+        }
+        if let Some((address, signups_per_address_per_hour)) = signups_per_address_per_hour {
+            let from_address: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM users WHERE created_at > ? AND signup_address = ?",
+            )
+            .bind(&rate_window_start)
+            .bind(address)
+            .fetch_one(&self.pool)
+            .await?;
+            if from_address as u64 >= signups_per_address_per_hour {
+                return Ok(SignupOutcome::AddressRateLimited {
+                    signups_per_address_per_hour,
+                });
             }
-            (_, Some(signups_per_hour)) => Ok(SignupOutcome::RateLimited { signups_per_hour }),
-            _ => Err(sqlx::Error::RowNotFound),
+        }
+        match signups_per_hour {
+            Some(signups_per_hour) => Ok(SignupOutcome::RateLimited { signups_per_hour }),
+            None => Err(sqlx::Error::RowNotFound),
         }
     }
 

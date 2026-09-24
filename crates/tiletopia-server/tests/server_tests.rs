@@ -1488,6 +1488,7 @@ mod tests {
         tiletopia_server::users::AccountLimits {
             max_users: None,
             signups_per_hour: None,
+            signups_per_address_per_hour: None,
             login_lockout_failures: None,
             account_lockout_failures: None,
             login_lockout: chrono::Duration::minutes(15),
@@ -1711,6 +1712,68 @@ mod tests {
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         let reason = body["error"].as_str().unwrap();
         assert!(reason.contains("2 an hour"), "{reason}");
+    }
+
+    async fn signup_from(
+        state: &Arc<AppState>,
+        email: &str,
+        forwarded_for: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let body =
+            serde_json::json!({ "email": email, "password": "pw123456", "name": "Test User" })
+                .to_string();
+        let resp = router(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/signup")
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-for", forwarded_for)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, v)
+    }
+
+    #[tokio::test]
+    async fn signups_from_one_address_do_not_use_up_another_address() {
+        let state =
+            crate::common::test_state_with_account_limits(tiletopia_server::users::AccountLimits {
+                signups_per_address_per_hour: Some(3),
+                signups_per_hour: Some(30),
+                trusted_proxy_hops: 1,
+                ..account_limits()
+            })
+            .await;
+        for email in [
+            "flood-a@example.com",
+            "flood-b@example.com",
+            "flood-c@example.com",
+        ] {
+            let (status, body) = signup_from(&state, email, "203.0.113.1").await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+        }
+
+        let (status, body) = signup_from(&state, "flood-d@example.com", "203.0.113.1").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        let reason = body["error"].as_str().unwrap();
+        assert!(reason.contains("from this address"), "{reason}");
+        assert!(reason.contains("3 an hour"), "{reason}");
+
+        // entries left of the one the trusted proxy appended are the client's own
+        let (status, _) =
+            signup_from(&state, "flood-e@example.com", "198.51.100.7, 203.0.113.1").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+        let (status, body) = signup_from(&state, "visitor@example.com", "198.51.100.7").await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
     }
 
     #[tokio::test]

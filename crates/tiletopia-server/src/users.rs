@@ -119,6 +119,7 @@ pub struct CreateOrgRequest {
 
 pub const MAX_USERS_ENV: &str = "TILETOPIA_MAX_USERS";
 pub const SIGNUPS_PER_HOUR_ENV: &str = "TILETOPIA_SIGNUPS_PER_HOUR";
+pub const SIGNUPS_PER_ADDRESS_PER_HOUR_ENV: &str = "TILETOPIA_SIGNUPS_PER_ADDRESS_PER_HOUR";
 pub const LOGIN_LOCKOUT_FAILURES_ENV: &str = "TILETOPIA_LOGIN_LOCKOUT_FAILURES";
 pub const LOGIN_LOCKOUT_MINUTES_ENV: &str = "TILETOPIA_LOGIN_LOCKOUT_MINUTES";
 pub const TRUSTED_PROXY_HOPS_ENV: &str = "TILETOPIA_TRUSTED_PROXY_HOPS";
@@ -139,6 +140,7 @@ pub static PASSWORD_HASH_SLOTS: tokio::sync::Semaphore =
 pub struct AccountLimits {
     pub max_users: Option<u64>,
     pub signups_per_hour: Option<u64>,
+    pub signups_per_address_per_hour: Option<u64>,
     pub login_lockout_failures: Option<u32>,
     pub account_lockout_failures: Option<u32>,
     pub login_lockout: chrono::Duration,
@@ -150,6 +152,7 @@ impl Default for AccountLimits {
         Self {
             max_users: None,
             signups_per_hour: None,
+            signups_per_address_per_hour: None,
             login_lockout_failures: Some(DEFAULT_LOGIN_LOCKOUT_FAILURES),
             account_lockout_failures: Some(
                 DEFAULT_LOGIN_LOCKOUT_FAILURES * ADDRESSES_TO_LOCK_AN_ACCOUNT,
@@ -182,6 +185,10 @@ impl AccountLimits {
         Ok(Self {
             max_users: count_from(MAX_USERS_ENV, lookup(MAX_USERS_ENV))?,
             signups_per_hour: count_from(SIGNUPS_PER_HOUR_ENV, lookup(SIGNUPS_PER_HOUR_ENV))?,
+            signups_per_address_per_hour: count_from(
+                SIGNUPS_PER_ADDRESS_PER_HOUR_ENV,
+                lookup(SIGNUPS_PER_ADDRESS_PER_HOUR_ENV),
+            )?,
             // zero failures would lock before the first try
             login_lockout_failures,
             account_lockout_failures: login_lockout_failures
@@ -390,6 +397,8 @@ pub async fn require_editor(request: Request, next: Next) -> Result<Response, St
 
 pub async fn signup(
     State(state): State<Arc<AppState>>,
+    extensions: Extensions,
+    headers: HeaderMap,
     Json(req): Json<SignupRequest>,
 ) -> Result<(StatusCode, Json<AuthResponse>), AccountError> {
     if req.email.is_empty() || req.password.is_empty() || req.name.is_empty() {
@@ -413,6 +422,10 @@ pub async fn signup(
     };
 
     let limits = state.account_limits;
+    let peer = extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(peer)| peer.ip());
+    let address = client_address(&headers, peer, limits.trusted_proxy_hops);
     let outcome = state
         .db
         .create_user_within_signup_limits(
@@ -420,6 +433,9 @@ pub async fn signup(
             &password_hash,
             limits.max_users,
             limits.signups_per_hour,
+            limits
+                .signups_per_address_per_hour
+                .map(|limit| (address.as_str(), limit)),
             Utc::now() - SIGNUP_RATE_WINDOW,
         )
         .await
@@ -430,6 +446,16 @@ pub async fn signup(
             return Err(AccountError::Refused(
                 StatusCode::FORBIDDEN,
                 format!("signups are closed: this server is full at {max_users} accounts"),
+            ));
+        }
+        SignupOutcome::AddressRateLimited {
+            signups_per_address_per_hour,
+        } => {
+            return Err(AccountError::Refused(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "too many signups from this address: this server takes {signups_per_address_per_hour} an hour from one address, try again later"
+                ),
             ));
         }
         SignupOutcome::RateLimited { signups_per_hour } => {

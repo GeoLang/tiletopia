@@ -180,6 +180,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 2026-09-24: `TILETOPIA_SIGNUPS_PER_ADDRESS_PER_HOUR` answers 429 past that
+  many signups from one client address in the last hour, off when unset.
 - 2026-09-23: signup and login limits. `TILETOPIA_MAX_USERS` closes signup
   with a 403 once the users table holds that many accounts, and
   `TILETOPIA_SIGNUPS_PER_HOUR` answers 429 past that many signups in the last
