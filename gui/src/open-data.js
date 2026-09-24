@@ -53,30 +53,34 @@ export function esriWorldImageryProvider() {
   });
 }
 
-// ─── Geocoding (Nominatim) ──────────────────────────────────────────────────
+// ─── Geocoding (geokode) ────────────────────────────────────────────────────
 
-/**
- * Nominatim-backed geocoder for the CesiumJS search bar.
- *
- * Respects Nominatim usage policy (1 req/s, User-Agent).
- */
-export class NominatimGeocoder {
+const GEOKODE_FORWARD_PATH = '/api/geocode/forward';
+const GEOCODER_RESULT_LIMIT = 5;
+const POINT_DESTINATION_HEIGHT_METRES = 1000;
+
+function geokodeDestination(result) {
+  if (result.bbox) {
+    const [minLon, minLat, maxLon, maxLat] = result.bbox;
+    return Cesium.Rectangle.fromDegrees(minLon, minLat, maxLon, maxLat);
+  }
+  return Cesium.Cartesian3.fromDegrees(result.lon, result.lat, POINT_DESTINATION_HEIGHT_METRES);
+}
+
+export class GeokodeGeocoder {
   async geocode(input) {
-    const encoded = encodeURIComponent(input);
-    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encoded}&limit=5`;
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'TileTopia-Viewer/0.3.0' },
-    });
-    if (!res.ok) return [];
-    const results = await res.json();
-    return results.map((r) => ({
-      displayName: r.display_name,
-      destination: Cesium.Cartesian3.fromDegrees(
-        parseFloat(r.lon),
-        parseFloat(r.lat),
-        1000,
-      ),
-    }));
+    const url = `${GEOKODE_FORWARD_PATH}?q=${encodeURIComponent(input)}&limit=${GEOCODER_RESULT_LIMIT}`;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return [];
+      const { results } = await res.json();
+      return results.map((result) => ({
+        displayName: result.display_name,
+        destination: geokodeDestination(result),
+      }));
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -185,7 +189,7 @@ export async function applyOpenData(viewer, opts = {}) {
   // so we inject our provider into the geocoder viewModel.
   if (viewer.geocoder) {
     const vm = viewer.geocoder.viewModel;
-    vm._geocoderServices = [new NominatimGeocoder()];
+    vm._geocoderServices = [new GeokodeGeocoder()];
   }
 
   // Optional: Google Photorealistic 3D Tiles (needs API key)

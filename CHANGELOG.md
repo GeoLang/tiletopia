@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- 2026-09-24: `/api/v1/geocoding/search` and `/api/v1/geocoding/reverse`.
+  They asked public Nominatim and fell back to seven landmarks compiled into
+  the binary. The geokode-core dependency went with them. Removed module, at
+  the last commit that held it:
+  - `crates/tiletopia-server/src/geocoding.rs` at 4a9a069
 - 2026-09-24: the dashboard parts that called a route removed on 2026-09-23
   and got a 404. The measure, anomaly and clash panels, the admin panel's
   users table, the stories panel's `/demo/stories` fallback and
@@ -151,6 +156,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 2026-09-24: the globe's search bar asks geokode at same-origin
+  `/api/geocode/forward` where it asked public Nominatim. A result with a
+  bbox flies to that rectangle. A miss or an error shows no result.
 - jsonwebtoken 9 to 11 on the `aws_lc_rs` backend (2026-08-25), a crate the
   lockfile already resolved. Only HS256 `encode`, `decode`, `from_secret` and
   `Validation::default()` are used, and 11 keeps `validate_aud` on by default,

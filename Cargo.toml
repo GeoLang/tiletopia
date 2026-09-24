@@ -74,7 +74,7 @@ ifc-lite-geometry = "2.3"
 # XML parsing (CityGML, KML)
 quick-xml = "0.39"
 
-# HTTP client (webhooks, geocoding)
+# HTTP client (webhooks, STAC, COG)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Image generation (static maps)
@@ -107,7 +107,6 @@ tilejson = "0.4"
 object_store = { version = "0.14", features = ["fs"] }
 
 # GeoLang ecosystem crates
-geokode-core = { git = "https://github.com/GeoLang/geokode.git", tag = "v0.1.0" }
 nubis-core = { git = "https://github.com/GeoLang/nubis.git", tag = "v0.1.0" }
 terrano-core = { git = "https://github.com/GeoLang/terrano.git", branch = "master" }
 geoplumb = { git = "https://github.com/GeoLang/geoplumb.git", branch = "master" }

@@ -244,7 +244,7 @@ The globe needs no Cesium Ion token and no API key:
 |---------|--------|
 | Base imagery | OpenStreetMap raster tiles, with Stamen Toner and Esri World Imagery in the layer picker |
 | 3D buildings | Overpass API, extruded in the browser |
-| Geocoding | Nominatim |
+| Geocoding | [geokode](https://github.com/GeoLang/geokode) at same-origin `/api/geocode/forward`. `pnpm run dev` sends it to this server, which has no such route, so search finds nothing in dev |
 | Terrain | this server's `/api/v1/terrain/`, or a flat ellipsoid when it does not answer |
 | Photorealistic 3D | Google 3D Tiles, when `VITE_GOOGLE_3D_TILES_KEY` is set |
 
@@ -312,7 +312,7 @@ tiletopia/
 | `GET` | `/api/v1/audit` | Audit trail, newest first. Instance-admin only |
 | `GET` | `/metrics` | Prometheus metrics |
 
-Other routes that do real work on request input: STAC search proxies `TILETOPIA_STAC_API`, COG windows read `TILETOPIA_COG_SOURCES`, `/api/v1/static-map/` renders the DEM to PNG, JPEG, WebP, SVG or PDF, `POST /api/v1/geostatistics/interpolate` runs IDW or kriging over posted samples, `POST /api/v1/geoprocessing/run` runs buffer, simplify and boolean overlays, `/api/v1/geocoding/` asks Nominatim and falls back to a built-in list, webhooks deliver signed events, the scheduler runs the jobs it stores, and API keys (`X-Api-Key`, admin-minted, hashed at rest) authenticate read routes. What answers fixed data instead is in [Not implemented](#not-implemented).
+Other routes that do real work on request input: STAC search proxies `TILETOPIA_STAC_API`, COG windows read `TILETOPIA_COG_SOURCES`, `/api/v1/static-map/` renders the DEM to PNG, JPEG, WebP, SVG or PDF, `POST /api/v1/geostatistics/interpolate` runs IDW or kriging over posted samples, `POST /api/v1/geoprocessing/run` runs buffer, simplify and boolean overlays, webhooks deliver signed events, the scheduler runs the jobs it stores, and API keys (`X-Api-Key`, admin-minted, hashed at rest) authenticate read routes. What answers fixed data instead is in [Not implemented](#not-implemented).
 
 ### Access
 

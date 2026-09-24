@@ -315,7 +315,6 @@ pub fn route_access(method: &Method, path: &str) -> RouteAccess {
         ["api", "v1", "catalog", ..] if read_only => RouteAccess::Needs(Permission::Read),
         ["api", "v1", "stac", ..] if read_only => RouteAccess::Needs(Permission::Read),
         ["api", "v1", "cog", ..] if read_only => RouteAccess::Needs(Permission::Read),
-        ["api", "v1", "geocoding", ..] if read_only => RouteAccess::Needs(Permission::Read),
 
         // rendered output a caller downloads. the export arm consumes the path
         // whatever the method, so the analysis compute arm below cannot claim a
@@ -881,7 +880,6 @@ mod tests {
                 "/api/v1/cog/datasets/ramp/window",
                 Permission::Read,
             ),
-            (Method::GET, "/api/v1/geocoding/search", Permission::Read),
             (Method::GET, "/api/v1/elevation/point", Permission::Terrain),
             (
                 Method::GET,
@@ -974,7 +972,6 @@ mod tests {
             "/api/v1/catalog",
             "/api/v1/stac/search",
             "/api/v1/cog/datasets",
-            "/api/v1/geocoding/search",
             "/api/v1/analysis/export/slope",
             "/api/v1/api-keys/usage",
         ] {

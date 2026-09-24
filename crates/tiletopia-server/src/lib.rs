@@ -19,7 +19,6 @@ pub mod db;
 pub mod elevation;
 pub mod entity_linking;
 pub mod export;
-pub mod geocoding;
 pub mod geoprocessing;
 pub mod geostatistics;
 pub mod http_cache;
@@ -307,7 +306,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::classification_routes())
         .merge(model_registry::model_registry_routes())
         .merge(premium_routes::bim4d_routes())
-        .merge(premium_routes::geocoding_routes())
         .merge(premium_routes::stac_routes())
         .merge(premium_routes::indoor_routes())
         .merge(premium_routes::cog_routes())

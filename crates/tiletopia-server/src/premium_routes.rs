@@ -20,8 +20,8 @@ use crate::{
     audit::AuditedResource,
     classification, cog, elevation,
     export::{EXPORT_FORMATS, ExportFormat, ExportJob, ExportStatus},
-    geocoding, geoprocessing, geostatistics, indoor, metering, multispectral, scheduler, stac,
-    static_map, terrain_analysis,
+    geoprocessing, geostatistics, indoor, metering, multispectral, scheduler, stac, static_map,
+    terrain_analysis,
     terrain_api::Refusal,
     users, webhooks,
 };
@@ -1037,48 +1037,6 @@ async fn list_bim4d_projects(State(state): State<Arc<AppState>>) -> Json<serde_j
     let engine = &state.bim4d_engine;
     let projects = engine.list_projects().await;
     Json(serde_json::json!({ "projects": projects }))
-}
-
-/// Routes for geocoding.
-pub fn geocoding_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/geocoding/search", get(geocode_search))
-        .route("/api/v1/geocoding/reverse", get(geocode_reverse))
-}
-
-#[derive(Deserialize)]
-struct GeocodeQuery {
-    q: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ReverseGeocodeQuery {
-    lat: Option<f64>,
-    lon: Option<f64>,
-}
-
-async fn geocode_search(Query(params): Query<GeocodeQuery>) -> Json<serde_json::Value> {
-    let query = params.q.unwrap_or_else(|| "Golden Gate Bridge".into());
-    // Try live Nominatim first, fall back to demo
-    match geocoding::geocode_nominatim(&query).await {
-        Ok(result) => Json(serde_json::json!(result)),
-        Err(_) => {
-            let result = geocoding::geocode(&query);
-            Json(serde_json::json!(result))
-        }
-    }
-}
-
-async fn geocode_reverse(Query(params): Query<ReverseGeocodeQuery>) -> Json<serde_json::Value> {
-    let lat = params.lat.unwrap_or(37.7749);
-    let lon = params.lon.unwrap_or(-122.4194);
-    match geocoding::reverse_geocode_nominatim(lat, lon).await {
-        Ok(place) => Json(serde_json::json!(place)),
-        Err(_) => {
-            let place = geocoding::reverse_geocode(lat, lon);
-            Json(serde_json::json!(place))
-        }
-    }
 }
 
 /// Routes for STAC catalog. The root is this server's own, the collection list

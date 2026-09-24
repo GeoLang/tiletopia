@@ -648,15 +648,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "bit_field"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2128,12 +2119,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
-name = "fst"
-version = "0.4.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ab85b9b05e3978cc9a9cf8fea7f01b494e1a09ed3037e16ba39edc7a29eb61a"
-
-[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2312,20 +2297,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c5a7f08910fd98737a6eda7568e7c5e645093e073328eeef49758cfe8b0489c7"
 dependencies = [
  "libm",
-]
-
-[[package]]
-name = "geokode-core"
-version = "0.1.0"
-source = "git+https://github.com/GeoLang/geokode.git?tag=v0.1.0#fe998d6f54c69bdc761d4c8fef47b877e1161297"
-dependencies = [
- "bincode",
- "chrono",
- "fst",
- "rstar",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -7210,7 +7181,6 @@ dependencies = [
  "futures",
  "geo",
  "geo-types",
- "geokode-core",
  "geoplumb",
  "gltf",
  "hmac 0.12.1",
