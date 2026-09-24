@@ -225,15 +225,19 @@ impl Default for PresenceTracker {
 
 /// How many rooms one account may hold open at once. Rooms are created by
 /// whoever joins one first, so without a cap a single token could fill memory
-/// with broadcast channels. A viewer holds one room per asset it has open, so a
-/// couple of dozen covers legitimate multi-tab, multi-asset use.
-pub const MAX_ROOMS_PER_USER: usize = 32;
+/// with broadcast channels. A viewer holds one room per asset it has open, so
+/// eight covers legitimate multi-tab, multi-asset use.
+pub const MAX_ROOMS_PER_USER: usize = 8;
 
-// every room full of max-size messages holds 240 MiB
-pub const MAX_ROOMS: usize = 120;
+// every room full of max-size messages holds 256 MiB
+pub const MAX_ROOMS: usize = 512;
 
-/// Close code sent to a connection refused by [`MAX_ROOMS_PER_USER`] or
-/// [`MAX_ROOMS`]. In the private-use range 4000-4999, picked to echo HTTP 429.
+// every presence broadcast carries every member's name
+pub const MAX_USER_NAME_CHARS: usize = 64;
+
+/// Close code sent to a connection refused by [`MAX_ROOMS_PER_USER`],
+/// [`MAX_ROOMS`] or [`MAX_USER_NAME_CHARS`]. In the private-use range
+/// 4000-4999, picked to echo HTTP 429.
 pub const ROOM_LIMIT_CLOSE_CODE: u16 = 4029;
 
 /// A live room: its broadcast channel, the account charged for it, and how many
@@ -345,7 +349,7 @@ impl Default for RealtimeState {
 /// is bounded by [`MAX_ROOMS_PER_USER`].
 const MAX_ROOM_ID_LEN: usize = 128;
 
-pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
+pub const MAX_MESSAGE_LEN: usize = 16 * 1024;
 
 const ROOM_BROADCAST_CAPACITY: usize = 32;
 
@@ -445,6 +449,15 @@ async fn handle_socket(
                             let collab_msg = collab_msg.with_sender(&sub);
                             match &collab_msg {
                                 CollabMessage::Join { user_name, .. } => {
+                                    if user_name.chars().count() > MAX_USER_NAME_CHARS {
+                                        let _ = socket
+                                            .send(Message::Close(Some(CloseFrame {
+                                                code: ROOM_LIMIT_CLOSE_CODE,
+                                                reason: "user name too long".into(),
+                                            })))
+                                            .await;
+                                        break;
+                                    }
                                     state.realtime.presence.join(&room, &sub, user_name, conn).await;
                                     joined = true;
                                     broadcast_presence(&tx, &state, &room).await;
@@ -570,6 +583,30 @@ mod tests {
         state.release_room("room-0").await;
         assert!(state.acquire_room("one-too-many", "ann").await.is_some());
         assert!(state.acquire_room("another", "ann").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_server_holds_at_most_max_rooms() {
+        let state = RealtimeState::new();
+        for i in 0..MAX_ROOMS {
+            let creator = format!("user-{}", i / MAX_ROOMS_PER_USER);
+            assert!(
+                state
+                    .acquire_room(&format!("room-{i}"), &creator)
+                    .await
+                    .is_some(),
+                "room {i} is within the cap"
+            );
+        }
+        // a newcomer is under its own cap, so only the server-wide one refuses it
+        assert!(
+            state
+                .acquire_room("one-too-many", "newcomer")
+                .await
+                .is_none()
+        );
+        assert_eq!(state.rooms.read().await.by_id.len(), MAX_ROOMS);
+        assert!(state.acquire_room("room-0", "newcomer").await.is_some());
     }
 
     #[tokio::test]

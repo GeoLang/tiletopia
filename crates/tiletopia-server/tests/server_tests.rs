@@ -2992,42 +2992,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn realtime_rejects_rooms_past_the_server_cap_but_joins_existing_ones() {
+    async fn realtime_refuses_a_join_with_a_name_over_the_limit() {
         use futures::StreamExt;
-        use tiletopia_server::realtime::{MAX_ROOMS, MAX_ROOMS_PER_USER, ROOM_LIMIT_CLOSE_CODE};
+        use tiletopia_server::realtime::{MAX_USER_NAME_CHARS, ROOM_LIMIT_CLOSE_CODE};
         use tokio_tungstenite::tungstenite::Message;
 
         let state = test_state().await;
+        let (token, _uid) = signup(&state, "collab-name@example.com").await;
         let addr = serve(&state).await;
 
-        let mut held = Vec::new();
-        for account in 0..MAX_ROOMS.div_ceil(MAX_ROOMS_PER_USER) {
-            let (token, _uid) = signup(&state, &format!("collab-fill-{account}@example.com")).await;
-            let rooms = MAX_ROOMS_PER_USER.min(MAX_ROOMS - held.len());
-            for i in 0..rooms {
-                held.push(connect_room(addr, &format!("room-{account}-{i}"), &token).await);
-            }
-        }
-
-        // a fresh account is under its own cap, so only the server-wide one refuses it
-        let (newcomer, _uid) = signup(&state, "collab-newcomer@example.com").await;
-        let mut over = connect_room(addr, "over-the-server-cap", &newcomer).await;
-        send_join(&mut over, "over-the-server-cap", "Newcomer").await;
-        match over.next().await {
+        // two bytes per character, so the limit is counted in characters
+        let mut long = connect_room(addr, "room-name", &token).await;
+        send_join(&mut long, "room-name", &"é".repeat(MAX_USER_NAME_CHARS + 1)).await;
+        match long.next().await {
             Some(Ok(Message::Close(Some(frame)))) => {
                 assert_eq!(u16::from(frame.code), ROOM_LIMIT_CLOSE_CODE);
             }
-            other => panic!("expected a room-limit close, got {other:?}"),
+            other => panic!("expected a close for the long name, got {other:?}"),
         }
 
-        let mut joiner = connect_room(addr, "room-0-0", &newcomer).await;
-        send_join(&mut joiner, "room-0-0", "Newcomer").await;
-        match joiner.next().await {
+        let name = "é".repeat(MAX_USER_NAME_CHARS);
+        let mut fits = connect_room(addr, "room-name", &token).await;
+        send_join(&mut fits, "room-name", &name).await;
+        match fits.next().await {
             Some(Ok(Message::Text(text))) => {
                 let v: serde_json::Value = serde_json::from_str(&text).unwrap();
                 assert_eq!(v["type"], "Presence");
+                assert_eq!(v["users"][0]["user_name"], name);
             }
-            other => panic!("an existing room must still take joins, got {other:?}"),
+            other => panic!("a name at the limit must join, got {other:?}"),
         }
     }
 

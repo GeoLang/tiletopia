@@ -74,10 +74,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- 2026-09-24: a realtime message over 64 KiB closes its connection.
-  A room keeps at most 32 unread messages, so one account holds about 64 MiB.
-- 2026-09-24: the server holds at most 120 realtime rooms, 240 MiB of full
+- 2026-09-24: a realtime message over 16 KiB closes its connection.
+  A room keeps at most 32 unread messages and an account opens at most 8
+  rooms, so one account holds about 4 MiB.
+- 2026-09-24: the server holds at most 512 realtime rooms, 256 MiB of full
   queues, and refuses a new room past that with the per-account close code.
+- 2026-09-24: a realtime Join whose `user_name` is over 64 characters gets the
+  same close, so a presence broadcast stays small.
 - 2026-09-24: failed logins lock an account only for the client address they
   came from, so a stranger can no longer keep the owner locked out. The account
   locks for every address after 20 times `TILETOPIA_LOGIN_LOCKOUT_FAILURES`, and
