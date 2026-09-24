@@ -141,7 +141,8 @@ TILETOPIA_JWT_SECRET=$(openssl rand -hex 32) tiletopia serve --data-dir ./data -
 - `TILETOPIA_ION_BASE_URL`: the origin the Ion-compat endpoints write into the URLs they return, `http://localhost:3000` when unset. Set it to the address clients reach this server at.
 - `TILETOPIA_MAX_USERS`: the most accounts the users table may hold before `/api/v1/auth/signup` answers 403 with `{"error": ...}`. Existing accounts log in as before. Unset leaves signup open.
 - `TILETOPIA_SIGNUPS_PER_HOUR`: signups accepted in the last hour across everyone, counted from account creation times. Past it signup answers 429. Unset is no limit. There is no per-address limit, because the address behind a proxy comes from `X-Forwarded-For`, which a caller can forge.
-- `TILETOPIA_LOGIN_LOCKOUT_FAILURES`: consecutive failed logins that lock an account, 10 by default, `0` for no lockout. A locked account answers 429 to every login, the right password included, until `TILETOPIA_LOGIN_LOCKOUT_MINUTES` pass, 15 by default. A successful login resets the count. Anyone who knows an account's email can lock it this way.
+- `TILETOPIA_LOGIN_LOCKOUT_FAILURES`: consecutive failed logins from one client address that lock an account for that address, 10 by default, `0` for no lockout. A locked address answers 429 to every login for that account, the right password included, until `TILETOPIA_LOGIN_LOCKOUT_MINUTES` pass, 15 by default. Logins from other addresses are not affected. The account locks for every address after 20 times that many failures, so a stranger has to fail from 20 addresses before the owner is refused. A successful login resets both counts for that address.
+- `TILETOPIA_TRUSTED_PROXY_HOPS`: how many proxies in front of tiletopia append to `X-Forwarded-For`. The client address is the entry that many places from the right, the one the outermost trusted proxy appended. Unset or `0` uses the TCP peer. Behind CloudFront, the load balancer and the platform proxy it is 3.
 
 The signup and lockout limits are counted from the users table, so a restart resets none of them. A value that is not a whole number refuses startup.
 
@@ -202,7 +203,7 @@ Every entry is opened at startup, and `GET /api/v1/cog/datasets` reports what it
 
 ### Terrain sources
 
-The `/api/v1/terrain/` routes read DEM files under `<data-dir>/dem` first and fall back to SRTM tiles downloaded from `https://elevation-tiles-prod.s3.amazonaws.com/skadi`, which `TILETOPIA_SRTM_BASE_URL` overrides. A failed download answers 503 naming the tile.
+The `/api/v1/terrain/` routes read DEM files under `<data-dir>/dem` first and fall back to SRTM tiles downloaded from `https://elevation-tiles-prod.s3.amazonaws.com/skadi`, which `TILETOPIA_SRTM_BASE_URL` overrides. A failed download answers 503 naming the tile. One request fetches only as many SRTM tiles as fit in a third of the 1 GiB task, which is four, and at most two such requests build at once. A wider terrain tile renders flat from SRTM, as the low zooms always have.
 
 For terrain with no upstream at all, put a prebuilt bundle under `<data-dir>/terrain_bundles/<name>/`: a `layer.json` beside a `{z}/{x}/{y}.terrain` tree, which is what `ctb-tile` writes and what the `terrain_bundle` export produces. `GET /api/v1/terrain/bundles` lists the names, and each one is a terrain source:
 

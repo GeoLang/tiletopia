@@ -5,8 +5,8 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use axum::{
     Extension,
-    extract::{Request, State},
-    http::StatusCode,
+    extract::{ConnectInfo, Request, State},
+    http::{Extensions, HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Json, Response},
 };
@@ -15,6 +15,7 @@ use hmac::{Hmac, Mac};
 use jsonwebtoken::{EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, LazyLock};
 use uuid::Uuid;
 
@@ -120,17 +121,28 @@ pub const MAX_USERS_ENV: &str = "TILETOPIA_MAX_USERS";
 pub const SIGNUPS_PER_HOUR_ENV: &str = "TILETOPIA_SIGNUPS_PER_HOUR";
 pub const LOGIN_LOCKOUT_FAILURES_ENV: &str = "TILETOPIA_LOGIN_LOCKOUT_FAILURES";
 pub const LOGIN_LOCKOUT_MINUTES_ENV: &str = "TILETOPIA_LOGIN_LOCKOUT_MINUTES";
+pub const TRUSTED_PROXY_HOPS_ENV: &str = "TILETOPIA_TRUSTED_PROXY_HOPS";
 
 const DEFAULT_LOGIN_LOCKOUT_FAILURES: u32 = 10;
 const DEFAULT_LOGIN_LOCKOUT_MINUTES: u32 = 15;
 const SIGNUP_RATE_WINDOW: chrono::Duration = chrono::Duration::hours(1);
+// a stranger has to fail from this many addresses before the owner's own address is refused
+const ADDRESSES_TO_LOCK_AN_ACCOUNT: u32 = 20;
+pub const PASSWORD_HASHES_AT_ONCE: usize = 2;
+const UNKNOWN_CLIENT_ADDRESS: &str = "unknown";
+const FORWARDED_FOR: &str = "x-forwarded-for";
+
+pub static PASSWORD_HASH_SLOTS: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(PASSWORD_HASHES_AT_ONCE);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccountLimits {
     pub max_users: Option<u64>,
     pub signups_per_hour: Option<u64>,
     pub login_lockout_failures: Option<u32>,
+    pub account_lockout_failures: Option<u32>,
     pub login_lockout: chrono::Duration,
+    pub trusted_proxy_hops: usize,
 }
 
 impl Default for AccountLimits {
@@ -139,7 +151,11 @@ impl Default for AccountLimits {
             max_users: None,
             signups_per_hour: None,
             login_lockout_failures: Some(DEFAULT_LOGIN_LOCKOUT_FAILURES),
+            account_lockout_failures: Some(
+                DEFAULT_LOGIN_LOCKOUT_FAILURES * ADDRESSES_TO_LOCK_AN_ACCOUNT,
+            ),
             login_lockout: chrono::Duration::minutes(DEFAULT_LOGIN_LOCKOUT_MINUTES.into()),
+            trusted_proxy_hops: 0,
         }
     }
 }
@@ -157,14 +173,19 @@ impl AccountLimits {
         )?
         .unwrap_or(DEFAULT_LOGIN_LOCKOUT_FAILURES.into());
         let minutes = count_from(LOGIN_LOCKOUT_MINUTES_ENV, lookup(LOGIN_LOCKOUT_MINUTES_ENV))?;
+        let trusted_proxy_hops =
+            count_from(TRUSTED_PROXY_HOPS_ENV, lookup(TRUSTED_PROXY_HOPS_ENV))?.unwrap_or(0);
+        let login_lockout_failures = (failures > 0)
+            .then(|| u32::try_from(failures))
+            .transpose()
+            .map_err(|_| format!("{LOGIN_LOCKOUT_FAILURES_ENV}={failures} is too large"))?;
         Ok(Self {
             max_users: count_from(MAX_USERS_ENV, lookup(MAX_USERS_ENV))?,
             signups_per_hour: count_from(SIGNUPS_PER_HOUR_ENV, lookup(SIGNUPS_PER_HOUR_ENV))?,
             // zero failures would lock before the first try
-            login_lockout_failures: (failures > 0)
-                .then(|| u32::try_from(failures))
-                .transpose()
-                .map_err(|_| format!("{LOGIN_LOCKOUT_FAILURES_ENV}={failures} is too large"))?,
+            login_lockout_failures,
+            account_lockout_failures: login_lockout_failures
+                .map(|failures| failures.saturating_mul(ADDRESSES_TO_LOCK_AN_ACCOUNT)),
             login_lockout: match minutes {
                 None => Self::default().login_lockout,
                 Some(minutes) => i64::try_from(minutes)
@@ -172,6 +193,9 @@ impl AccountLimits {
                     .and_then(chrono::Duration::try_minutes)
                     .ok_or_else(|| format!("{LOGIN_LOCKOUT_MINUTES_ENV}={minutes} is too large"))?,
             },
+            trusted_proxy_hops: usize::try_from(trusted_proxy_hops).map_err(|_| {
+                format!("{TRUSTED_PROXY_HOPS_ENV}={trusted_proxy_hops} is too large")
+            })?,
         })
     }
 }
@@ -235,6 +259,29 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok()
+}
+
+async fn hash_password_off_runtime(password: String) -> String {
+    let _slot = PASSWORD_HASH_SLOTS
+        .acquire()
+        .await
+        .expect("the password hash semaphore is never closed");
+    tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .expect("argon2 hashing cannot panic")
+}
+
+async fn verify_password_off_runtime(password: String, hash: Option<String>) -> bool {
+    let _slot = PASSWORD_HASH_SLOTS
+        .acquire()
+        .await
+        .expect("the password hash semaphore is never closed");
+    tokio::task::spawn_blocking(move || match hash {
+        Some(hash) => verify_password(&password, &hash),
+        None => verify_password(&password, &DUMMY_HASH),
+    })
+    .await
+    .expect("argon2 verification cannot panic")
 }
 
 // old salted-HMAC hashes look like `<hex-salt>:<hex-mac>`; argon2id hashes are
@@ -354,7 +401,7 @@ pub async fn signup(
         return Err(StatusCode::CONFLICT.into());
     }
 
-    let password_hash = hash_password(&req.password);
+    let password_hash = hash_password_off_runtime(req.password.clone()).await;
     let user = User {
         id: Uuid::new_v4(),
         email: req.email,
@@ -399,8 +446,38 @@ pub async fn signup(
     Ok((StatusCode::CREATED, Json(AuthResponse { token, user })))
 }
 
+// entries left of the one the outermost trusted proxy appended came from the client
+pub fn client_address(headers: &HeaderMap, peer: Option<IpAddr>, hops: usize) -> String {
+    let forwarded: Vec<&str> = headers
+        .get_all(FORWARDED_FOR)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .collect();
+    let appended_by_trusted_proxy = hops
+        .checked_sub(1)
+        .and_then(|from_right| forwarded.len().checked_sub(from_right + 1))
+        .and_then(|index| forwarded[index].parse::<IpAddr>().ok());
+    appended_by_trusted_proxy.or(peer).map_or_else(
+        || UNKNOWN_CLIENT_ADDRESS.to_string(),
+        |address| address.to_string(),
+    )
+}
+
+fn locked_out(minutes: i64, failures: u32, scope: &str) -> AccountError {
+    AccountError::Refused(
+        StatusCode::TOO_MANY_REQUESTS,
+        format!(
+            "this account is locked for up to {minutes} minutes after {failures} failed logins{scope}"
+        ),
+    )
+}
+
 pub async fn login(
     State(state): State<Arc<AppState>>,
+    extensions: Extensions,
+    headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, AccountError> {
     let Some((mut user, password_hash)) = state
@@ -410,33 +487,48 @@ pub async fn login(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     else {
         // spend the same work on an unknown email so timing doesn't leak it
-        let _ = verify_password(&req.password, &DUMMY_HASH);
+        let _ = verify_password_off_runtime(req.password, None).await;
         return Err(StatusCode::UNAUTHORIZED.into());
     };
 
     let limits = state.account_limits;
+    let peer = extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(peer)| peer.ip());
+    let address = client_address(&headers, peer, limits.trusted_proxy_hops);
+    let minutes = limits.login_lockout.num_minutes();
+    // counted before the password is checked, so a burst of guesses cannot all pass
     if let Some(failures) = limits.login_lockout_failures {
-        // counted before the password is checked, so a burst of guesses cannot all pass
+        let claimed = state
+            .db
+            .claim_address_login_attempt(
+                user.id,
+                &address,
+                Utc::now(),
+                failures,
+                limits.login_lockout,
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if !claimed {
+            return Err(locked_out(minutes, failures, " from this address"));
+        }
+    }
+    if let Some(failures) = limits.account_lockout_failures {
         let claimed = state
             .db
             .claim_login_attempt(user.id, Utc::now(), failures, limits.login_lockout)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         if !claimed {
-            let minutes = limits.login_lockout.num_minutes();
-            return Err(AccountError::Refused(
-                StatusCode::TOO_MANY_REQUESTS,
-                format!(
-                    "this account is locked for up to {minutes} minutes after {failures} failed logins"
-                ),
-            ));
+            return Err(locked_out(minutes, failures, ""));
         }
     }
 
     let ok = if is_legacy_hash(&password_hash) {
         if verify_legacy_password(&req.password, &password_hash) {
             // transparently upgrade old salted-HMAC hashes to argon2id
-            let new_hash = hash_password(&req.password);
+            let new_hash = hash_password_off_runtime(req.password.clone()).await;
             state
                 .db
                 .set_password_hash(user.id, &new_hash)
@@ -447,12 +539,19 @@ pub async fn login(
             false
         }
     } else {
-        verify_password(&req.password, &password_hash)
+        verify_password_off_runtime(req.password, Some(password_hash)).await
     };
     if !ok {
         return Err(StatusCode::UNAUTHORIZED.into());
     }
     if limits.login_lockout_failures.is_some() {
+        state
+            .db
+            .clear_address_failed_logins(user.id, &address)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    if limits.account_lockout_failures.is_some() {
         state
             .db
             .clear_failed_logins(user.id)
@@ -552,6 +651,45 @@ pub async fn create_org(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_client_address_is_the_one_the_outermost_trusted_proxy_appended() {
+        let peer: Option<IpAddr> = Some("10.0.1.9".parse().unwrap());
+        let mut headers = HeaderMap::new();
+        // client-set, then CloudFront's viewer entry, then the edge the ALB saw, then the ALB
+        headers.insert(
+            FORWARDED_FOR,
+            "192.0.2.66, 203.0.113.5, 130.176.1.1, 10.0.0.12"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(client_address(&headers, peer, 3), "203.0.113.5");
+        assert_eq!(client_address(&headers, peer, 0), "10.0.1.9");
+        assert_eq!(client_address(&headers, peer, 5), "10.0.1.9");
+        assert_eq!(
+            client_address(&HeaderMap::new(), None, 3),
+            UNKNOWN_CLIENT_ADDRESS
+        );
+    }
+
+    #[test]
+    fn the_account_ceiling_is_a_multiple_of_the_address_limit() {
+        let limits = AccountLimits::resolve(|name| {
+            match name {
+                LOGIN_LOCKOUT_FAILURES_ENV => Some("5"),
+                TRUSTED_PROXY_HOPS_ENV => Some("3"),
+                _ => None,
+            }
+            .map(str::to_string)
+        })
+        .unwrap();
+        assert_eq!(limits.login_lockout_failures, Some(5));
+        assert_eq!(
+            limits.account_lockout_failures,
+            Some(5 * ADDRESSES_TO_LOCK_AN_ACCOUNT)
+        );
+        assert_eq!(limits.trusted_proxy_hops, 3);
+    }
 
     #[test]
     fn argon2_roundtrip() {

@@ -74,6 +74,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 2026-09-24: failed logins lock an account only for the client address they
+  came from, so a stranger can no longer keep the owner locked out. The account
+  locks for every address after 20 times `TILETOPIA_LOGIN_LOCKOUT_FAILURES`, and
+  `TILETOPIA_TRUSTED_PROXY_HOPS` says which `X-Forwarded-For` entry is the client.
+- 2026-09-24: argon2 hashing and verification run on the blocking pool, two at
+  a time, so a login flood queues instead of stalling tiles, terrain and
+  realtime.
+- 2026-09-24: a terrain or elevation request fetches only the SRTM tiles that
+  fit a byte budget of a third of the 1 GiB task, and at most two such builds
+  run at once. A zoom 6 terrain tile used to decode sixteen SRTM tiles, about
+  830 MB, and two at once ran the task out of memory.
 - The dashboard works against a server with auth on (2026-09-23). It sent no
   token, so the asset list, upload and annotation calls answered 401. A login
   form in the sidebar stores the token from `POST /api/v1/auth/login`, and

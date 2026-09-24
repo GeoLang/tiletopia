@@ -66,7 +66,7 @@ impl ApiKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Permission {
-    /// Read-only catalog and dataset metadata: catalog, STAC, COG, features.
+    /// Read-only catalog and dataset metadata: catalog, STAC, COG.
     Read,
     /// Terrain and elevation compute.
     Terrain,

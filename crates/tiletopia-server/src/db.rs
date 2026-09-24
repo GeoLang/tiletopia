@@ -388,6 +388,20 @@ impl Database {
             }
         }
 
+        // locked_until and updated_at are unix seconds
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS login_failures (
+                user_id TEXT NOT NULL,
+                client_address TEXT NOT NULL,
+                failures INTEGER NOT NULL DEFAULT 0,
+                locked_until INTEGER,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, client_address)
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS organizations (
                 id TEXT PRIMARY KEY,
@@ -1335,6 +1349,68 @@ impl Database {
         .await?
         .rows_affected();
         Ok(claimed == 1)
+    }
+
+    // idle rows are dropped once the lockout window has passed
+    pub async fn claim_address_login_attempt(
+        &self,
+        id: Uuid,
+        client_address: &str,
+        now: DateTime<Utc>,
+        failures_to_lock: u32,
+        lockout: chrono::Duration,
+    ) -> Result<bool, sqlx::Error> {
+        let now_seconds = now.timestamp();
+        sqlx::query(
+            "DELETE FROM login_failures
+             WHERE updated_at <= ? AND (locked_until IS NULL OR locked_until <= ?)",
+        )
+        .bind((now - lockout).timestamp())
+        .bind(now_seconds)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO login_failures (user_id, client_address, failures, updated_at)
+             VALUES (?, ?, 0, ?)
+             ON CONFLICT (user_id, client_address) DO NOTHING",
+        )
+        .bind(id.to_string())
+        .bind(client_address)
+        .bind(now_seconds)
+        .execute(&self.pool)
+        .await?;
+        let claimed = sqlx::query(
+            "UPDATE login_failures SET
+                 failures = CASE WHEN failures + 1 >= ? THEN 0 ELSE failures + 1 END,
+                 locked_until = CASE WHEN failures + 1 >= ? THEN ? ELSE locked_until END,
+                 updated_at = ?
+             WHERE user_id = ? AND client_address = ?
+                 AND (locked_until IS NULL OR locked_until <= ?)",
+        )
+        .bind(failures_to_lock)
+        .bind(failures_to_lock)
+        .bind((now + lockout).timestamp())
+        .bind(now_seconds)
+        .bind(id.to_string())
+        .bind(client_address)
+        .bind(now_seconds)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(claimed == 1)
+    }
+
+    pub async fn clear_address_failed_logins(
+        &self,
+        id: Uuid,
+        client_address: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM login_failures WHERE user_id = ? AND client_address = ?")
+            .bind(id.to_string())
+            .bind(client_address)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn clear_failed_logins(&self, id: Uuid) -> Result<(), sqlx::Error> {

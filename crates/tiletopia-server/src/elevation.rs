@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use axum::{
     http::StatusCode,
@@ -23,14 +24,19 @@ use tiletopia_terrain::global_dem::DemTile;
 /// Metres per degree of latitude, and per degree of longitude at the equator.
 pub const METERS_PER_DEG_LAT: f64 = 111_320.0;
 
-/// Most one-degree SRTM tiles a single request may pull from upstream.
-///
-/// These reads are anonymous, and a low-zoom terrain tile covers tens of
-/// thousands of one-degree cells, so an unbounded fetch turns one GET into a
-/// multi-terabyte download loop. Above the bound the request renders from
-/// staged DEM or answers no coverage instead, which is what a wide tile did in
-/// practice anyway: it never finished.
-const MAX_SRTM_TILES_PER_REQUEST: usize = 16;
+// infrastructure sizes the tiletopia task at 1024 MiB
+const TASK_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
+const CONCURRENT_SRTM_BUILDS: usize = 2;
+const SRTM_BUILD_BUDGET_BYTES: u64 = TASK_MEMORY_BYTES / 3;
+const SRTM1_SAMPLES: u64 = 3601 * 3601;
+// every fetched tile stays in memory as f32 samples until the caller is done
+const SRTM_KEPT_BYTES_PER_TILE: u64 = SRTM1_SAMPLES * 4;
+// one tile at a time is decoded through its raw i16 bytes and an f64 heightmap
+const SRTM_DECODE_BYTES: u64 = SRTM1_SAMPLES * (2 + 8);
+
+fn srtm_build_bytes(tiles: usize) -> u64 {
+    SRTM_KEPT_BYTES_PER_TILE * tiles as u64 + SRTM_DECODE_BYTES
+}
 
 /// Nodata value the staged `.bin` and HGT tiles carry.
 const DEM_NODATA: f32 = -9999.0;
@@ -161,6 +167,7 @@ impl DemGrid {
 /// Store of loaded DEM grids for elevation lookup.
 pub struct DemStore {
     grids: Vec<DemGrid>,
+    srtm_build_slots: Arc<Semaphore>,
 }
 
 impl Default for DemStore {
@@ -171,7 +178,10 @@ impl Default for DemStore {
 
 impl DemStore {
     pub fn new() -> Self {
-        Self { grids: Vec::new() }
+        Self {
+            grids: Vec::new(),
+            srtm_build_slots: Arc::new(Semaphore::new(CONCURRENT_SRTM_BUILDS)),
+        }
     }
 
     pub fn add_grid(&mut self, grid: DemGrid) {
@@ -256,6 +266,7 @@ impl ElevationSources {
             return Ok(DemCoverage {
                 tiles: staged,
                 source: ElevationSource::LocalDem,
+                _srtm_build_slot: None,
             });
         }
         if self.srtm_base_url.is_empty() {
@@ -266,8 +277,19 @@ impl ElevationSources {
             self.data_dir.join("dem_cache"),
             self.srtm_base_url.clone(),
         );
+        let to_fetch = srtm_tiles_to_fetch(bounds);
+        let srtm_build_slot = if to_fetch.is_empty() {
+            None
+        } else {
+            Some(
+                Arc::clone(&self.grids.srtm_build_slots)
+                    .acquire_owned()
+                    .await
+                    .expect("the SRTM build semaphore is never closed"),
+            )
+        };
         let mut tiles = Vec::new();
-        for (lat, lon) in srtm_tiles_to_fetch(bounds) {
+        for (lat, lon) in to_fetch {
             let name = tiletopia_terrain::dem_cache::srtm_tile_name(lat, lon);
             let hgt_path = cache.get_srtm_tile(lat, lon).await.map_err(|e| {
                 ElevationGap::Unreadable(format!("SRTM tile {name} could not be fetched: {e}"))
@@ -280,6 +302,7 @@ impl ElevationSources {
         Ok(DemCoverage {
             tiles,
             source: ElevationSource::Srtm30m,
+            _srtm_build_slot: srtm_build_slot,
         })
     }
 
@@ -302,6 +325,8 @@ impl ElevationSources {
 pub struct DemCoverage {
     pub tiles: Vec<DemTile>,
     source: ElevationSource,
+    // held until the fetched tiles are dropped
+    _srtm_build_slot: Option<OwnedSemaphorePermit>,
 }
 
 impl DemCoverage {
@@ -311,6 +336,7 @@ impl DemCoverage {
         DemCoverage {
             tiles: Vec::new(),
             source: ElevationSource::LocalDem,
+            _srtm_build_slot: None,
         }
     }
 }
@@ -434,9 +460,10 @@ pub(crate) fn srtm_tiles_to_fetch(bounds: [f64; 4]) -> Vec<(i32, i32)> {
     let required = tiletopia_terrain::dem_cache::required_srtm_tiles(
         bounds[0], bounds[1], bounds[2], bounds[3],
     );
-    if required.len() > MAX_SRTM_TILES_PER_REQUEST {
+    let build_bytes = srtm_build_bytes(required.len());
+    if build_bytes > SRTM_BUILD_BUDGET_BYTES {
         tracing::debug!(
-            "area spans {} SRTM tiles, over the {MAX_SRTM_TILES_PER_REQUEST} fetch bound",
+            "area spans {} SRTM tiles needing {build_bytes} bytes, over the {SRTM_BUILD_BUDGET_BYTES} byte build budget",
             required.len()
         );
         return Vec::new();
@@ -640,6 +667,33 @@ mod tests {
             whole_degrees([-7.4, -43.7, -7.1, -43.2]),
             [-8.0, -44.0, -7.0, -43.0]
         );
+    }
+
+    #[test]
+    fn the_build_budget_fits_a_corner_tile_and_not_a_zoom_6_tile() {
+        // any tile can straddle a degree corner, so four SRTM tiles have to fit
+        assert!(srtm_build_bytes(4) <= SRTM_BUILD_BUDGET_BYTES);
+        assert_eq!(srtm_tiles_to_fetch([7.5, 43.5, 8.5, 44.5]).len(), 4);
+        // a zoom 6 terrain tile rounds out to 4 by 4 whole degrees
+        assert!(srtm_build_bytes(16) > SRTM_BUILD_BUDGET_BYTES);
+        assert!(srtm_tiles_to_fetch([0.0, 40.0, 4.0, 44.0]).is_empty());
+        assert!(srtm_build_bytes(4) * CONCURRENT_SRTM_BUILDS as u64 <= TASK_MEMORY_BYTES * 2 / 3);
+    }
+
+    #[tokio::test]
+    async fn an_over_budget_area_reads_no_srtm_data() {
+        let dir = StagedDir::new("over-budget");
+        // nothing listens here, so any download attempt answers Unreadable
+        let unreachable = "http://127.0.0.1:9".to_string();
+        let sources =
+            ElevationSources::new(Arc::new(DemStore::new()), dir.path.clone(), unreachable);
+
+        let wide = sources.dem_tiles([0.0, 40.0, 4.0, 44.0]).await.unwrap();
+        assert!(wide.tiles.is_empty());
+        assert!(!dir.path.join("dem_cache").exists());
+
+        let narrow = sources.dem_tiles([7.2, 43.2, 7.4, 43.4]).await;
+        assert!(matches!(narrow, Err(ElevationGap::Unreadable(_))));
     }
 
     #[test]

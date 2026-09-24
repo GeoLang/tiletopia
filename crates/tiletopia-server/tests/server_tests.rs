@@ -1489,8 +1489,180 @@ mod tests {
             max_users: None,
             signups_per_hour: None,
             login_lockout_failures: None,
+            account_lockout_failures: None,
             login_lockout: chrono::Duration::minutes(15),
+            trusted_proxy_hops: 0,
         }
+    }
+
+    async fn login_from(
+        state: &Arc<AppState>,
+        email: &str,
+        password: &str,
+        forwarded_for: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let body = serde_json::json!({ "email": email, "password": password }).to_string();
+        let resp = router(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/login")
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-for", forwarded_for)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, v)
+    }
+
+    fn per_address_limits(
+        per_address: u32,
+        per_account: u32,
+    ) -> tiletopia_server::users::AccountLimits {
+        tiletopia_server::users::AccountLimits {
+            login_lockout_failures: Some(per_address),
+            account_lockout_failures: Some(per_account),
+            trusted_proxy_hops: 1,
+            ..account_limits()
+        }
+    }
+
+    #[tokio::test]
+    async fn failures_from_one_address_do_not_lock_another() {
+        let state = crate::common::test_state_with_account_limits(per_address_limits(3, 100)).await;
+        signup(&state, "owner@example.com").await;
+
+        for _ in 0..3 {
+            let (status, _) = login_from(&state, "owner@example.com", "wrong", "203.0.113.1").await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, body) =
+            login_from(&state, "owner@example.com", "pw123456", "203.0.113.1").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("from this address")
+        );
+
+        // entries left of the one the trusted proxy appended are the client's own
+        let (status, _) = login_from(
+            &state,
+            "owner@example.com",
+            "pw123456",
+            "198.51.100.7, 203.0.113.1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+        let (status, body) =
+            login_from(&state, "owner@example.com", "pw123456", "198.51.100.7").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_account_ceiling_locks_every_address() {
+        let state = crate::common::test_state_with_account_limits(per_address_limits(3, 4)).await;
+        signup(&state, "spread@example.com").await;
+
+        for host in 1..=4 {
+            let (status, _) = login_from(
+                &state,
+                "spread@example.com",
+                "wrong",
+                &format!("203.0.113.{host}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, body) =
+            login_from(&state, "spread@example.com", "pw123456", "198.51.100.7").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        let reason = body["error"].as_str().unwrap();
+        assert!(reason.contains("after 4 failed logins"), "{reason}");
+        assert!(!reason.contains("from this address"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn the_right_password_inside_the_window_still_logs_in() {
+        let state = crate::common::test_state_with_account_limits(per_address_limits(3, 100)).await;
+        signup(&state, "typo@example.com").await;
+        for _ in 0..2 {
+            for _ in 0..2 {
+                let (status, _) =
+                    login_from(&state, "typo@example.com", "wrong", "203.0.113.1").await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
+            let (status, _) =
+                login_from(&state, "typo@example.com", "pw123456", "203.0.113.1").await;
+            assert_eq!(status, StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_logins_all_complete() {
+        const LOGINS: usize = 6;
+        let state = crate::common::test_state_with_account_limits(per_address_limits(3, 100)).await;
+        signup(&state, "busy@example.com").await;
+
+        let mut logins = tokio::task::JoinSet::new();
+        for host in 0..LOGINS {
+            let state = Arc::clone(&state);
+            logins.spawn(async move {
+                login_from(
+                    &state,
+                    "busy@example.com",
+                    "pw123456",
+                    &format!("203.0.113.{host}"),
+                )
+                .await
+                .0
+            });
+        }
+        let statuses = logins.join_all().await;
+        assert_eq!(statuses, vec![StatusCode::OK; LOGINS]);
+    }
+
+    #[tokio::test]
+    async fn a_login_waiting_for_a_hash_slot_does_not_hold_up_other_routes() {
+        let state = crate::common::test_state_with_account_limits(per_address_limits(3, 100)).await;
+        signup(&state, "queued@example.com").await;
+
+        let held = tiletopia_server::users::PASSWORD_HASH_SLOTS
+            .acquire_many(tiletopia_server::users::PASSWORD_HASHES_AT_ONCE as u32)
+            .await
+            .unwrap();
+        let waiting = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                login_from(&state, "queued@example.com", "pw123456", "203.0.113.1")
+                    .await
+                    .0
+            })
+        };
+
+        let health = router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+        assert!(!waiting.is_finished());
+
+        drop(held);
+        assert_eq!(waiting.await.unwrap(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -1570,14 +1742,14 @@ mod tests {
 
         // the lock is a row in the store, so it outlives the process that set it
         let locked_until: Option<i64> =
-            sqlx::query_scalar("SELECT login_locked_until FROM users WHERE id = ?")
+            sqlx::query_scalar("SELECT locked_until FROM login_failures WHERE user_id = ?")
                 .bind(&uid)
                 .fetch_one(&state.db.pool)
                 .await
                 .unwrap();
         assert!(locked_until.unwrap() > chrono::Utc::now().timestamp());
 
-        sqlx::query("UPDATE users SET login_locked_until = ? WHERE id = ?")
+        sqlx::query("UPDATE login_failures SET locked_until = ? WHERE user_id = ?")
             .bind(chrono::Utc::now().timestamp() - 1)
             .bind(&uid)
             .execute(&state.db.pool)
