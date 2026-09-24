@@ -341,6 +341,8 @@ impl Default for RealtimeState {
 /// is bounded by [`MAX_ROOMS_PER_USER`].
 const MAX_ROOM_ID_LEN: usize = 128;
 
+pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
+
 /// Room join gate: any valid JWT may connect, viewer role included, because
 /// collaboration is presence, cursors and chat rather than a write to stored
 /// data. That matches the annotation routes. Anonymous is rejected.
@@ -370,7 +372,10 @@ pub async fn ws_handler(
     }
     // echoing the marker is required for a browser to accept the 101; the token
     // itself is never echoed
-    let upgrade = ws.protocols([crate::auth::BEARER_SUBPROTOCOL]);
+    let upgrade = ws
+        .max_message_size(MAX_MESSAGE_LEN)
+        .max_frame_size(MAX_MESSAGE_LEN)
+        .protocols([crate::auth::BEARER_SUBPROTOCOL]);
     let Some(tx) = state.realtime.acquire_room(&room, &claims.sub).await else {
         return Ok(upgrade.on_upgrade(close_over_room_limit));
     };

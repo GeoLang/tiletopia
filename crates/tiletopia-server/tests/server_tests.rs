@@ -2928,6 +2928,76 @@ mod tests {
         assert!(accepted, "a freed room slot must let a new room through");
     }
 
+    fn chat_with(message: &str) -> String {
+        serde_json::json!({
+            "type": "Chat",
+            "user_id": "",
+            "user_name": "Ann",
+            "message": message,
+            "timestamp": "2026-09-24T00:00:00Z",
+        })
+        .to_string()
+    }
+
+    // a Chat frame whose json text is exactly `len` bytes
+    fn chat_of_len(len: usize) -> String {
+        let text = chat_with(&"x".repeat(len - chat_with("").len()));
+        assert_eq!(text.len(), len);
+        text
+    }
+
+    #[tokio::test]
+    async fn realtime_refuses_a_message_over_the_size_limit() {
+        use futures::{SinkExt, StreamExt};
+        use tiletopia_server::realtime::MAX_MESSAGE_LEN;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let state = test_state().await;
+        let (token_a, _uid_a) = signup(&state, "collab-size-a@example.com").await;
+        let (token_b, _uid_b) = signup(&state, "collab-size-b@example.com").await;
+        let addr = serve(&state).await;
+
+        let mut a = connect_room(addr, "room-size", &token_a).await;
+        let mut b = connect_room(addr, "room-size", &token_b).await;
+
+        // a message right at the limit is relayed
+        a.send(Message::Text(chat_of_len(MAX_MESSAGE_LEN).into()))
+            .await
+            .unwrap();
+        for ws in [&mut a, &mut b] {
+            let msg = ws.next().await.unwrap().unwrap();
+            let v: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+            assert_eq!(v["type"], "Chat");
+            assert_eq!(
+                v["message"].as_str().unwrap().len(),
+                MAX_MESSAGE_LEN - chat_with("").len()
+            );
+        }
+
+        // one byte over and the server drops the connection, possibly mid-write
+        let _ = a
+            .send(Message::Text(chat_of_len(MAX_MESSAGE_LEN + 1).into()))
+            .await;
+        match a.next().await {
+            None | Some(Err(_)) | Some(Ok(Message::Close(_))) => {}
+            Some(Ok(reply)) => panic!(
+                "an oversized message must end the connection, got a {} byte reply",
+                reply.len()
+            ),
+        }
+
+        // and it never reached the room: b's next message is its own
+        b.send(Message::Text(chat_of_len(200).into()))
+            .await
+            .unwrap();
+        let msg = b.next().await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert_eq!(
+            v["message"].as_str().unwrap().len(),
+            200 - chat_with("").len()
+        );
+    }
+
     // -- per-asset ownership --
 
     #[test]
