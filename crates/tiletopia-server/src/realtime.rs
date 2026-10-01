@@ -37,9 +37,13 @@
 //! A room exists only while a connection holds it: the first connection creates
 //! it, the last one out drops it with its broadcast channel. The account that
 //! created a room is charged for it until it is empty, up to
-//! [`MAX_ROOMS_PER_USER`]. A connection that would go past that limit upgrades
-//! and is then closed with [`ROOM_LIMIT_CLOSE_CODE`], because a browser cannot
-//! read the status of a failed handshake but can read a close code.
+//! [`MAX_ROOMS_PER_USER`]. A room takes at most [`MAX_CONNECTIONS_PER_ROOM`]
+//! connections, so its Presence message fits in [`MAX_MESSAGE_LEN`], and an
+//! account holds at most [`MAX_CONNECTIONS_PER_USER`] connections across all
+//! rooms. A connection that would go past any of these limits upgrades and is
+//! then closed with [`ROOM_LIMIT_CLOSE_CODE`] and a reason naming the limit,
+//! because a browser cannot read the status of a failed handshake but can read
+//! a close frame.
 //!
 //! Presence is per connection, not per account: two tabs of one account are two
 //! connections, and the account leaves the roster when the last of them goes.
@@ -235,10 +239,37 @@ pub const MAX_ROOMS: usize = 512;
 // every presence broadcast carries every member's name
 pub const MAX_USER_NAME_CHARS: usize = 64;
 
+// an OIDC subject is at most 255 ASCII characters
+const MAX_USER_ID_JSON_LEN: usize = 255;
+
+// the largest roster whose worst-case Presence message fits in MAX_MESSAGE_LEN
+pub const MAX_CONNECTIONS_PER_ROOM: usize = 23;
+
+// two tabs at each room an account may hold
+pub const MAX_CONNECTIONS_PER_USER: usize = 2 * MAX_ROOMS_PER_USER;
+
 /// Close code sent to a connection refused by [`MAX_ROOMS_PER_USER`],
-/// [`MAX_ROOMS`] or [`MAX_USER_NAME_CHARS`]. In the private-use range
-/// 4000-4999, picked to echo HTTP 429.
+/// [`MAX_ROOMS`], [`MAX_CONNECTIONS_PER_ROOM`], [`MAX_CONNECTIONS_PER_USER`] or
+/// [`MAX_USER_NAME_CHARS`]. In the private-use range 4000-4999, picked to echo
+/// HTTP 429.
 pub const ROOM_LIMIT_CLOSE_CODE: u16 = 4029;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomRefusal {
+    RoomLimit,
+    RoomFull,
+    TooManyConnections,
+}
+
+impl RoomRefusal {
+    fn close_reason(self) -> &'static str {
+        match self {
+            RoomRefusal::RoomLimit => "room limit",
+            RoomRefusal::RoomFull => "room full",
+            RoomRefusal::TooManyConnections => "too many connections",
+        }
+    }
+}
 
 /// A live room: its broadcast channel, the account charged for it, and how many
 /// connections hold it open.
@@ -248,13 +279,23 @@ struct Room {
     connections: usize,
 }
 
-/// Rooms and the per-owner counts derived from them. Both maps are only ever
-/// touched together, under one lock, so the counts cannot drift.
+/// Rooms and the per-user counts derived from them. All three maps are only
+/// ever touched together, under one lock, so the counts cannot drift.
 #[derive(Default)]
 struct Rooms {
     by_id: HashMap<String, Room>,
     /// user_id -> rooms that user created and still holds
     owned: HashMap<String, usize>,
+    connections_by_user: HashMap<String, usize>,
+}
+
+fn decrement_count(counts: &mut HashMap<String, usize>, key: &str) {
+    if let Some(count) = counts.get_mut(key) {
+        *count -= 1;
+        if *count == 0 {
+            counts.remove(key);
+        }
+    }
 }
 
 /// Real-time state — broadcast channel per room.
@@ -279,37 +320,60 @@ impl RealtimeState {
     }
 
     /// Take one connection's hold on a room, creating it if this is the first
-    /// connection. `None` when `user` already holds [`MAX_ROOMS_PER_USER`]
-    /// rooms or the server holds [`MAX_ROOMS`]; joining a room someone else
-    /// created is not charged to `user`.
-    /// Every success must be paired with a [`Self::release_room`].
-    async fn acquire_room(&self, room: &str, user: &str) -> Option<broadcast::Sender<String>> {
+    /// connection. Refused when `user` already holds
+    /// [`MAX_CONNECTIONS_PER_USER`] connections, when the room already holds
+    /// [`MAX_CONNECTIONS_PER_ROOM`], or when the room would be new and `user`
+    /// already created [`MAX_ROOMS_PER_USER`] or the server holds [`MAX_ROOMS`].
+    /// Joining a room someone else created is not charged to `user`'s rooms.
+    /// Every success must be paired with a [`Self::release_room`] for the same
+    /// `user`.
+    async fn acquire_room(
+        &self,
+        room: &str,
+        user: &str,
+    ) -> Result<broadcast::Sender<String>, RoomRefusal> {
         let mut rooms = self.rooms.write().await;
-        if let Some(existing) = rooms.by_id.get_mut(room) {
-            existing.connections += 1;
-            return Some(existing.tx.clone());
+        let user_connections = rooms.connections_by_user.get(user).copied().unwrap_or(0);
+        if user_connections >= MAX_CONNECTIONS_PER_USER {
+            return Err(RoomRefusal::TooManyConnections);
         }
-        let owned = rooms.owned.get(user).copied().unwrap_or(0);
-        if owned >= MAX_ROOMS_PER_USER || rooms.by_id.len() >= MAX_ROOMS {
-            return None;
-        }
-        let (tx, _) = broadcast::channel(ROOM_BROADCAST_CAPACITY);
-        rooms.by_id.insert(
-            room.to_string(),
-            Room {
-                tx: tx.clone(),
-                owner: user.to_string(),
-                connections: 1,
-            },
-        );
-        rooms.owned.insert(user.to_string(), owned + 1);
-        Some(tx)
+        let tx = match rooms.by_id.get_mut(room) {
+            Some(existing) => {
+                if existing.connections >= MAX_CONNECTIONS_PER_ROOM {
+                    return Err(RoomRefusal::RoomFull);
+                }
+                existing.connections += 1;
+                existing.tx.clone()
+            }
+            None => {
+                let owned = rooms.owned.get(user).copied().unwrap_or(0);
+                if owned >= MAX_ROOMS_PER_USER || rooms.by_id.len() >= MAX_ROOMS {
+                    return Err(RoomRefusal::RoomLimit);
+                }
+                let (tx, _) = broadcast::channel(ROOM_BROADCAST_CAPACITY);
+                rooms.by_id.insert(
+                    room.to_string(),
+                    Room {
+                        tx: tx.clone(),
+                        owner: user.to_string(),
+                        connections: 1,
+                    },
+                );
+                rooms.owned.insert(user.to_string(), owned + 1);
+                tx
+            }
+        };
+        rooms
+            .connections_by_user
+            .insert(user.to_string(), user_connections + 1);
+        Ok(tx)
     }
 
     /// Release one connection's hold. An empty room is dropped along with its
     /// channel, which also frees the owner's slot.
-    async fn release_room(&self, room: &str) {
+    async fn release_room(&self, room: &str, user: &str) {
         let mut rooms = self.rooms.write().await;
+        decrement_count(&mut rooms.connections_by_user, user);
         let owner = {
             let Some(existing) = rooms.by_id.get_mut(room) else {
                 return;
@@ -321,12 +385,7 @@ impl RealtimeState {
             existing.owner.clone()
         };
         rooms.by_id.remove(room);
-        if let Some(owned) = rooms.owned.get_mut(&owner) {
-            *owned -= 1;
-            if *owned == 0 {
-                rooms.owned.remove(&owner);
-            }
-        }
+        decrement_count(&mut rooms.owned, &owner);
     }
 
     /// Push a real-time update to all connected clients in a room.
@@ -352,6 +411,14 @@ const MAX_ROOM_ID_LEN: usize = 128;
 pub const MAX_MESSAGE_LEN: usize = 16 * 1024;
 
 const ROOM_BROADCAST_CAPACITY: usize = 32;
+
+fn json_string_len(text: &str) -> usize {
+    let quotes = 2;
+    serde_json::to_string(text)
+        .expect("a str always serializes")
+        .len()
+        - quotes
+}
 
 /// Room join gate: any valid JWT may connect, viewer role included, because
 /// collaboration is presence, cursors and chat rather than a write to stored
@@ -380,28 +447,47 @@ pub async fn ws_handler(
     if room.len() > MAX_ROOM_ID_LEN {
         return Err(StatusCode::BAD_REQUEST);
     }
+    // every Presence message carries every member's sub
+    if json_string_len(&claims.sub) > MAX_USER_ID_JSON_LEN {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     // echoing the marker is required for a browser to accept the 101; the token
     // itself is never echoed
     let upgrade = ws
         .max_message_size(MAX_MESSAGE_LEN)
         .max_frame_size(MAX_MESSAGE_LEN)
         .protocols([crate::auth::BEARER_SUBPROTOCOL]);
-    let Some(tx) = state.realtime.acquire_room(&room, &claims.sub).await else {
-        return Ok(upgrade.on_upgrade(close_over_room_limit));
+    let tx = match state.realtime.acquire_room(&room, &claims.sub).await {
+        Ok(tx) => tx,
+        Err(refusal) => {
+            return Ok(upgrade.on_upgrade(move |socket| close_over_room_limit(socket, refusal)));
+        }
     };
     let rx = tx.subscribe();
     let conn = state.realtime.new_conn_id();
+    let failed_state = Arc::clone(&state);
+    let failed_room = room.clone();
+    let failed_sub = claims.sub.clone();
     Ok(upgrade
+        // handle_socket never runs when the upgrade fails
+        .on_failed_upgrade(move |_| {
+            tokio::spawn(async move {
+                failed_state
+                    .realtime
+                    .release_room(&failed_room, &failed_sub)
+                    .await;
+            });
+        })
         .on_upgrade(move |socket| handle_socket(socket, tx, rx, room, claims.sub, conn, state)))
 }
 
-/// Refuse a connection that would go past [`MAX_ROOMS_PER_USER`]. It holds no
-/// room and no presence, so nothing needs releasing.
-async fn close_over_room_limit(mut socket: WebSocket) {
+/// Refuse a connection that would go past a room or connection limit. It holds
+/// no room and no presence, so nothing needs releasing.
+async fn close_over_room_limit(mut socket: WebSocket, refusal: RoomRefusal) {
     let _ = socket
         .send(Message::Close(Some(CloseFrame {
             code: ROOM_LIMIT_CLOSE_CODE,
-            reason: "room limit".into(),
+            reason: refusal.close_reason().into(),
         })))
         .await;
 }
@@ -495,7 +581,7 @@ async fn handle_socket(
         broadcast_presence(&tx, &state, &room).await;
     }
     // the local tx still reaches everyone left, even once the room is gone
-    state.realtime.release_room(&room).await;
+    state.realtime.release_room(&room, &sub).await;
 }
 
 #[cfg(test)]
@@ -550,17 +636,18 @@ mod tests {
     #[tokio::test]
     async fn room_is_reclaimed_when_the_last_connection_leaves() {
         let state = RealtimeState::new();
-        assert!(state.acquire_room("room", "ann").await.is_some());
-        assert!(state.acquire_room("room", "bob").await.is_some());
+        assert!(state.acquire_room("room", "ann").await.is_ok());
+        assert!(state.acquire_room("room", "bob").await.is_ok());
 
-        state.release_room("room").await;
+        state.release_room("room", "bob").await;
         assert_eq!(state.rooms.read().await.by_id.len(), 1);
 
-        state.release_room("room").await;
+        state.release_room("room", "ann").await;
         let rooms = state.rooms.read().await;
         assert!(rooms.by_id.is_empty());
         // the owner's slot goes with it, no zero entry left behind
         assert!(rooms.owned.is_empty());
+        assert!(rooms.connections_by_user.is_empty());
     }
 
     #[tokio::test]
@@ -571,18 +658,21 @@ mod tests {
                 state
                     .acquire_room(&format!("room-{i}"), "ann")
                     .await
-                    .is_some(),
+                    .is_ok(),
                 "room {i} is within the cap"
             );
         }
-        assert!(state.acquire_room("one-too-many", "ann").await.is_none());
+        assert_eq!(
+            state.acquire_room("one-too-many", "ann").await.err(),
+            Some(RoomRefusal::RoomLimit)
+        );
         // and the refused room was not created
         assert_eq!(state.rooms.read().await.by_id.len(), MAX_ROOMS_PER_USER);
 
         // freeing one lets the next through
-        state.release_room("room-0").await;
-        assert!(state.acquire_room("one-too-many", "ann").await.is_some());
-        assert!(state.acquire_room("another", "ann").await.is_none());
+        state.release_room("room-0", "ann").await;
+        assert!(state.acquire_room("one-too-many", "ann").await.is_ok());
+        assert!(state.acquire_room("another", "ann").await.is_err());
     }
 
     #[tokio::test]
@@ -594,19 +684,17 @@ mod tests {
                 state
                     .acquire_room(&format!("room-{i}"), &creator)
                     .await
-                    .is_some(),
+                    .is_ok(),
                 "room {i} is within the cap"
             );
         }
         // a newcomer is under its own cap, so only the server-wide one refuses it
-        assert!(
-            state
-                .acquire_room("one-too-many", "newcomer")
-                .await
-                .is_none()
+        assert_eq!(
+            state.acquire_room("one-too-many", "newcomer").await.err(),
+            Some(RoomRefusal::RoomLimit)
         );
         assert_eq!(state.rooms.read().await.by_id.len(), MAX_ROOMS);
-        assert!(state.acquire_room("room-0", "newcomer").await.is_some());
+        assert!(state.acquire_room("room-0", "newcomer").await.is_ok());
     }
 
     #[tokio::test]
@@ -619,9 +707,109 @@ mod tests {
                 .unwrap();
         }
         // bob created nothing, so he can still create a room of his own
-        assert!(state.acquire_room("bobs-room", "bob").await.is_some());
+        assert!(state.acquire_room("bobs-room", "bob").await.is_ok());
         // and ann, at her cap, can still join a room she does not own
-        assert!(state.acquire_room("bobs-room", "ann").await.is_some());
+        assert!(state.acquire_room("bobs-room", "ann").await.is_ok());
         assert_eq!(state.rooms.read().await.owned.get("bob"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn a_room_holds_at_most_max_connections_per_room() {
+        let state = RealtimeState::new();
+        for i in 0..MAX_CONNECTIONS_PER_ROOM {
+            assert!(
+                state
+                    .acquire_room("room", &format!("user-{i}"))
+                    .await
+                    .is_ok(),
+                "connection {i} is within the cap"
+            );
+        }
+        assert_eq!(
+            state.acquire_room("room", "newcomer").await.err(),
+            Some(RoomRefusal::RoomFull)
+        );
+        // the refused connection was not charged to the newcomer
+        assert!(
+            !state
+                .rooms
+                .read()
+                .await
+                .connections_by_user
+                .contains_key("newcomer")
+        );
+
+        // one member leaving lets the next through
+        state.release_room("room", "user-0").await;
+        assert!(state.acquire_room("room", "newcomer").await.is_ok());
+        assert!(state.acquire_room("room", "user-0").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_user_holds_at_most_max_connections_per_user_across_rooms() {
+        let state = RealtimeState::new();
+        state.acquire_room("bobs-room", "bob").await.unwrap();
+        for i in 0..MAX_CONNECTIONS_PER_USER {
+            let room = format!("room-{}", i % MAX_ROOMS_PER_USER);
+            assert!(
+                state.acquire_room(&room, "ann").await.is_ok(),
+                "connection {i} is within the cap"
+            );
+        }
+        // joining a room ann did not create is refused too
+        assert_eq!(
+            state.acquire_room("bobs-room", "ann").await.err(),
+            Some(RoomRefusal::TooManyConnections)
+        );
+        // and bob is not held back by ann's count
+        assert!(state.acquire_room("bobs-room", "bob").await.is_ok());
+
+        state.release_room("room-0", "ann").await;
+        assert!(state.acquire_room("bobs-room", "ann").await.is_ok());
+        assert!(state.acquire_room("room-1", "ann").await.is_err());
+
+        state.release_room("bobs-room", "ann").await;
+        for i in 1..MAX_CONNECTIONS_PER_USER {
+            state
+                .release_room(&format!("room-{}", i % MAX_ROOMS_PER_USER), "ann")
+                .await;
+        }
+        assert!(
+            !state
+                .rooms
+                .read()
+                .await
+                .connections_by_user
+                .contains_key("ann")
+        );
+    }
+
+    #[test]
+    fn a_full_room_of_worst_case_members_fits_one_presence_message() {
+        // a control character escapes to \u00XX, the longest any character gets
+        let widest_character = "\u{1}";
+        let widest_character_json_len = json_string_len(widest_character);
+        let user_id = widest_character.repeat(MAX_USER_ID_JSON_LEN / widest_character_json_len)
+            + &"x".repeat(MAX_USER_ID_JSON_LEN % widest_character_json_len);
+        assert_eq!(json_string_len(&user_id), MAX_USER_ID_JSON_LEN);
+        let user_name = widest_character.repeat(MAX_USER_NAME_CHARS);
+        let color = PRESENCE_COLORS
+            .iter()
+            .max_by_key(|color| color.len())
+            .unwrap();
+
+        let users = (0..MAX_CONNECTIONS_PER_ROOM)
+            .map(|_| PresenceEntry {
+                user_id: user_id.clone(),
+                user_name: user_name.clone(),
+                color: color.to_string(),
+            })
+            .collect();
+        let message = serde_json::to_string(&CollabMessage::Presence { users }).unwrap();
+        assert!(
+            message.len() <= MAX_MESSAGE_LEN,
+            "{} bytes is over {MAX_MESSAGE_LEN}",
+            message.len()
+        );
     }
 }

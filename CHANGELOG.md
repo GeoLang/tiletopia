@@ -74,6 +74,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 2026-10-01: a realtime room takes at most 23 connections and an account at
+  most 16 across all rooms, refused with close code 4029 and the reason
+  `room full` or `too many connections`. A full room's presence broadcast fits
+  in 16 KiB. A token whose `sub` is over 255 bytes as JSON gets 400 before the
+  upgrade, and a failed upgrade releases its room.
 - 2026-09-24: a realtime message over 16 KiB closes its connection.
   A room keeps at most 32 unread messages and an account opens at most 8
   rooms, so one account holds about 4 MiB.

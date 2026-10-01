@@ -2992,6 +2992,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn realtime_refuses_a_connection_past_the_per_room_cap() {
+        use futures::StreamExt;
+        use tiletopia_server::realtime::{
+            MAX_CONNECTIONS_PER_ROOM, MAX_CONNECTIONS_PER_USER, ROOM_LIMIT_CLOSE_CODE,
+        };
+        use tokio_tungstenite::tungstenite::Message;
+
+        let state = test_state().await;
+        let addr = serve(&state).await;
+
+        // spread over accounts so no single one reaches its own connection cap
+        let account_count = MAX_CONNECTIONS_PER_ROOM.div_ceil(MAX_CONNECTIONS_PER_USER);
+        let mut tokens = Vec::new();
+        for i in 0..account_count {
+            tokens.push(
+                signup(&state, &format!("collab-full-{i}@example.com"))
+                    .await
+                    .0,
+            );
+        }
+        let mut held = Vec::new();
+        for i in 0..MAX_CONNECTIONS_PER_ROOM {
+            let token = &tokens[i / MAX_CONNECTIONS_PER_USER];
+            held.push(connect_room(addr, "room-full", token).await);
+        }
+
+        let (newcomer, _uid) = signup(&state, "collab-full-newcomer@example.com").await;
+        let mut over = connect_room(addr, "room-full", &newcomer).await;
+        // an accepted connection sends nothing until it joins
+        let refusal_wait = std::time::Duration::from_secs(10);
+        let reply = tokio::time::timeout(refusal_wait, over.next())
+            .await
+            .expect("a connection past the room cap must be closed");
+        match reply {
+            Some(Ok(Message::Close(Some(frame)))) => {
+                assert_eq!(u16::from(frame.code), ROOM_LIMIT_CLOSE_CODE);
+                assert_eq!(frame.reason.as_str(), "room full");
+            }
+            other => panic!("expected a room-full close, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn realtime_refuses_a_join_with_a_name_over_the_limit() {
         use futures::StreamExt;
         use tiletopia_server::realtime::{MAX_USER_NAME_CHARS, ROOM_LIMIT_CLOSE_CODE};
