@@ -717,39 +717,6 @@ fn fit_sample_variogram(samples: &[SamplePoint]) -> VariogramParams {
     fit_spherical_variogram(&compute_variogram(samples, 10, extent))
 }
 
-/// Compute Moran's I (spatial autocorrelation index).
-pub fn morans_i(samples: &[SamplePoint], bandwidth: f64) -> f64 {
-    let n = samples.len() as f64;
-    if samples.len() < 3 {
-        return 0.0;
-    }
-    let mean = samples.iter().map(|s| s.value).sum::<f64>() / n;
-
-    let mut numerator = 0.0;
-    let mut weight_sum = 0.0;
-    let denominator: f64 = samples.iter().map(|s| (s.value - mean).powi(2)).sum();
-
-    for i in 0..samples.len() {
-        for j in 0..samples.len() {
-            if i == j {
-                continue;
-            }
-            let dx = samples[i].x - samples[j].x;
-            let dy = samples[i].y - samples[j].y;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let w = if dist < bandwidth { 1.0 } else { 0.0 };
-            weight_sum += w;
-            numerator += w * (samples[i].value - mean) * (samples[j].value - mean);
-        }
-    }
-
-    if denominator == 0.0 || weight_sum == 0.0 {
-        0.0
-    } else {
-        (n / weight_sum) * (numerator / denominator)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1134,47 +1101,5 @@ mod tests {
         let refusal = validate_samples(&many).expect_err("past the cap");
 
         assert!(matches!(refusal, GeostatisticsError::TooManySamples { .. }));
-    }
-
-    #[test]
-    fn test_morans_i_clustered() {
-        // Spatially clustered data should have positive Moran's I
-        let samples = vec![
-            SamplePoint {
-                x: 0.0,
-                y: 0.0,
-                value: 10.0,
-            },
-            SamplePoint {
-                x: 0.1,
-                y: 0.0,
-                value: 10.5,
-            },
-            SamplePoint {
-                x: 0.0,
-                y: 0.1,
-                value: 10.2,
-            },
-            SamplePoint {
-                x: 5.0,
-                y: 5.0,
-                value: 50.0,
-            },
-            SamplePoint {
-                x: 5.1,
-                y: 5.0,
-                value: 49.5,
-            },
-            SamplePoint {
-                x: 5.0,
-                y: 5.1,
-                value: 50.3,
-            },
-        ];
-        let i = morans_i(&samples, 1.0);
-        assert!(
-            i > 0.0,
-            "Moran's I should be positive for clustered data, got {i}"
-        );
     }
 }

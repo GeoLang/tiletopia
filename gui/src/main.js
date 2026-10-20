@@ -374,11 +374,7 @@ async function loadTerrain() {
   const panel = document.getElementById('panel-terrain');
   panel.innerHTML = '<div class="feature-panel"><p style="color:var(--muted)">Loading terrain data...</p></div>';
   try {
-    const [terrainRes, elevRes] = await Promise.all([
-      apiFetch(`${API}/terrain-analysis/operations`),
-      apiFetch(`${API}/elevation/point?lat=37.7749&lon=-122.4194`),
-    ]);
-    const ops = await terrainRes.json();
+    const elevRes = await apiFetch(`${API}/elevation/point?lat=37.7749&lon=-122.4194`);
     // 404 when no DEM is staged for the sample point, and the body is text
     const elev = elevRes.ok ? await elevRes.json() : null;
     const elevation = elev
@@ -393,11 +389,6 @@ async function loadTerrain() {
       <div class="card-grid">
         <div class="metric-card"><div class="label">Sample Elevation</div><div class="value">${elevation}</div></div>
         <div class="metric-card"><div class="label">Source</div><div class="value">${source}</div></div>
-        <div class="metric-card"><div class="label">Available Analyses</div><div class="value">${ops.operations ? ops.operations.length : 0}</div></div>
-      </div>
-      <h3 class="section-title">Available Terrain Analyses</h3>
-      <div class="feature-tags">
-        ${(ops.operations || []).map(op => `<span class="tag">${typeof op === 'string' ? op : op.name || JSON.stringify(op)}</span>`).join('')}
       </div>
       <h3 class="section-title">Load Terrain into Viewer</h3>
       <button class="play-story-btn" id="load-terrain-btn">Load Quantized Mesh Terrain</button>

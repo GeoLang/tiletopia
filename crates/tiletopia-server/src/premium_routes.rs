@@ -18,10 +18,9 @@ use uuid::Uuid;
 use crate::{
     AppState, api_keys,
     audit::AuditedResource,
-    classification, cog, elevation,
+    cog, elevation,
     export::{EXPORT_FORMATS, ExportFormat, ExportJob, ExportStatus},
-    geoprocessing, geostatistics, indoor, metering, multispectral, scheduler, stac, static_map,
-    terrain_analysis,
+    geoprocessing, geostatistics, indoor, metering, scheduler, stac, static_map,
     terrain_api::Refusal,
     users, webhooks,
 };
@@ -1015,19 +1014,6 @@ async fn quality_presets() -> Json<serde_json::Value> {
     }))
 }
 
-/// Routes for point cloud classification.
-pub fn classification_routes() -> Router<Arc<AppState>> {
-    Router::new().route(
-        "/api/v1/classification/models",
-        get(list_classification_models),
-    )
-}
-
-async fn list_classification_models() -> Json<serde_json::Value> {
-    let models = classification::available_models();
-    Json(serde_json::json!({ "models": models }))
-}
-
 /// Routes for BIM 4D scheduling.
 pub fn bim4d_routes() -> Router<Arc<AppState>> {
     Router::new().route("/api/v1/bim4d/projects", get(list_bim4d_projects))
@@ -1461,19 +1447,6 @@ async fn static_map_formats() -> Json<serde_json::Value> {
     }))
 }
 
-/// Routes for terrain analysis.
-pub fn terrain_analysis_routes() -> Router<Arc<AppState>> {
-    Router::new().route(
-        "/api/v1/terrain-analysis/operations",
-        get(terrain_operations),
-    )
-}
-
-async fn terrain_operations() -> Json<serde_json::Value> {
-    let ops = terrain_analysis::available_analyses();
-    Json(serde_json::json!({ "operations": ops }))
-}
-
 /// Routes for geostatistics.
 ///
 /// Generic over the state so a test can serve the same route table without an
@@ -1515,23 +1488,6 @@ async fn geostat_interpolate(
     )
     .map(Json)
     .map_err(|refusal| (refusal.status(), refusal.to_string()))
-}
-
-/// Routes for multispectral imagery.
-pub fn multispectral_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/multispectral/indices", get(spectral_indices))
-        .route("/api/v1/multispectral/sensors", get(spectral_sensors))
-}
-
-async fn spectral_indices() -> Json<serde_json::Value> {
-    let indices = multispectral::supported_indices();
-    Json(serde_json::json!({ "indices": indices }))
-}
-
-async fn spectral_sensors() -> Json<serde_json::Value> {
-    let sensors = multispectral::supported_sensors();
-    Json(serde_json::json!({ "sensors": sensors }))
 }
 
 // ─── Entity Linking Routes ──────────────────────────────────────────────────

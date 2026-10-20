@@ -258,9 +258,7 @@ pub fn is_public_read(method: &Method, path: &str) -> bool {
         // /bundles/{name}/ for a prebuilt bundle. A terrain provider is a tile
         // layer like any other and cannot send a header, and the bundle listing
         // names directories an operator chose to serve, so the whole subtree is
-        // read-open. Matching "terrain" as a whole segment is what keeps the
-        // /api/v1/terrain-analysis/ compute routes gated, rather than the
-        // trailing slash this used to lean on.
+        // read-open.
         ["api", "v1", "terrain", rest @ ..] => !rest.is_empty(),
 
         // On-demand terrain-analysis tiles. A map library fetches these with no
@@ -327,9 +325,6 @@ pub fn route_access(method: &Method, path: &str) -> RouteAccess {
 
         // terrain and elevation compute
         ["api", "v1", "elevation", ..] if computes => RouteAccess::Needs(Permission::Terrain),
-        ["api", "v1", "terrain-analysis", ..] if computes => {
-            RouteAccess::Needs(Permission::Terrain)
-        }
 
         // analysis compute
         ["api", "v1", "analysis", ..] if computes => RouteAccess::Needs(Permission::Analytics),
@@ -726,11 +721,6 @@ mod tests {
 
     #[test]
     fn non_tile_reads_stay_gated() {
-        // terrain-analysis is compute, not tile data
-        assert!(!is_public_read(
-            &Method::GET,
-            "/api/v1/terrain-analysis/operations"
-        ));
         assert!(!is_public_read(&Method::GET, "/api/v1/elevation/point"));
         // the analysis compute routes, next to the public analysis tiles
         assert!(!is_public_read(&Method::GET, "/api/v1/analysis/terrain"));
@@ -815,7 +805,7 @@ mod tests {
             "/api/v1/assets/8d1f",
             "/api/v1/assets/8d1f/annotations",
             "/api/v1/terrain",
-            "/api/v1/terrain-analysis/operations",
+            "/api/v1/terrain-rgb/12/2200/1400",
             "/v1/assetsandmore",
             "/v1/tokens/42",
             // not anchored at the root
@@ -881,11 +871,6 @@ mod tests {
                 Permission::Read,
             ),
             (Method::GET, "/api/v1/elevation/point", Permission::Terrain),
-            (
-                Method::GET,
-                "/api/v1/terrain-analysis/operations",
-                Permission::Terrain,
-            ),
             (
                 Method::POST,
                 "/api/v1/analysis/viewshed",
@@ -1003,7 +988,7 @@ mod tests {
             "/api/v1/catalogue",
             "/api/v1/staccato",
             "/api/v1/cognition/datasets",
-            "/api/v1/terrain-analysis-admin/x",
+            "/api/v1/elevation-admin/x",
             "/api/v1/api-keys/usage/all",
             "/api/v1",
             "/",

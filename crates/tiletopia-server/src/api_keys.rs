@@ -68,7 +68,7 @@ impl ApiKey {
 pub enum Permission {
     /// Read-only catalog and dataset metadata: catalog, STAC, COG.
     Read,
-    /// Terrain and elevation compute.
+    /// Elevation queries.
     Terrain,
     /// Analysis compute: viewshed, flood, solar, terrain, geostatistics,
     /// geoprocessing.

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- 2026-10-19: `GET /api/v1/terrain-analysis/operations`,
+  `/api/v1/multispectral/indices`, `/api/v1/multispectral/sensors` and
+  `/api/v1/classification/models`. Each answered a static list of operations,
+  indices, sensors or models that no route runs. The dashboard terrain panel's
+  list of analyses went with the first. `geostatistics::morans_i`, called only
+  from its test, and the core `measurement`, `anomaly` and `clash_detection`
+  modules, which nothing called, went too. Removed modules, each at the last
+  commit that held it:
+  - `crates/tiletopia-server/src/terrain_analysis.rs` at 483ed94
+  - `crates/tiletopia-server/src/multispectral.rs` at 483ed94
+  - `crates/tiletopia-server/src/classification.rs` at 483ed94
+  - `crates/tiletopia-core/src/measurement.rs` at 483ed94
+  - `crates/tiletopia-core/src/anomaly.rs` at 483ed94
+  - `crates/tiletopia-core/src/clash_detection.rs` at 483ed94
 - 2026-09-24: `/api/v1/geocoding/search` and `/api/v1/geocoding/reverse`.
   They asked public Nominatim and fell back to seven landmarks compiled into
   the binary. The geokode-core dependency went with them. Removed module, at

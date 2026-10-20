@@ -13,7 +13,6 @@ pub mod auth;
 pub mod bim4d;
 pub mod catalog;
 pub mod cicd;
-pub mod classification;
 pub mod cog;
 pub mod db;
 pub mod elevation;
@@ -29,7 +28,6 @@ pub mod map_tiles;
 pub mod metering;
 pub mod metrics;
 pub mod model_registry;
-pub mod multispectral;
 pub mod offline_export;
 pub mod photogrammetry;
 pub mod plugin_registry;
@@ -40,7 +38,6 @@ pub mod scheduler;
 pub mod stac;
 pub mod static_map;
 pub mod stories_api;
-pub mod terrain_analysis;
 pub mod terrain_api;
 pub mod terrain_bundle;
 pub mod terrain_rgb;
@@ -303,7 +300,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::export_routes())
         .merge(premium_routes::scheduler_routes())
         .merge(premium_routes::photogrammetry_routes())
-        .merge(premium_routes::classification_routes())
         .merge(model_registry::model_registry_routes())
         .merge(premium_routes::bim4d_routes())
         .merge(premium_routes::stac_routes())
@@ -313,11 +309,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::geoprocessing_routes())
         .merge(premium_routes::elevation_routes())
         .merge(premium_routes::static_map_routes())
-        .merge(premium_routes::terrain_analysis_routes())
         .merge(analysis::analysis_routes())
         .merge(analysis_tiles::analysis_tile_routes())
         .merge(premium_routes::geostatistics_routes())
-        .merge(premium_routes::multispectral_routes())
         .merge(premium_routes::entity_linking_routes())
         .merge(stories_api::story_routes())
         .merge(portal::portal_routes())
