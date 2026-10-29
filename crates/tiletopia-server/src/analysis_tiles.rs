@@ -54,6 +54,7 @@ use geoplumb::tile::{XyzTile, render_tile};
 use geoplumb::window::{Bbox, GridSpec, WindowReq};
 use geoplumb::{Engine, Graph, NodeId};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use terrano_core::{BandedRaster, CogParams, Raster, write_cog_bands};
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::time::timeout;
@@ -62,6 +63,7 @@ use crate::AppState;
 use crate::analysis;
 use crate::elevation::{ElevationField, ElevationSources};
 use crate::terrain_api::Refusal;
+use crate::users::to_hex;
 
 /// Zooms past this are refused: the tile maths shifts by `z`, and no viewer
 /// asks for more than sub-metre pixels anyway.
@@ -769,6 +771,40 @@ impl DemSource {
 }
 
 impl Source for DemSource {
+    fn identity(&self) -> String {
+        // the loaded grids never change after startup, so their cells stand
+        // in for the content, and the srtm fallback is named by where it reads
+        let mut digest = Sha256::new();
+        let grids = self.elevation.grids().grids();
+        for grid in grids {
+            digest.update(
+                format!(
+                    "{:?} {} {} {:?} {:?} {:?}",
+                    grid.bounds,
+                    grid.width,
+                    grid.height,
+                    grid.cell_size_x,
+                    grid.cell_size_y,
+                    grid.nodata
+                )
+                .as_bytes(),
+            );
+            for v in &grid.elevations {
+                digest.update(v.to_le_bytes());
+            }
+        }
+        format!(
+            "DemSource grids={} origin_x={:?} origin_y={:?} base_resolution={:?} srtm_dir={:?} srtm_base_url={:?} content={}",
+            grids.len(),
+            self.origin_x,
+            self.origin_y,
+            self.base_resolution,
+            self.elevation.data_dir(),
+            self.elevation.srtm_base_url(),
+            to_hex(&digest.finalize())
+        )
+    }
+
     fn constraint(&self) -> Constraint {
         Constraint::Produces(CapsSet::one(CapsPattern::Raster(RasterPattern {
             dtype: SetField::one(Dtype::F64),

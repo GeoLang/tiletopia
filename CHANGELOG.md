@@ -195,6 +195,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 2026-10-28: sqlx 0.8 to 0.9 in the server, the version mbtiles already
+  used, so the binary links one sqlite. Queries built at runtime pass
+  through `AssertSqlSafe`. The lock takes geoplumb with its GeoPackage source
+  and terrano 0.3 with range reads by shared reference.
 - 2026-09-24: the globe's search bar asks geokode at same-origin
   `/api/geocode/forward` where it asked public Nominatim. A result with a
   bbox flies to that rectangle. A miss or an error shows no result.

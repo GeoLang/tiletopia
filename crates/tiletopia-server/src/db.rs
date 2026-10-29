@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::{Row, SqlitePool};
+use sqlx::{AssertSqlSafe, Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::api_keys::{ApiKey, Permission, RateLimitTier};
@@ -264,9 +264,11 @@ impl Database {
                 .await?
                 .is_some();
             if !present {
-                sqlx::query(&format!("ALTER TABLE jobs ADD COLUMN {column}"))
-                    .execute(&self.pool)
-                    .await?;
+                sqlx::query(AssertSqlSafe(format!(
+                    "ALTER TABLE jobs ADD COLUMN {column}"
+                )))
+                .execute(&self.pool)
+                .await?;
             }
         }
 
@@ -384,9 +386,11 @@ impl Database {
                 .await?
                 .is_some();
             if !present {
-                sqlx::query(&format!("ALTER TABLE users ADD COLUMN {column}"))
-                    .execute(&self.pool)
-                    .await?;
+                sqlx::query(AssertSqlSafe(format!(
+                    "ALTER TABLE users ADD COLUMN {column}"
+                )))
+                .execute(&self.pool)
+                .await?;
             }
         }
 
@@ -569,10 +573,12 @@ impl Database {
     }
 
     pub async fn get_asset(&self, id: Uuid) -> Result<Option<Asset>, sqlx::Error> {
-        let row = sqlx::query(&format!("SELECT {ASSET_COLUMNS} FROM assets WHERE id = ?"))
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(AssertSqlSafe(format!(
+            "SELECT {ASSET_COLUMNS} FROM assets WHERE id = ?"
+        )))
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
 
         Ok(row.map(|r| row_to_asset(&r)))
     }
@@ -581,9 +587,9 @@ impl Database {
         &self,
         id: Uuid,
     ) -> Result<Option<(Asset, i64)>, sqlx::Error> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "SELECT {ASSET_COLUMNS}, ion_id FROM assets WHERE id = ?"
-        ))
+        )))
         .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await?;
@@ -595,9 +601,9 @@ impl Database {
         &self,
         ion_id: i64,
     ) -> Result<Option<(Asset, i64)>, sqlx::Error> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "SELECT {ASSET_COLUMNS}, ion_id FROM assets WHERE ion_id = ?"
-        ))
+        )))
         .bind(ion_id)
         .fetch_optional(&self.pool)
         .await?;
@@ -606,9 +612,9 @@ impl Database {
     }
 
     pub async fn list_assets(&self) -> Result<Vec<Asset>, sqlx::Error> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT {ASSET_COLUMNS} FROM assets ORDER BY created_at DESC"
-        ))
+        )))
         .fetch_all(&self.pool)
         .await?;
 
@@ -616,9 +622,9 @@ impl Database {
     }
 
     pub async fn list_assets_with_ion_ids(&self) -> Result<Vec<(Asset, i64)>, sqlx::Error> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT {ASSET_COLUMNS}, ion_id FROM assets ORDER BY created_at DESC"
-        ))
+        )))
         .fetch_all(&self.pool)
         .await?;
 
@@ -676,10 +682,10 @@ impl Database {
         let started_at = job.started_at.map(|dt| dt.to_rfc3339());
         let completed_at = job.completed_at.map(|dt| dt.to_rfc3339());
 
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO jobs ({JOB_COLUMNS})
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        ))
+        )))
         .bind(&id)
         .bind(&asset_id)
         .bind(&status)
@@ -702,18 +708,20 @@ impl Database {
     }
 
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobRecord>, sqlx::Error> {
-        let row = sqlx::query(&format!("SELECT {JOB_COLUMNS} FROM jobs WHERE id = ?"))
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(AssertSqlSafe(format!(
+            "SELECT {JOB_COLUMNS} FROM jobs WHERE id = ?"
+        )))
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
 
         Ok(row.map(|r| row_to_job(&r)))
     }
 
     pub async fn list_jobs_for_asset(&self, asset_id: Uuid) -> Result<Vec<JobRecord>, sqlx::Error> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT {JOB_COLUMNS} FROM jobs WHERE asset_id = ? ORDER BY created_at DESC"
-        ))
+        )))
         .bind(asset_id.to_string())
         .fetch_all(&self.pool)
         .await?;
@@ -749,9 +757,9 @@ impl Database {
     }
 
     pub async fn next_queued_job(&self) -> Result<Option<JobRecord>, sqlx::Error> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "SELECT {JOB_COLUMNS} FROM jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
-        ))
+        )))
         .fetch_optional(&self.pool)
         .await?;
 
@@ -761,10 +769,10 @@ impl Database {
     // -- Tileset registry --
 
     pub async fn create_tileset(&self, tileset: &TilesetRecord) -> Result<(), sqlx::Error> {
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO tilesets ({TILESET_COLUMNS})
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        ))
+        )))
         .bind(tileset.id.to_string())
         .bind(&tileset.name)
         .bind(enum_to_str(&tileset.status))
@@ -786,9 +794,9 @@ impl Database {
     }
 
     pub async fn get_tileset(&self, id: Uuid) -> Result<Option<TilesetRecord>, sqlx::Error> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "SELECT {TILESET_COLUMNS} FROM tilesets WHERE id = ?"
-        ))
+        )))
         .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await?;
@@ -797,9 +805,9 @@ impl Database {
     }
 
     pub async fn list_tilesets(&self) -> Result<Vec<TilesetRecord>, sqlx::Error> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT {TILESET_COLUMNS} FROM tilesets ORDER BY created_at DESC"
-        ))
+        )))
         .fetch_all(&self.pool)
         .await?;
 
@@ -809,9 +817,9 @@ impl Database {
     /// Every archive that finished building, which is what a restart
     /// re-registers with the martin backend.
     pub async fn list_ready_tilesets(&self) -> Result<Vec<TilesetRecord>, sqlx::Error> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT {TILESET_COLUMNS} FROM tilesets WHERE status = 'ready' ORDER BY created_at"
-        ))
+        )))
         .fetch_all(&self.pool)
         .await?;
 
@@ -821,7 +829,7 @@ impl Database {
     /// Mark the oldest unclaimed build as started and hand it back. The claim
     /// and the read are one statement, so two workers cannot take one row.
     pub async fn claim_tileset_build(&self) -> Result<Option<TilesetRecord>, sqlx::Error> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "UPDATE tilesets SET started_at = ?
              WHERE id = (
                  SELECT id FROM tilesets
@@ -829,7 +837,7 @@ impl Database {
                  ORDER BY created_at LIMIT 1
              )
              RETURNING {TILESET_COLUMNS}"
-        ))
+        )))
         .bind(Utc::now().to_rfc3339())
         .fetch_optional(&self.pool)
         .await?;
@@ -909,9 +917,9 @@ impl Database {
     /// Revoked and expired rows come back like any other: the credential path
     /// decides, so it can answer which of the two it was.
     pub async fn api_key_by_hash(&self, key_hash: &str) -> Result<Option<ApiKey>, sqlx::Error> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "SELECT {API_KEY_COLUMNS} FROM api_keys WHERE key_hash = ?"
-        ))
+        )))
         .bind(key_hash)
         .fetch_optional(&self.pool)
         .await?;
@@ -920,9 +928,9 @@ impl Database {
     }
 
     pub async fn list_api_keys(&self) -> Result<Vec<ApiKey>, sqlx::Error> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT {API_KEY_COLUMNS} FROM api_keys ORDER BY created_at DESC"
-        ))
+        )))
         .fetch_all(&self.pool)
         .await?;
 
@@ -986,9 +994,9 @@ impl Database {
     pub async fn list_webhook_subscriptions(
         &self,
     ) -> Result<Vec<WebhookSubscription>, sqlx::Error> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT {WEBHOOK_COLUMNS} FROM webhook_subscriptions ORDER BY created_at DESC"
-        ))
+        )))
         .fetch_all(&self.pool)
         .await?;
 
@@ -999,9 +1007,9 @@ impl Database {
         &self,
         id: Uuid,
     ) -> Result<Option<WebhookSubscription>, sqlx::Error> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "SELECT {WEBHOOK_COLUMNS} FROM webhook_subscriptions WHERE id = ?"
-        ))
+        )))
         .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await?;
@@ -1068,9 +1076,9 @@ impl Database {
     /// Every scheduled job, newest first. The listing route reads this and
     /// filters it by who is asking.
     pub async fn list_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>, sqlx::Error> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT {SCHEDULED_JOB_COLUMNS} FROM scheduled_jobs ORDER BY created_at DESC"
-        ))
+        )))
         .fetch_all(&self.pool)
         .await?;
 
@@ -1078,9 +1086,9 @@ impl Database {
     }
 
     pub async fn get_scheduled_job(&self, id: Uuid) -> Result<Option<ScheduledJob>, sqlx::Error> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "SELECT {SCHEDULED_JOB_COLUMNS} FROM scheduled_jobs WHERE id = ?"
-        ))
+        )))
         .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await?;
@@ -1094,11 +1102,11 @@ impl Database {
         &self,
         now: DateTime<Utc>,
     ) -> Result<Vec<ScheduledJob>, sqlx::Error> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT {SCHEDULED_JOB_COLUMNS} FROM scheduled_jobs \
              WHERE enabled = 1 AND next_run IS NOT NULL AND next_run <= ? \
              ORDER BY next_run"
-        ))
+        )))
         .bind(now.to_rfc3339())
         .fetch_all(&self.pool)
         .await?;
@@ -1224,7 +1232,7 @@ impl Database {
         }
         sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
 
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query(AssertSqlSafe(sql));
         if let Some(user_id) = &filter.user_id {
             query = query.bind(user_id.clone());
         }
@@ -1637,9 +1645,9 @@ impl Database {
     }
 
     pub async fn list_recent_jobs(&self, limit: u32) -> Result<Vec<JobRecord>, sqlx::Error> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT {JOB_COLUMNS} FROM jobs ORDER BY created_at DESC LIMIT ?"
-        ))
+        )))
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
@@ -1679,7 +1687,7 @@ impl Database {
         }
         sql.push_str(" ORDER BY created_at DESC");
 
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query(AssertSqlSafe(sql));
         for b in &binds {
             query = query.bind(b);
         }

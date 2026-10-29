@@ -184,6 +184,10 @@ impl DemStore {
         }
     }
 
+    pub fn grids(&self) -> &[DemGrid] {
+        &self.grids
+    }
+
     pub fn add_grid(&mut self, grid: DemGrid) {
         self.grids.push(grid);
     }
@@ -239,6 +243,14 @@ impl ElevationSources {
     /// The loaded grids, for callers that anchor a resolution ladder on one.
     pub fn grids(&self) -> &Arc<DemStore> {
         &self.grids
+    }
+
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
+    pub fn srtm_base_url(&self) -> &str {
+        &self.srtm_base_url
     }
 
     /// Elevation over `bounds`, resolved once so a whole raster can then be
