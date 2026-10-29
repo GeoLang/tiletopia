@@ -1166,7 +1166,7 @@ mod tests {
             .unwrap()
             .to_vec();
 
-        let mut reader = terrano_core::CogReader::open(&bytes[..]).expect("valid cog");
+        let reader = terrano_core::CogReader::open(&bytes[..]).expect("valid cog");
         assert_eq!(reader.meta().epsg, 3857);
         assert_eq!(reader.meta().pixel_width, 200.0);
         assert_eq!(reader.meta().pixel_height, 200.0);

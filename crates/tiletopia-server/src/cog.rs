@@ -3,8 +3,9 @@
 //! `TILETOPIA_COG_SOURCES` names what to serve, one href per comma-separated
 //! entry, each a local path or an http(s) URL. Every entry is opened once at
 //! startup for the layout the file declares, and reads go through terrano's
-//! windowed `CogReader`: local files by seek, remote files by HTTP `Range`, so a
-//! window costs the internal tiles it touches rather than the whole file.
+//! windowed `CogReader`: local files by offset reads, remote files by HTTP
+//! `Range`, so a window costs the internal tiles it touches rather than the
+//! whole file.
 //!
 //! Unset serves nothing. The reader opened at startup stays open and every
 //! window reuses it, so no request pays for the header reads again.
@@ -108,12 +109,9 @@ impl CogError {
 /// it. There is one entry per entry of `TILETOPIA_COG_SOURCES`, so a local
 /// source holds one file handle for as long as the server runs and a remote one
 /// holds parsed headers and no handle.
-///
-/// The reader is behind a lock because a window read needs `&mut` and fetches
-/// its tiles one range after another anyway.
 struct RegisteredCog {
     dataset: CogDataset,
-    reader: Mutex<CogReader<RangeSource>>,
+    reader: CogReader<RangeSource>,
 }
 
 /// The COGs this server serves.
@@ -233,12 +231,8 @@ impl CogEngine {
             href: dataset.href.clone(),
             reason: e.to_string(),
         };
-        // every range read seeks from the start of the file, so a read that
-        // panicked left the reader nothing half-done
         let bands = source
             .reader
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .read_window_bands(
                 request.level,
                 request.col,
@@ -319,10 +313,7 @@ fn open_source(id: &str, href: &str) -> Result<RegisteredCog, CogError> {
             })
             .collect(),
     };
-    Ok(RegisteredCog {
-        dataset,
-        reader: Mutex::new(reader),
-    })
+    Ok(RegisteredCog { dataset, reader })
 }
 
 /// Size of a whole source, filled in as it becomes known: a local file's when it
@@ -366,15 +357,9 @@ impl RangeSource {
 }
 
 impl RangeRead for RangeSource {
-    fn read_range(&mut self, offset: u64, len: u64) -> Result<Vec<u8>, TerranoError> {
+    fn read_range(&self, offset: u64, len: u64) -> Result<Vec<u8>, TerranoError> {
         match self {
-            RangeSource::File(file) => {
-                use std::io::{Read, Seek, SeekFrom};
-                file.seek(SeekFrom::Start(offset))?;
-                let mut buf = vec![0u8; len as usize];
-                file.read_exact(&mut buf)?;
-                Ok(buf)
-            }
+            RangeSource::File(file) => file.read_range(offset, len),
             RangeSource::Http { url, total_bytes } => {
                 let (bytes, total) = fetch_range(url, offset, len)?;
                 if let Some(total) = total {
