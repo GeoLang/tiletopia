@@ -240,7 +240,7 @@ pub const MAX_ROOMS: usize = 512;
 pub const MAX_USER_NAME_CHARS: usize = 64;
 
 // an OIDC subject is at most 255 ASCII characters
-const MAX_USER_ID_JSON_LEN: usize = 255;
+pub const MAX_USER_ID_JSON_LEN: usize = 255;
 
 // the largest roster whose worst-case Presence message fits in MAX_MESSAGE_LEN
 pub const MAX_CONNECTIONS_PER_ROOM: usize = 23;
@@ -410,6 +410,9 @@ const MAX_ROOM_ID_LEN: usize = 128;
 
 pub const MAX_MESSAGE_LEN: usize = 16 * 1024;
 
+// with_sender adds at most MAX_USER_ID_JSON_LEN bytes to a client message
+pub const MAX_CLIENT_MESSAGE_LEN: usize = MAX_MESSAGE_LEN - MAX_USER_ID_JSON_LEN;
+
 const ROOM_BROADCAST_CAPACITY: usize = 32;
 
 fn json_string_len(text: &str) -> usize {
@@ -454,8 +457,8 @@ pub async fn ws_handler(
     // echoing the marker is required for a browser to accept the 101; the token
     // itself is never echoed
     let upgrade = ws
-        .max_message_size(MAX_MESSAGE_LEN)
-        .max_frame_size(MAX_MESSAGE_LEN)
+        .max_message_size(MAX_CLIENT_MESSAGE_LEN)
+        .max_frame_size(MAX_CLIENT_MESSAGE_LEN)
         .protocols([crate::auth::BEARER_SUBPROTOCOL]);
     let tx = match state.realtime.acquire_room(&room, &claims.sub).await {
         Ok(tx) => tx,

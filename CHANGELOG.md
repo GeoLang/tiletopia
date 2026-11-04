@@ -88,6 +88,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 2026-11-03: a realtime message from a client is capped at 16 KiB less 255
+  bytes, down from 16 KiB. Stamping `user_id` took a relayed chat line up to 255
+  bytes over 16 KiB.
 - 2026-10-01: a realtime room takes at most 23 connections and an account at
   most 16 across all rooms, refused with close code 4029 and the reason
   `room full` or `too many connections`. A full room's presence broadcast fits

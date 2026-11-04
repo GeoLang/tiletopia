@@ -3088,7 +3088,7 @@ mod tests {
     #[tokio::test]
     async fn realtime_refuses_a_message_over_the_size_limit() {
         use futures::{SinkExt, StreamExt};
-        use tiletopia_server::realtime::MAX_MESSAGE_LEN;
+        use tiletopia_server::realtime::MAX_CLIENT_MESSAGE_LEN;
         use tokio_tungstenite::tungstenite::Message;
 
         let state = test_state().await;
@@ -3100,7 +3100,7 @@ mod tests {
         let mut b = connect_room(addr, "room-size", &token_b).await;
 
         // a message right at the limit is relayed
-        a.send(Message::Text(chat_of_len(MAX_MESSAGE_LEN).into()))
+        a.send(Message::Text(chat_of_len(MAX_CLIENT_MESSAGE_LEN).into()))
             .await
             .unwrap();
         for ws in [&mut a, &mut b] {
@@ -3109,13 +3109,15 @@ mod tests {
             assert_eq!(v["type"], "Chat");
             assert_eq!(
                 v["message"].as_str().unwrap().len(),
-                MAX_MESSAGE_LEN - chat_with("").len()
+                MAX_CLIENT_MESSAGE_LEN - chat_with("").len()
             );
         }
 
         // one byte over and the server drops the connection, possibly mid-write
         let _ = a
-            .send(Message::Text(chat_of_len(MAX_MESSAGE_LEN + 1).into()))
+            .send(Message::Text(
+                chat_of_len(MAX_CLIENT_MESSAGE_LEN + 1).into(),
+            ))
             .await;
         match a.next().await {
             None | Some(Err(_)) | Some(Ok(Message::Close(_))) => {}

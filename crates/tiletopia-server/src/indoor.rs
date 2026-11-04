@@ -1,9 +1,9 @@
-//! Indoor mapping — floor plans, room-level navigation, and indoor positioning.
+//! Indoor mapping: floor plans, a room-to-room shortest path function, and indoor positioning.
 //!
 //! Supports:
 //! - Multi-story building floor plans
 //! - Room/zone definitions with metadata
-//! - Indoor routing between rooms
+//! - [`find_route`], a shortest path between two rooms. No HTTP route calls it
 //! - Indoor positioning reference points (BLE beacons, WiFi)
 
 use petgraph::algo::dijkstra;
