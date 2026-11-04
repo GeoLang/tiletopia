@@ -18,7 +18,8 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          # ubuntu-26.04 fails to compile draco-rs's generated PointCloud move constructor
+          - os: ubuntu-24.04
             features: draco,plugin-dylib,ml,martin
           - os: macos-latest
             features: draco,plugin-dylib,ml,martin
@@ -95,7 +96,7 @@ jobs:
         continue-on-error: true
 
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
