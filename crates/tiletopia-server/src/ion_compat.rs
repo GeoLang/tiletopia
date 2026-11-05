@@ -4,25 +4,27 @@
 //! using `Cesium.IonResource` can point at Tiletopia instead.
 
 use axum::{
-    Extension, Router,
+    Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware,
     response::Json,
     routing::{get, post},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::audit::AuditedResource;
-use crate::{AppState, AssetType, terrain_bundle, users};
+use crate::{
+    AppState, AssetType, czml, global_terrain, imagery, ion_upload, may_view_asset, terrain_bundle,
+    users,
+};
 
 // ─── Ion-format response types ───────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
-struct IonAsset {
+pub(crate) struct IonAsset {
     id: i64,
     #[serde(rename = "type")]
     asset_type: String,
@@ -52,67 +54,32 @@ struct IonEndpoint {
     /// credits for a provider, so an endpoint missing it throws before the
     /// first tile is asked for.
     attributions: Vec<serde_json::Value>,
-}
-
-#[derive(Debug, Serialize)]
-struct IonToken {
-    id: String,
-    name: String,
-    token: String,
-    #[serde(rename = "dateAdded")]
-    date_added: String,
-    #[serde(rename = "dateModified")]
-    date_modified: String,
-    #[serde(rename = "dateLastUsed")]
-    date_last_used: String,
-    #[serde(rename = "isDefault")]
-    is_default: bool,
-    scopes: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateIonAssetRequest {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(rename = "type")]
-    pub asset_type: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateIonTokenRequest {
-    pub name: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
+    #[serde(rename = "externalType", skip_serializing_if = "Option::is_none")]
+    external_type: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<serde_json::Value>,
 }
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
-/// Anonymous Ion-compat reads. GET-only asset/token discovery that public
-/// CesiumJS clients use to resolve assets; served without auth like the native
-/// tile-data GETs. Kept separate from the mutating routes so a POST can never
-/// ride the read exemption.
 pub fn ion_compat_read_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/assets", get(list_assets))
         .route("/v1/assets/{id}", get(get_asset))
         .route("/v1/assets/{id}/endpoint", get(get_endpoint))
-        .route("/v1/tokens", get(list_tokens))
 }
 
 /// Mutating Ion-compat routes, behind the auth layer. Asset creation is an
-/// Edit-tier write (editor or admin); token minting issues a bearer credential
-/// so it is admin-only, matching how the rest of tiletopia gates privileged
-/// management behind require_admin.
+/// Edit-tier write (editor or admin).
 pub fn ion_compat_write_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
             "/v1/assets",
-            post(create_asset).layer(middleware::from_fn(users::require_editor)),
+            post(ion_upload::create_asset).layer(middleware::from_fn(users::require_editor)),
         )
         .route(
-            "/v1/tokens",
-            post(create_token).layer(middleware::from_fn(users::require_admin)),
+            "/v1/assets/{id}/uploadComplete",
+            post(ion_upload::upload_complete).layer(middleware::from_fn(users::require_editor)),
         )
 }
 
@@ -121,48 +88,84 @@ fn map_asset_type(asset_type: &AssetType) -> String {
         AssetType::PointCloud | AssetType::Model | AssetType::Vector => "3DTILES".to_string(),
         AssetType::Terrain => "TERRAIN".to_string(),
         AssetType::Imagery => "IMAGERY".to_string(),
+        AssetType::Czml => "CZML".to_string(),
     }
 }
 
-fn ion_status(status: &crate::AssetStatus) -> String {
+fn ion_status(status: &crate::AssetStatus, awaiting_files: bool) -> String {
     match status {
         crate::AssetStatus::Ready => "COMPLETE".to_string(),
         crate::AssetStatus::Tiling => "IN_PROGRESS".to_string(),
-        crate::AssetStatus::Uploading => "AWAITING_FILES".to_string(),
+        crate::AssetStatus::Uploading if awaiting_files => "AWAITING_FILES".to_string(),
+        crate::AssetStatus::Uploading => "NOT_STARTED".to_string(),
         crate::AssetStatus::Error => "ERROR".to_string(),
     }
 }
 
-fn percent_for_status(status: &crate::AssetStatus) -> u8 {
+fn percent_complete(status: &crate::AssetStatus, running_job_progress: Option<f64>) -> u8 {
     match status {
         crate::AssetStatus::Ready => 100,
-        crate::AssetStatus::Tiling => 50,
+        crate::AssetStatus::Tiling => {
+            running_job_progress.map_or(0, |progress| (progress * 100.0) as u8)
+        }
         crate::AssetStatus::Uploading => 0,
         crate::AssetStatus::Error => 0,
     }
 }
 
-fn to_ion_asset(asset: &crate::Asset, ion_id: i64) -> IonAsset {
+pub(crate) fn to_ion_asset(
+    asset: &crate::Asset,
+    ion_id: i64,
+    awaiting_files: bool,
+    running_job_progress: Option<f64>,
+) -> IonAsset {
     IonAsset {
         id: ion_id,
         asset_type: map_asset_type(&asset.asset_type),
         name: asset.name.clone(),
         description: asset.description.clone(),
-        status: ion_status(&asset.status),
-        percent_complete: percent_for_status(&asset.status),
+        status: ion_status(&asset.status, awaiting_files),
+        percent_complete: percent_complete(&asset.status, running_job_progress),
         date_added: asset.created_at.to_rfc3339(),
         bytes: asset.size_bytes,
     }
 }
 
-fn get_base_url() -> String {
-    std::env::var("TILETOPIA_ION_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string())
+pub const ION_BASE_URL_VAR: &str = "TILETOPIA_ION_BASE_URL";
+
+pub fn ion_base_url_from_env() -> Result<String, String> {
+    checked_ion_base_url(std::env::var(ION_BASE_URL_VAR).ok().as_deref())
+}
+
+fn checked_ion_base_url(raw: Option<&str>) -> Result<String, String> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Err(format!(
+            "{ION_BASE_URL_VAR} is not set, set it to the http or https origin clients reach this server at, such as https://tiles.example.com"
+        ));
+    };
+    let url = reqwest::Url::parse(raw).map_err(|error| {
+        format!(
+            "{ION_BASE_URL_VAR} is {raw:?}: {error}, expected an http or https origin such as https://tiles.example.com"
+        )
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "{ION_BASE_URL_VAR} is {raw:?}, expected an http or https origin such as https://tiles.example.com"
+        ));
+    }
+    let origin = url.origin().ascii_serialization();
+    if raw != origin {
+        return Err(format!(
+            "{ION_BASE_URL_VAR} is {raw:?}, expected exactly {origin:?}: a path, query or trailing slash breaks S3 Signature V4 on the Ion upload route and the URLs joined to this value"
+        ));
+    }
+    Ok(origin)
 }
 
 /// An Ion client only ever has the number it read off the asset list, and
 /// `IonImageryProvider.fromAssetId` will not even accept anything else. Uuids
 /// still resolve, so a link written against the native asset id keeps working.
-async fn resolve_asset(
+pub(crate) async fn resolve_asset(
     state: &AppState,
     id: &str,
 ) -> Result<Option<(crate::Asset, i64)>, sqlx::Error> {
@@ -177,16 +180,38 @@ async fn resolve_asset(
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
-async fn list_assets(State(state): State<Arc<AppState>>) -> Result<Json<IonAssetList>, StatusCode> {
+async fn list_assets(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<IonAssetList>, StatusCode> {
+    let claims = users::claims_from_headers(&headers)?;
     let assets = state
         .db
         .list_assets_with_ion_ids()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let awaiting_files = state
+        .db
+        .asset_ids_awaiting_files()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let running_job_progress = state
+        .db
+        .running_job_progress()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let items: Vec<IonAsset> = assets
         .iter()
-        .map(|(asset, ion_id)| to_ion_asset(asset, *ion_id))
+        .filter(|(asset, _)| may_view_asset(&claims, asset.owner_id.as_deref()))
+        .map(|(asset, ion_id)| {
+            to_ion_asset(
+                asset,
+                *ion_id,
+                awaiting_files.contains(&asset.id),
+                running_job_progress.get(&asset.id).copied(),
+            )
+        })
         .collect();
     Ok(Json(IonAssetList { items }))
 }
@@ -194,75 +219,61 @@ async fn list_assets(State(state): State<Arc<AppState>>) -> Result<Json<IonAsset
 async fn get_asset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<IonAsset>, StatusCode> {
+    let claims = users::claims_from_headers(&headers)?;
     let (asset, ion_id) = resolve_asset(&state, &id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter(|(asset, _)| may_view_asset(&claims, asset.owner_id.as_deref()))
         .ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(to_ion_asset(&asset, ion_id)))
-}
-
-async fn create_asset(
-    State(state): State<Arc<AppState>>,
-    headers: axum::http::HeaderMap,
-    Json(req): Json<CreateIonAssetRequest>,
-) -> Result<(StatusCode, Extension<AuditedResource>, Json<IonAsset>), StatusCode> {
-    // the route sits behind require_editor, so a valid token is always present
-    let owner_id = users::claims_from_headers(&headers)?.sub;
-
-    let asset_type = match req.asset_type.as_deref() {
-        Some("3DTILES") => AssetType::Model,
-        Some("TERRAIN") => AssetType::Terrain,
-        Some("IMAGERY") => AssetType::Imagery,
-        _ => AssetType::PointCloud,
-    };
-
-    let asset = crate::Asset {
-        id: Uuid::new_v4(),
-        name: req.name,
-        asset_type,
-        status: crate::AssetStatus::Uploading,
-        created_at: chrono::Utc::now(),
-        tile_count: 0,
-        size_bytes: 0,
-        description: req.description,
-        tags: Vec::new(),
-        owner_id: Some(owner_id),
-    };
-
-    let ion_id = state
+    let awaiting_files = state
         .db
-        .create_asset(&asset)
+        .asset_ids_awaiting_files()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // the internal asset id, so a row names the same key whichever create route
-    // made the asset
-    Ok((
-        StatusCode::CREATED,
-        Extension(AuditedResource(asset.id.to_string())),
-        Json(to_ion_asset(&asset, ion_id)),
-    ))
+    let running_job_progress = state
+        .db
+        .running_job_progress()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(to_ion_asset(
+        &asset,
+        ion_id,
+        awaiting_files.contains(&asset.id),
+        running_job_progress.get(&asset.id).copied(),
+    )))
 }
 
 /// Status plus a message, because the only thing a CesiumJS developer sees when
 /// this call fails is the response body in the console.
-type EndpointError = (StatusCode, Json<serde_json::Value>);
+pub(crate) type IonError = (StatusCode, Json<serde_json::Value>);
 
-fn endpoint_error(status: StatusCode, message: impl Into<String>) -> EndpointError {
+pub(crate) fn ion_error(status: StatusCode, message: impl Into<String>) -> IonError {
     (status, Json(json!({ "message": message.into() })))
 }
 
 async fn get_endpoint(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<IonEndpoint>, EndpointError> {
+    headers: HeaderMap,
+) -> Result<Json<IonEndpoint>, IonError> {
+    if state.global_terrain.is_named_by_ion_id(&id) {
+        return global_terrain_endpoint(&state);
+    }
+    let claims = users::claims_from_headers(&headers).map_err(|status| {
+        ion_error(
+            status,
+            "send the token in an Authorization: Bearer header, a query string is never a credential",
+        )
+    })?;
     let (asset, _) = resolve_asset(&state, &id)
         .await
-        .map_err(|_| endpoint_error(StatusCode::INTERNAL_SERVER_ERROR, "asset lookup failed"))?
-        .ok_or_else(|| endpoint_error(StatusCode::NOT_FOUND, format!("no asset {id}")))?;
+        .map_err(|_| ion_error(StatusCode::INTERNAL_SERVER_ERROR, "asset lookup failed"))?
+        .filter(|(asset, _)| may_view_asset(&claims, asset.owner_id.as_deref()))
+        .ok_or_else(|| ion_error(StatusCode::NOT_FOUND, format!("no asset {id}")))?;
 
-    let base_url = get_base_url();
+    let base_url = &state.ion_base_url;
     let url = match asset.asset_type {
         // CesiumTerrainProvider appends layer.json to whatever url arrives
         // here, so it has to be the directory of a quantized-mesh bundle. A
@@ -271,25 +282,49 @@ async fn get_endpoint(
         AssetType::Terrain => {
             let bundle = asset.id.to_string();
             if !terrain_bundle::bundle_exists(&state, &bundle).await {
-                return Err(endpoint_error(
+                return Err(ion_error(
                     StatusCode::NOT_FOUND,
                     format!(
-                        "terrain asset {bundle} has no terrain to serve: put a quantized-mesh bundle at <data-dir>/terrain_bundles/{bundle}/"
+                        "terrain asset {bundle} has no terrain to serve, its status is {status:?}: GET /api/v1/assets/{bundle}/jobs reports the job of a DEM upload, otherwise put a quantized-mesh bundle at <data-dir>/terrain_bundles/{bundle}/",
+                        status = asset.status,
                     ),
                 ));
             }
             format!("{base_url}/api/v1/terrain/bundles/{bundle}/")
         }
-        // nothing here serves image tiles, and cesium reads an IMAGERY url as a
-        // TMS root, so a tileset.json would send it after tilemapresource.xml
+        // cesium reads an IMAGERY url with no externalType as a TMS root, and URL_TEMPLATE counts {y} from the north
         AssetType::Imagery => {
-            return Err(endpoint_error(
-                StatusCode::NOT_IMPLEMENTED,
-                format!(
-                    "asset {id} is imagery, and tiletopia has no imagery tiling: there is no tile pyramid for an imagery provider to read"
-                ),
-            ));
+            let manifest = imagery::read_manifest(&state.data_dir, asset.id)
+                .await
+                .map_err(|reason| {
+                    tracing::warn!("imagery manifest read failed: {reason}");
+                    ion_error(StatusCode::INTERNAL_SERVER_ERROR, "imagery lookup failed")
+                })?
+                .ok_or_else(|| {
+                    ion_error(
+                        StatusCode::NOT_IMPLEMENTED,
+                        format!(
+                            "asset {id} is imagery with no tiles to serve: only a georeferenced GeoTIFF, JPEG or PNG upload is tiled"
+                        ),
+                    )
+                })?;
+            let url = format!("{base_url}{}", imagery::tile_template(asset.id));
+            let options = json!({
+                "url": url,
+                "maximumLevel": manifest.max_zoom,
+                "rectangle": manifest.rectangle_radians(),
+            });
+            return Ok(Json(IonEndpoint {
+                endpoint_type: map_asset_type(&asset.asset_type),
+                url,
+                access_token: String::new(),
+                attributions: Vec::new(),
+                external_type: Some("URL_TEMPLATE"),
+                options: Some(options),
+            }));
         }
+        // CzmlDataSource.load reads the endpoint url as the CZML document itself
+        AssetType::Czml => format!("{base_url}{}", czml::document_path(asset.id)),
         _ => format!("{base_url}/api/v1/assets/{}/tileset.json", asset.id),
     };
 
@@ -298,42 +333,101 @@ async fn get_endpoint(
         url,
         access_token: String::new(),
         attributions: Vec::new(),
+        external_type: None,
+        options: None,
     }))
 }
 
-async fn list_tokens() -> Json<Vec<IonToken>> {
-    Json(vec![IonToken {
-        id: "default".to_string(),
-        name: "Default Token".to_string(),
-        token: "tiletopia-default-token".to_string(),
-        date_added: chrono::Utc::now().to_rfc3339(),
-        date_modified: chrono::Utc::now().to_rfc3339(),
-        date_last_used: chrono::Utc::now().to_rfc3339(),
-        is_default: true,
-        scopes: vec!["assets:read".into(), "assets:write".into()],
-    }])
+fn global_terrain_endpoint(state: &AppState) -> Result<Json<IonEndpoint>, IonError> {
+    if let Some(missing) = state.global_terrain.missing_configuration() {
+        return Err(ion_error(StatusCode::SERVICE_UNAVAILABLE, missing));
+    }
+    Ok(Json(IonEndpoint {
+        endpoint_type: map_asset_type(&AssetType::Terrain),
+        url: format!("{}{}", state.ion_base_url, global_terrain::ROUTE_ROOT),
+        access_token: String::new(),
+        // cesium shows an ion attribution on screen only when collapsible is false
+        attributions: vec![json!({
+            "html": global_terrain::COPERNICUS_NOTICE,
+            "collapsible": false,
+        })],
+        external_type: None,
+        options: None,
+    }))
 }
 
-async fn create_token(
-    Json(req): Json<CreateIonTokenRequest>,
-) -> (StatusCode, Extension<AuditedResource>, Json<IonToken>) {
-    let token = IonToken {
-        id: Uuid::new_v4().to_string(),
-        name: req.name,
-        token: format!("tt_{}", Uuid::new_v4().to_string().replace('-', "")),
-        date_added: chrono::Utc::now().to_rfc3339(),
-        date_modified: chrono::Utc::now().to_rfc3339(),
-        date_last_used: chrono::Utc::now().to_rfc3339(),
-        is_default: false,
-        scopes: if req.scopes.is_empty() {
-            vec!["assets:read".into()]
-        } else {
-            req.scopes
-        },
-    };
-    (
-        StatusCode::CREATED,
-        Extension(AuditedResource(token.id.clone())),
-        Json(token),
-    )
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unset_and_blank_base_urls_are_refused_naming_the_variable() {
+        for raw in [None, Some(""), Some("   ")] {
+            let error = checked_ion_base_url(raw).unwrap_err();
+            assert!(
+                error.starts_with("TILETOPIA_ION_BASE_URL is not set"),
+                "{raw:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_base_urls_are_refused_naming_the_variable() {
+        for raw in [
+            "not a url",
+            "tiles.example.com",
+            "localhost:3000",
+            "http://",
+            "http:tiles.example.com",
+            "ftp://tiles.example.com",
+            "file:///srv/tiles",
+        ] {
+            let error = checked_ion_base_url(Some(raw)).unwrap_err();
+            assert!(
+                error.starts_with("TILETOPIA_ION_BASE_URL is "),
+                "{raw}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn base_urls_with_more_than_an_origin_are_refused_naming_the_origin() {
+        for raw in [
+            "https://tiles.example.com/",
+            "https://tiles.example.com/tiletopia",
+            "https://tiles.example.com/tiletopia/",
+            "https://tiles.example.com?region=eu",
+            "https://tiles.example.com#top",
+            "https://user:password@tiles.example.com",
+        ] {
+            let error = checked_ion_base_url(Some(raw)).unwrap_err();
+            assert!(
+                error.starts_with("TILETOPIA_ION_BASE_URL is ")
+                    && error.contains("expected exactly \"https://tiles.example.com\""),
+                "{raw}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn origins_are_accepted_unchanged() {
+        for raw in [
+            "http://localhost:3000",
+            "http://localhost:5174",
+            "http://127.0.0.1:38473",
+            "http://[::1]:3000",
+            "https://tiles.example.com",
+            "https://tiles.example.com:8443",
+        ] {
+            assert_eq!(checked_ion_base_url(Some(raw)).as_deref(), Ok(raw));
+        }
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_not_part_of_the_base_url() {
+        assert_eq!(
+            checked_ion_base_url(Some(" https://tiles.example.com\n")).as_deref(),
+            Ok("https://tiles.example.com")
+        );
+    }
 }

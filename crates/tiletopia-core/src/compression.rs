@@ -2,6 +2,8 @@
 //!
 //! Optimizes vertex/index buffers for GPU rendering efficiency.
 
+use crate::glb_writer::GlbMesh;
+
 /// Optimize a mesh's index and vertex buffers for GPU performance.
 ///
 /// Applies: vertex cache optimization, overdraw optimization,
@@ -32,7 +34,12 @@ pub fn optimize_mesh(vertices: &mut Vec<[f32; 3]>, indices: &mut Vec<u32>) {
 /// Simplify a mesh by reducing triangle count while preserving shape.
 ///
 /// `target_ratio` is the fraction of triangles to keep (0.0–1.0).
-pub fn simplify_mesh(vertices: &[[f32; 3]], indices: &[u32], target_ratio: f32) -> Vec<u32> {
+pub fn simplify_mesh(
+    vertices: &[[f32; 3]],
+    indices: &[u32],
+    target_ratio: f32,
+    mesh_longest_side: f32,
+) -> Vec<u32> {
     let target_count = ((indices.len() / 3) as f32 * target_ratio) as usize * 3;
     let vertex_adapter = meshopt::VertexDataAdapter::new(
         bytemuck::cast_slice(vertices),
@@ -40,100 +47,67 @@ pub fn simplify_mesh(vertices: &[[f32; 3]], indices: &[u32], target_ratio: f32) 
         0,
     )
     .expect("valid vertex layout");
+    // meshopt measures a sparse simplify's relative error against the indexed vertices only
     meshopt::simplify(
         indices,
         &vertex_adapter,
         target_count,
-        1e-2,
-        meshopt::SimplifyOptions::None,
+        1e-2 * mesh_longest_side,
+        meshopt::SimplifyOptions::Sparse | meshopt::SimplifyOptions::ErrorAbsolute,
         None,
     )
 }
 
-/// Encode mesh geometry (vertices + indices) to Draco compressed bytes.
-///
-/// Uses Draco's point cloud compression for vertex positions and stores
-/// indices alongside the compressed data.
-#[cfg(feature = "draco")]
-pub fn draco_encode_mesh(vertices: &[[f32; 3]], indices: &[u32]) -> Result<Vec<u8>, String> {
-    use draco_rs::pointcloud::PointCloudBuilder;
-    use draco_rs::prelude::*;
-
-    let mut builder = PointCloudBuilder::new(vertices.len() as u32);
-    let attr_id = builder.add_attribute(
-        ffi::draco::GeometryAttribute_Type::POSITION,
-        3,
-        ffi::draco::DataType::DT_FLOAT32,
-    );
-
-    for (i, v) in vertices.iter().enumerate() {
-        builder.add_point(attr_id, i, v.as_slice());
-    }
-
-    let pc = builder.build(false);
-    let mut encoder = Encoder::new()
-        .set_speed_options(5, 5)
-        .set_attribute_quantization(ffi::draco::GeometryAttribute_Type::POSITION, 14);
-
-    let buffer = pc
-        .to_buffer(&mut encoder)
-        .map_err(|e| format!("Draco encode error: {e:?}"))?;
-
-    let draco_bytes = buffer.as_slice();
-    let mut out = Vec::with_capacity(8 + indices.len() * 4 + draco_bytes.len());
-    out.extend_from_slice(&(vertices.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(indices.len() as u32).to_le_bytes());
-    for idx in indices {
-        out.extend_from_slice(&idx.to_le_bytes());
-    }
-    out.extend_from_slice(draco_bytes);
-    Ok(out)
+fn in_first_use_order<T: Copy>(values: &[T], first_use_order: &[usize]) -> Vec<T> {
+    first_use_order.iter().map(|&old| values[old]).collect()
 }
 
-/// Decode Draco compressed bytes back to mesh geometry (vertices + indices).
-#[cfg(feature = "draco")]
-pub fn draco_decode_mesh(data: &[u8]) -> Result<(Vec<[f32; 3]>, Vec<u32>), String> {
-    use draco_rs::pointcloud::PointCloud;
-    use draco_rs::prelude::*;
+fn reorder_indices_by_first_use(indices: &mut Vec<u32>, vertex_count: usize) -> Vec<usize> {
+    *indices = meshopt::optimize_vertex_cache(indices, vertex_count);
 
-    if data.len() < 8 {
-        return Err("Draco data too short".to_string());
+    // meshopt::optimize_vertex_fetch_remap returns a table shorter than the vertex count when vertices go unused
+    let mut new_indices = vec![None; vertex_count];
+    let mut first_use_order = Vec::new();
+    for index in indices.iter_mut() {
+        let new_index = new_indices[*index as usize].get_or_insert_with(|| {
+            first_use_order.push(*index as usize);
+            first_use_order.len() as u32 - 1
+        });
+        *index = *new_index;
     }
+    first_use_order
+}
 
-    let _num_vertices = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-    let num_indices = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
-
-    let indices_end = 8 + num_indices * 4;
-    if data.len() < indices_end {
-        return Err("Draco data truncated (indices)".to_string());
+pub fn reorder_vertices_for_meshopt(mesh: &mut GlbMesh) {
+    if let Some(indices) = &mut mesh.indices {
+        let first_use_order = reorder_indices_by_first_use(indices, mesh.positions.len());
+        mesh.positions = in_first_use_order(&mesh.positions, &first_use_order);
+        mesh.normals = mesh
+            .normals
+            .as_ref()
+            .map(|values| in_first_use_order(values, &first_use_order));
+        mesh.colors = mesh
+            .colors
+            .as_ref()
+            .map(|values| in_first_use_order(values, &first_use_order));
+        mesh.texcoords = mesh
+            .texcoords
+            .as_ref()
+            .map(|values| in_first_use_order(values, &first_use_order));
+        mesh.feature_ids = mesh
+            .feature_ids
+            .as_ref()
+            .map(|values| in_first_use_order(values, &first_use_order));
     }
-
-    let mut indices = Vec::with_capacity(num_indices);
-    for i in 0..num_indices {
-        let offset = 8 + i * 4;
-        indices.push(u32::from_le_bytes(
-            data[offset..offset + 4].try_into().unwrap(),
-        ));
+    for instanced in &mut mesh.instanced_meshes {
+        let first_use_order =
+            reorder_indices_by_first_use(&mut instanced.indices, instanced.positions.len());
+        instanced.positions = in_first_use_order(&instanced.positions, &first_use_order);
+        instanced.normals = instanced
+            .normals
+            .as_ref()
+            .map(|values| in_first_use_order(values, &first_use_order));
     }
-
-    let draco_data = &data[indices_end..];
-    let mut buf = DecoderBuffer::from_buffer(draco_data);
-    let mut decoder = Decoder::new();
-    let mut pc = PointCloud::from_buffer(&mut decoder, &mut buf)
-        .map_err(|e| format!("Draco decode error: {e:?}"))?;
-
-    let n = pc.num_points() as usize;
-    let mut vertices = Vec::with_capacity(n);
-
-    // Position is the first (and only) attribute, so its ID matches what was used during encoding.
-    let attr_id = draco_rs::prelude::AttrId(0);
-    for i in 0..n {
-        let mut pos = [0.0f32; 3];
-        pc.get_point(attr_id, i as u32, &mut pos);
-        vertices.push(pos);
-    }
-
-    Ok((vertices, indices))
 }
 
 #[cfg(test)]
@@ -149,30 +123,63 @@ mod tests {
     }
 
     #[test]
+    fn sparse_simplify_of_a_corner_keeps_the_dense_triangle_count() {
+        let side = 64u32;
+        let stride = side + 1;
+        let positions: Vec<[f32; 3]> = (0..stride)
+            .flat_map(|y| {
+                (0..stride).map(move |x| {
+                    let (x, y) = (x as f32, y as f32);
+                    [x, y, 2.0 * (x * 0.8).sin() * (y * 0.8).sin()]
+                })
+            })
+            .collect();
+        let corner_indices: Vec<u32> = (0..side / 4)
+            .flat_map(|y| {
+                (0..side / 4).flat_map(move |x| {
+                    let near = y * stride + x;
+                    let far = near + stride;
+                    [near, near + 1, far, near + 1, far + 1, far]
+                })
+            })
+            .collect();
+        let ratio = 0.05;
+
+        let sparse = simplify_mesh(&positions, &corner_indices, ratio, side as f32);
+
+        let vertex_adapter = meshopt::VertexDataAdapter::new(
+            bytemuck::cast_slice(&positions),
+            std::mem::size_of::<[f32; 3]>(),
+            0,
+        )
+        .unwrap();
+        let target_count = ((corner_indices.len() / 3) as f32 * ratio) as usize * 3;
+        let dense = meshopt::simplify(
+            &corner_indices,
+            &vertex_adapter,
+            target_count,
+            1e-2,
+            meshopt::SimplifyOptions::None,
+            None,
+        );
+        assert!(
+            dense.len() > target_count,
+            "the error limit should stop the dense simplify before its target"
+        );
+        assert!(
+            sparse.len().abs_diff(dense.len()) * 20 <= dense.len(),
+            "sparse kept {} indices, dense kept {}",
+            sparse.len(),
+            dense.len()
+        );
+    }
+
+    #[test]
     fn test_optimize_single_triangle() {
         let mut verts = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
         let mut indices = vec![0, 1, 2];
         optimize_mesh(&mut verts, &mut indices);
         assert_eq!(indices.len(), 3);
         assert_eq!(verts.len(), 3);
-    }
-
-    #[cfg(feature = "draco")]
-    #[test]
-    fn test_draco_roundtrip() {
-        let vertices = vec![
-            [0.0f32, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [1.0, 1.0, 0.0],
-        ];
-        let indices = vec![0u32, 1, 2, 1, 3, 2];
-
-        let encoded = draco_encode_mesh(&vertices, &indices).expect("encode should succeed");
-        assert!(!encoded.is_empty());
-
-        let (dec_verts, dec_indices) = draco_decode_mesh(&encoded).expect("decode should succeed");
-        assert_eq!(dec_verts.len(), vertices.len());
-        assert_eq!(dec_indices.len(), indices.len());
     }
 }

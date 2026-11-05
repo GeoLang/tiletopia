@@ -75,6 +75,14 @@ impl UserRole {
             _ => None,
         }
     }
+
+    fn claim_name(&self) -> &'static str {
+        match self {
+            UserRole::Admin => "admin",
+            UserRole::Editor => "editor",
+            UserRole::Viewer => "viewer",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,6 +378,22 @@ pub fn claims_from_headers(headers: &axum::http::HeaderMap) -> Result<Claims, St
 pub fn claims_from_token(token: &str) -> Result<Claims, StatusCode> {
     crate::auth::verify_token_with_secret(token, &jwt_secret())
         .map(|authenticated| authenticated.claims)
+}
+
+pub(crate) async fn claims_of_stored_subject(
+    db: &crate::db::Database,
+    subject: &str,
+) -> Result<Claims, sqlx::Error> {
+    let stored_user = match Uuid::parse_str(subject) {
+        Ok(user_id) => db.get_user(user_id).await?,
+        Err(_) => None,
+    };
+    Ok(Claims {
+        sub: subject.to_string(),
+        exp: 0,
+        // webhook subscriptions and scheduled jobs store a subject with no role, and an empty role grants no tier
+        role: stored_user.map_or_else(String::new, |user| user.role.claim_name().to_string()),
+    })
 }
 
 /// Middleware that requires the user to have Admin role.

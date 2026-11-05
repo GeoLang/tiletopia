@@ -51,6 +51,11 @@ variable "container_image" {
   default     = "" # Set after first `docker push`
 }
 
+variable "ion_base_url" {
+  description = "The http or https origin clients reach this server at, with no path or trailing slash (TILETOPIA_ION_BASE_URL)"
+  type        = string
+}
+
 variable "domain_name" {
   description = "Custom domain name (optional, e.g., tiles.yourdomain.com)"
   type        = string
@@ -287,6 +292,7 @@ resource "aws_ecs_task_definition" "tiletopia" {
     environment = [
       { name = "TILETOPIA_PORT", value = "3000" },
       { name = "TILETOPIA_DATA_DIR", value = "/data" },
+      { name = "TILETOPIA_ION_BASE_URL", value = var.ion_base_url },
       { name = "RUST_LOG", value = "info,tiletopia=debug" },
       { name = "AWS_REGION", value = var.aws_region },
     ]

@@ -489,14 +489,24 @@ pub fn exported_file(data_dir: &std::path::Path, job_id: Uuid) -> Option<std::pa
         .find(|p| p.is_file())
 }
 
+const POINT_CLOUD_EXTENSIONS: &[&str] = &["las", "laz", "e57", "ply"];
+const HEIGHTMAP_EXTENSIONS: &[&str] = &["tif", "tiff", "dt0", "dt1", "dt2", "hgt", "dem"];
+
 /// Locate the original uploaded file for an asset, if present on disk.
-fn find_input_file(data_dir: &std::path::Path, asset_id: Uuid) -> Option<std::path::PathBuf> {
+fn find_input_file(
+    data_dir: &std::path::Path,
+    asset_id: Uuid,
+    extensions: &[&str],
+) -> Option<std::path::PathBuf> {
     let input_dir = data_dir.join(asset_id.to_string()).join("input");
     std::fs::read_dir(input_dir)
         .ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .find(|p| p.is_file())
+        .find(|p| {
+            let extension = crate::upload::lowercase_extension(p);
+            p.is_file() && extensions.iter().any(|accepted| *accepted == extension)
+        })
 }
 
 /// Read the asset's point cloud from its original upload, reprojected to WGS84.
@@ -504,7 +514,7 @@ fn read_asset_points(
     data_dir: &std::path::Path,
     asset_id: Uuid,
 ) -> Result<Vec<tiletopia_ingest::Point3D>, String> {
-    let input = find_input_file(data_dir, asset_id)
+    let input = find_input_file(data_dir, asset_id, POINT_CLOUD_EXTENSIONS)
         .ok_or_else(|| format!("no input point cloud on disk for asset {asset_id}"))?;
     tiletopia_ingest::read_point_cloud_wgs84(&input)
         .map_err(|e| format!("failed to read point cloud: {e}"))
@@ -610,7 +620,7 @@ fn build_citygml(asset_id: Uuid, points: &[tiletopia_ingest::Point3D]) -> String
 /// Build the terrain heightmap for an asset: read the input DEM if one exists,
 /// otherwise synthesize a small grid over the job bounds.
 fn asset_heightmap(data_dir: &std::path::Path, job: &ExportJob) -> tiletopia_terrain::Heightmap {
-    if let Some(input) = find_input_file(data_dir, job.asset_id)
+    if let Some(input) = find_input_file(data_dir, job.asset_id, HEIGHTMAP_EXTENSIONS)
         && let Ok(hm) = tiletopia_ingest::read_heightmap(&input)
     {
         return tiletopia_terrain::Heightmap::from_ingest(&hm);
@@ -772,6 +782,26 @@ mod tests {
         let jobs = engine.list_exports(None).await;
         assert_eq!(jobs.len(), 2);
         assert!(jobs.iter().any(|j| j.status == ExportStatus::Ready));
+    }
+
+    #[test]
+    fn the_input_file_is_found_among_its_sidecars() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let asset_id = Uuid::new_v4();
+        let input_dir = data_dir.path().join(asset_id.to_string()).join("input");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        for name in ["cloud.prj", "cloud.las", "notes.txt", "cloud.xml"] {
+            std::fs::write(input_dir.join(name), b"").unwrap();
+        }
+
+        assert_eq!(
+            find_input_file(data_dir.path(), asset_id, POINT_CLOUD_EXTENSIONS),
+            Some(input_dir.join("cloud.las"))
+        );
+        assert_eq!(
+            find_input_file(data_dir.path(), asset_id, HEIGHTMAP_EXTENSIONS),
+            None
+        );
     }
 
     /// Write a small point cloud as the asset's input upload.

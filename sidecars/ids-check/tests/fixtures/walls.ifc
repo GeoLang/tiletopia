@@ -1,0 +1,15 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('ViewDefinition [ReferenceView_V1.2]'),'2;1');
+FILE_NAME('walls.ifc','2026-11-05T00:00:00',(''),(''),'','','');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1=IFCPROJECT('0YvctVUKr0kugbFTf53O9L',$,'Walls',$,$,$,$,$,$);
+#2=IFCWALL('2O2Fr$t4X7Zf8NOew3FLOH',$,'Rated wall',$,$,$,$,$,$);
+#3=IFCWALL('1hOSvn6df7F8_7GcBWlS_W',$,'Unrated wall',$,$,$,$,$,$);
+#4=IFCPROPERTYSINGLEVALUE('FireRating',$,IFCLABEL('REI60'),$);
+#5=IFCPROPERTYSET('3OHRFhS5D9J8zjHqC5SPKK',$,'Pset_WallCommon',$,(#4));
+#6=IFCRELDEFINESBYPROPERTIES('0Kt7l$jrz8Q8Rw1kqBbG0h',$,$,$,(#2),#5);
+ENDSEC;
+END-ISO-10303-21;

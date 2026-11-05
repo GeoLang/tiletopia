@@ -53,7 +53,7 @@ impl NodePath {
 
 /// Compute geometric error for a node based on its spatial extent.
 /// Geometric error ≈ half the diagonal of the bounding box at this level.
-fn geometric_error_for(bounds: &Aabb) -> f64 {
+pub(crate) fn geometric_error_for(bounds: &Aabb) -> f64 {
     let h = bounds.half_extents();
     (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]).sqrt()
 }

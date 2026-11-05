@@ -34,8 +34,6 @@ th,td{padding:12px 16px;text-align:left;border-bottom:1px solid var(--border);fo
 th{color:var(--heading);background:var(--card);position:sticky;top:0}
 td:nth-child(2){color:var(--accent2);font-weight:600}
 td:nth-child(3){color:var(--muted)}
-.check{color:var(--accent2)}
-.cross{color:var(--red)}
 .exclusive{background:#1a2332;border-left:3px solid var(--accent)}
 footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color:var(--muted);font-size:.85rem}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;margin-top:24px}
@@ -87,22 +85,24 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <li>OGC 3D Tiles 1.1 point-cloud tiles</li>
 <li>Octree spatial partitioning with LOD</li>
 <li>Parallel octree build (Rayon)</li>
-<li>meshopt simplification builds the lower LODs of a mesh tile. Tiles are written uncompressed</li>
+<li>meshopt simplification builds the lower LODs of a mesh tile. Tile geometry is compressed with EXT_meshopt_compression by default, or KHR_draco_mesh_compression on request. Textures can be written as KTX2 through KHR_texture_basisu</li>
 <li>Meshes read and tiled natively, with their UVs, diffuse textures and diffuse colours, placed from the upload's longitude and latitude</li>
 <li>A tile holding part of a textured mesh carries the crop of the texture its triangles reach</li>
 <li>Vector files tiled by mago-3d-tiler (MPL-2.0) only, bundled in the image, needing TILETOPIA_MAGO_JAR</li>
-<li>IFC placed from the upload's longitude and latitude or the IfcSite coordinates. DAE fails with an error naming the format</li>
+<li>IFC placed from the upload's longitude and latitude or the IfcSite coordinates</li>
 </ul>
 </div>
 <div class="card">
 <h3>Input Formats</h3>
 <ul>
 <li>LAS, LAZ, E57, PLY: the native tiler</li>
-<li>glTF, GLB, OBJ, FBX, CityGML: the native mesh tiler, with textures and materials, placed by the upload's longitude and latitude</li>
+<li>glTF, GLB, OBJ, FBX, DAE, CityGML: the native mesh tiler, with textures and materials, placed by the upload's longitude and latitude</li>
+<li>Zip of geotagged JPEG photos: reconstructed by OpenDroneMap on a NodeODM server you run, then the native mesh tiler</li>
 <li>GeoJSON, GeoPackage, KML: mago-3d-tiler only, with optional longitude, latitude and crs upload fields</li>
 <li>IFC: the native mesh tiler, placed by the upload's longitude and latitude or the IfcSite coordinates. crs is ignored</li>
-<li>DAE uploads but fails: neither tiler takes it. Any other extension answers 400</li>
-<li>GeoTIFF, HGT and DTED rasters, and JPEG, PNG and JPEG 2000 images, are stored as assets and never tiled</li>
+<li>DAE must be COLLADA 1.4.1 with triangles or polylists, and anything else fails naming the reason. Any other extension answers 400</li>
+<li>GeoTIFF, HGT and DTED rasters are tiled to a quantized-mesh terrain bundle</li>
+<li>Georeferenced GeoTIFF, COG, JPEG, PNG and JPEG 2000: XYZ map tiles and TileJSON, reprojected to web mercator. JPEG and PNG need a world file or bounds, and a crs. JPEG 2000 needs the jp2 build feature, and takes GeoJP2 or GMLJP2 boxes in place of those fields</li>
 </ul>
 </div>
 <div class="card">
@@ -150,9 +150,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <div class="card">
 <h3>What does not work</h3>
 <ul>
-<li>DAE tiling: neither tiler takes the format, so those jobs fail</li>
-<li>Draco compression and implicit tiling: both compile, neither is called when a tile is written</li>
-<li>Photogrammetry, BIM 4D and indoor routes answer example rows compiled into the binary</li>
+<li>Implicit tiling compiles and is not called when a tile is written</li>
 </ul>
 </div>
 </div>
@@ -169,19 +167,19 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <tr><th>Capability</th><th>TileTopia</th><th>Cesium Ion</th></tr>
 </thead>
 <tbody>
-<tr><td>OGC 3D Tiles 1.1 point clouds</td><td class="check">yes</td><td class="check">yes</td></tr>
-<tr><td>Terrain generation / bundles</td><td class="check">yes</td><td class="check">yes</td></tr>
-<tr><td>Self-hosted / on-prem</td><td class="check">yes</td><td class="check">Cesium ion Self-Hosted</td></tr>
-<tr><td>Open source</td><td class="check">AGPL-3.0</td><td class="cross">no</td></tr>
-<tr><td>REST API</td><td class="check">yes</td><td class="check">yes</td></tr>
-<tr><td>WebSocket presence / chat</td><td class="check">yes</td><td class="cross">no</td></tr>
-<tr><td>3D annotations</td><td class="check">yes</td><td class="cross">no</td></tr>
-<tr><td>XYZ raster tiles</td><td class="cross">DEM analysis and terrain-RGB only</td><td class="cross">no</td></tr>
-<tr><td>Mesh / vector tiling</td><td class="check">yes</td><td class="check">yes</td></tr>
+<tr><td>Point cloud, mesh and CAD inputs</td><td>LAS, LAZ, E57, PLY, glTF, GLB, OBJ, FBX, DAE, CityGML, IFC</td><td>Includes LAS, LAZ, glTF, FBX, DAE, OBJ, CityGML, IFC, RVT, DWG, DXF, DGN</td></tr>
+<tr><td>Vector inputs</td><td>GeoJSON, GeoPackage, KML, through mago-3d-tiler</td><td>Includes GeoJSON, TopoJSON, KML, CZML</td></tr>
+<tr><td>Outputs</td><td>3D Tiles 1.1, quantized-mesh, terrain-RGB, XYZ imagery PNG tiles, DEM analysis PNG tiles, PMTiles vector tiles with the martin feature</td><td>3D Tiles 1.0 and 1.1, TMS and WMTS, quantized-mesh, GLB</td></tr>
+<tr><td>Tile compression</td><td>meshopt or Draco on mesh geometry, KTX2 on mesh textures</td><td>Includes Draco, meshopt, KTX2</td></tr>
+<tr><td>Accounts</td><td>Organizations, with admin, editor and viewer roles</td><td>Teams</td></tr>
+<tr><td>Stories</td><td>Stored on the server, shared by token, played in the dashboard. The dashboard has no story editor</td><td>Stories</td></tr>
+<tr><td>MCP server</td><td>None</td><td>Hosted, since 2026-10-12</td></tr>
+<tr><td>Self-hosting</td><td>AGPL-3.0 binary or Docker image</td><td>Cesium ion Self-Hosted, for commercial buyers, on Kubernetes</td></tr>
+<tr><td>Presence, cursors, chat</td><td>WebSocket relay</td><td>Not found in Ion's docs</td></tr>
 </tbody>
 </table>
 </div>
-<p style="margin-top:16px;color:var(--muted);font-size:.85rem">TileTopia is one AGPL binary you run. What answers fixed example data is listed under "What does not work".</p>
+<p style="margin-top:16px;color:var(--muted);font-size:.85rem">TileTopia is one AGPL binary you run. What answers fixed example data is listed under "What does not work". The Cesium Ion column was read on 2026-11-04 from <a href="https://cesium.com/learn/3d-tiling/tiler-data-formats/">tiler data formats</a>, <a href="https://cesium.com/platform/cesium-ion/pricing/">pricing</a> and the <a href="https://cesium.com/blog/">Cesium blog</a>.</p>
 
 <div class="grid" style="margin-top:28px">
 <div class="card">
@@ -266,7 +264,7 @@ footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color
 <section>
 <div class="container">
 <h2>Chat Agent</h2>
-<p style="color:var(--muted)">The chat agent is not part of this server. <a href="https://github.com/GeoLang/sibyl">sibyl</a> runs the agent loop against an OpenAI-compatible LLM endpoint and keeps sessions in SQLite, the <a href="https://github.com/GeoLang/geolang">GeoLang API</a> runs the geospatial tools, and <a href="https://github.com/GeoLang/viewtopia">ViewTopia</a> is the viewer it drives. The chat panel in this repository's dashboard posts to an endpoint nothing serves, so it does not work.</p>
+<p style="color:var(--muted)">The chat agent is not part of this server. <a href="https://github.com/GeoLang/sibyl">sibyl</a> runs the agent loop against an OpenAI-compatible LLM endpoint and keeps sessions in SQLite, the <a href="https://github.com/GeoLang/geolang">GeoLang API</a> runs the geospatial tools, and <a href="https://github.com/GeoLang/viewtopia">ViewTopia</a> is the viewer it drives. This repository's dashboard has no agent chat. Its only chat is the message box in the collaboration panel, sent over the realtime websocket.</p>
 </div>
 </section>
 
@@ -281,10 +279,10 @@ cd tiletopia && cargo build --release
 tiletopia tile --input scan.las --output ./tileset
 
 # Start server
-TILETOPIA_JWT_SECRET=$(openssl rand -hex 32) tiletopia serve --data-dir ./data --port 3000
+TILETOPIA_ION_BASE_URL=http://localhost:3000 TILETOPIA_JWT_SECRET=$(openssl rand -hex 32) tiletopia serve --data-dir ./data --port 3000
 
 # Docker
-docker run -p 3000:3000 -e TILETOPIA_JWT_SECRET=$(openssl rand -hex 32) -v ./data:/data ghcr.io/geolang/tiletopia</pre>
+docker run -p 3000:3000 -e TILETOPIA_ION_BASE_URL=http://localhost:3000 -e TILETOPIA_JWT_SECRET=$(openssl rand -hex 32) -v ./data:/data ghcr.io/geolang/tiletopia</pre>
 </div>
 </section>
 
@@ -310,7 +308,6 @@ docker run -p 3000:3000 -e TILETOPIA_JWT_SECRET=$(openssl rand -hex 32) -v ./dat
 <li>Shadow analysis (time-of-day)</li>
 <li>Viewshed (line-of-sight)</li>
 <li>Terrain profiles</li>
-<li>OSRM routing + isochrones</li>
 <li>Charts (histogram/scatter/timeseries)</li>
 </ul>
 </div>

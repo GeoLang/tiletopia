@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -92,6 +92,19 @@ enum Commands {
     },
 }
 
+fn edge_build_commands(target: &str, strip: bool, output: &Path) -> Vec<String> {
+    let built_binary = format!("target/{target}/release/tiletopia");
+    let mut commands = vec![
+        format!("rustup target add {target}"),
+        format!("cargo build --release --target {target} --no-default-features"),
+    ];
+    if strip {
+        commands.push(format!("strip {built_binary}"));
+    }
+    commands.push(format!("cp {built_binary} {}/tiletopia", output.display()));
+    commands
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -163,6 +176,8 @@ async fn main() -> anyhow::Result<()> {
             tiletopia_server::auth::startup_check().map_err(anyhow::Error::msg)?;
             // a bbox typo would otherwise only show up as failing analysis tiles
             tiletopia_server::analysis_tiles::startup_check().map_err(anyhow::Error::msg)?;
+            let ion_base_url = tiletopia_server::ion_compat::ion_base_url_from_env()
+                .map_err(anyhow::Error::msg)?;
 
             #[cfg(feature = "martin")]
             let martin_backend = {
@@ -186,6 +201,15 @@ async fn main() -> anyhow::Result<()> {
                     .expect("failed to open database"),
             );
             db.migrate().await.expect("failed to run migrations");
+            let stranded_uploads = db
+                .fail_stranded_uploads()
+                .await
+                .expect("failed to fail the stranded uploads");
+            if stranded_uploads > 0 {
+                tracing::warn!(
+                    "{stranded_uploads} assets were uploading with no job and no upload credentials, they are now in error"
+                );
+            }
 
             let store: Arc<dyn tiletopia_store::TileStore> =
                 Arc::new(tiletopia_store::LocalStore::new(data_dir.clone()));
@@ -193,19 +217,54 @@ async fn main() -> anyhow::Result<()> {
             let external_tiler_jar = std::env::var("TILETOPIA_MAGO_JAR")
                 .ok()
                 .map(std::path::PathBuf::from);
+            let node_odm = tiletopia_server::photogrammetry::NodeOdm::from_env()
+                .map_err(anyhow::Error::msg)?;
+            let ids_check =
+                tiletopia_server::ids_check::sidecar_from_env().map_err(anyhow::Error::msg)?;
 
-            let webhooks = Arc::new(tiletopia_server::webhooks::WebhookQueue::new(Arc::clone(
-                &db,
-            )));
+            let webhooks = Arc::new(tiletopia_server::webhooks::WebhookQueue::new(
+                Arc::clone(&db),
+                tiletopia_server::webhooks::private_hosts_from_env(),
+            ));
             Arc::clone(&webhooks).start();
+
+            let elevation_store = Arc::new(tiletopia_server::elevation::DemStore::new());
 
             let job_queue = Arc::new(tiletopia_server::job_queue::JobQueue::new(
                 Arc::clone(&db),
                 data_dir.clone(),
                 Arc::clone(&store),
                 external_tiler_jar,
+                node_odm,
                 Arc::clone(&webhooks),
+                Arc::clone(&elevation_store),
             ));
+            let interrupted_jobs = job_queue
+                .fail_interrupted_jobs()
+                .await
+                .expect("failed to fail the interrupted jobs");
+            if interrupted_jobs > 0 {
+                tracing::warn!(
+                    "{interrupted_jobs} jobs were running when the server stopped, they are now failed"
+                );
+            }
+            let interrupted_reports =
+                tiletopia_server::model_versions::recover_after_restart(&db, &data_dir)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+            if interrupted_reports > 0 {
+                tracing::warn!(
+                    "{interrupted_reports} change reports were unfinished when the server stopped, they are now failed"
+                );
+            }
+            let interrupted_ids_checks = tiletopia_server::ids_check::fail_interrupted_checks(&db)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            if interrupted_ids_checks > 0 {
+                tracing::warn!(
+                    "{interrupted_ids_checks} IDS checks were running when the server stopped, they are now failed"
+                );
+            }
             Arc::clone(&job_queue).start().await;
 
             let export_engine = Arc::new(tiletopia_server::export::ExportEngine::new());
@@ -266,11 +325,22 @@ async fn main() -> anyhow::Result<()> {
             let account_limits =
                 tiletopia_server::users::AccountLimits::from_env().map_err(anyhow::Error::msg)?;
 
+            let global_terrain = tiletopia_server::global_terrain::GlobalTerrain::new(
+                tiletopia_server::global_terrain::GlobalTerrainSettings::from_env()
+                    .map_err(anyhow::Error::msg)?,
+            );
+            global_terrain
+                .reserve_ion_asset_id(&db)
+                .await
+                .map_err(anyhow::Error::msg)?;
+
             let state = Arc::new(tiletopia_server::AppState {
                 db,
                 store,
                 data_dir,
                 srtm_base_url: tiletopia_terrain::dem_cache::srtm_base_url_from_env(),
+                ion_base_url,
+                staged_upload_ledgers: Default::default(),
                 job_queue,
                 realtime: tiletopia_server::realtime::RealtimeState::new(),
                 audit_log,
@@ -278,18 +348,17 @@ async fn main() -> anyhow::Result<()> {
                 started_at: std::time::Instant::now(),
                 api_key_rate_limiter: tiletopia_server::api_keys::RateLimiter::new(),
                 account_limits,
-                metering_store: tiletopia_server::metering::MeteringStore::new(),
                 webhooks,
                 export_engine,
                 scheduler,
-                photogrammetry_engine: tiletopia_server::photogrammetry::PhotogrammetryEngine::new(
-                ),
                 model_registry: tiletopia_server::model_registry::ModelRegistry::new(),
-                bim4d_engine: tiletopia_server::bim4d::Bim4DEngine::new(),
                 cog_engine,
-                elevation_store: std::sync::Arc::new(tiletopia_server::elevation::DemStore::new()),
+                elevation_store,
                 analysis_engines: tiletopia_server::analysis_tiles::AnalysisEngines::new(),
+                imagery_layers: tiletopia_server::imagery::ImageryLayers::new(),
+                global_terrain,
                 entity_link_store: tiletopia_server::entity_linking::EntityLinkStore::new(),
+                ids_check,
                 #[cfg(feature = "martin")]
                 martin_backend,
                 #[cfg(feature = "martin")]
@@ -382,20 +451,9 @@ async fn main() -> anyhow::Result<()> {
             println!("  Output: {}", output.display());
             println!();
             println!("Run the following commands:");
-            println!("  rustup target add {}", target);
-            let mut cmd = format!(
-                "  cargo build --release --target {} --no-default-features",
-                target
-            );
-            if strip {
-                cmd.push_str(" && strip target/{}/release/tiletopia-cli");
+            for command in edge_build_commands(&target, strip, &output) {
+                println!("  {command}");
             }
-            println!("{}", cmd);
-            println!(
-                "  cp target/{}/release/tiletopia-cli {}/tiletopia",
-                target,
-                output.display()
-            );
             println!();
             println!("Supported edge targets:");
             println!("  aarch64-unknown-linux-musl   (ARM64 - Raspberry Pi, Jetson, drones)");
@@ -414,7 +472,7 @@ async fn main() -> anyhow::Result<()> {
                  # Tile locally on device\n\
                  ./tiletopia tile --input scan.las --output ./tiles\n\n\
                  # Serve tiles on local network\n\
-                 ./tiletopia serve --data-dir ./tiles --port 3000\n\
+                 TILETOPIA_ION_BASE_URL=http://<device-address>:3000 ./tiletopia serve --data-dir ./tiles --port 3000\n\
                  ```\n\n\
                  ## Resource Requirements\n\n\
                  - RAM: 256MB minimum, 1GB recommended\n\
@@ -428,4 +486,31 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edge_commands_name_the_target_and_the_built_binary() {
+        let commands = edge_build_commands("aarch64-unknown-linux-musl", true, Path::new("./dist"));
+
+        assert_eq!(
+            commands,
+            [
+                "rustup target add aarch64-unknown-linux-musl",
+                "cargo build --release --target aarch64-unknown-linux-musl --no-default-features",
+                "strip target/aarch64-unknown-linux-musl/release/tiletopia",
+                "cp target/aarch64-unknown-linux-musl/release/tiletopia ./dist/tiletopia",
+            ]
+        );
+    }
+
+    #[test]
+    fn edge_commands_without_strip_leave_it_out() {
+        let commands = edge_build_commands("x86_64-unknown-linux-musl", false, Path::new("out"));
+
+        assert!(!commands.iter().any(|command| command.starts_with("strip")));
+    }
 }

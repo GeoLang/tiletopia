@@ -26,8 +26,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::db::Database;
-use crate::job_queue::JobQueue;
+use crate::db::{Database, JobRecord};
+use crate::job_queue::{JobQueue, stored_input_path};
+use crate::may_modify_asset;
+use crate::users::claims_of_stored_subject;
 
 /// How often the worker looks for a job that is due, which is also the finest
 /// schedule granularity there is.
@@ -298,6 +300,15 @@ impl Scheduler {
         tokio::spawn(async move {
             loop {
                 self.run_due().await;
+                if let Err(error) = crate::ion_upload::expire_abandoned_uploads(
+                    &self.db,
+                    &self.data_dir,
+                    Utc::now(),
+                )
+                .await
+                {
+                    tracing::error!("expiring abandoned ion uploads failed: {error}");
+                }
                 tokio::time::sleep(TICK).await;
             }
         })
@@ -316,7 +327,7 @@ impl Scheduler {
 
         let mut ran = 0;
         for job in due {
-            let outcome = match self.execute(&job.action).await {
+            let outcome = match self.execute(&job.action, &job.created_by).await {
                 Ok(detail) => RunOutcome {
                     outcome: Outcome::Success,
                     detail,
@@ -364,9 +375,11 @@ impl Scheduler {
     }
 
     /// Carry out one action. `Ok` says what it did, `Err` says why it did not.
-    async fn execute(&self, action: &ScheduledAction) -> Result<String, String> {
+    async fn execute(&self, action: &ScheduledAction, creator: &str) -> Result<String, String> {
         match action {
-            ScheduledAction::RetileAsset { asset_id } => self.retile_asset(*asset_id).await,
+            ScheduledAction::RetileAsset { asset_id } => {
+                self.retile_asset(*asset_id, creator).await
+            }
             ScheduledAction::PruneExportFiles { older_than_days } => {
                 prune_export_files(&self.data_dir, &self.export_engine, *older_than_days).await
             }
@@ -382,40 +395,37 @@ impl Scheduler {
         }
     }
 
-    /// Submit a tiling job for the asset, carrying the placement its last job
-    /// carried: a mesh needs longitude and latitude to be tiled at all, so a
-    /// re-tile that dropped them would fail where the first tiling worked.
-    async fn retile_asset(&self, asset_id: Uuid) -> Result<String, String> {
-        if self
+    async fn retile_asset(&self, asset_id: Uuid, creator: &str) -> Result<String, String> {
+        let creator_claims = claims_of_stored_subject(&self.db, creator)
+            .await
+            .map_err(|error| format!("reading job creator {creator} failed: {error}"))?;
+        let modifiable_asset = self
             .db
             .get_asset(asset_id)
             .await
             .map_err(|error| format!("reading asset {asset_id} failed: {error}"))?
-            .is_none()
-        {
-            return Err(format!("asset {asset_id} is gone"));
+            .filter(|asset| may_modify_asset(&creator_claims, asset.owner_id.as_deref()));
+        if modifiable_asset.is_none() {
+            return Err(format!(
+                "asset {asset_id} is gone or its job creator may not modify it"
+            ));
         }
 
-        let input_path = input_file(&self.data_dir, asset_id)
+        let job = submit_retile_job(&self.db, &self.data_dir, &self.job_queue, asset_id)
             .await
-            .ok_or_else(|| format!("asset {asset_id} has no uploaded input to tile"))?;
-
-        let placement = self
-            .db
-            .list_jobs_for_asset(asset_id)
-            .await
-            .map_err(|error| format!("reading the jobs of asset {asset_id} failed: {error}"))?
-            .into_iter()
-            .next()
-            .map(|job| job.placement)
-            .unwrap_or_default();
-
-        let job = self
-            .job_queue
-            .submit(asset_id, input_path, placement)
-            .await
-            .map_err(|error| {
-                format!("submitting a tiling job for asset {asset_id} failed: {error}")
+            .map_err(|error| match error {
+                RetileError::NoUploadedInput => {
+                    format!("asset {asset_id} has no uploaded input to tile")
+                }
+                RetileError::ReadingJobs(error) => {
+                    format!("reading the jobs of asset {asset_id} failed: {error}")
+                }
+                RetileError::ReadingInput(error) => {
+                    format!("reading the input of asset {asset_id} failed: {error}")
+                }
+                RetileError::Submitting(error) => {
+                    format!("submitting a tiling job for asset {asset_id} failed: {error}")
+                }
             })?;
         Ok(format!("submitted tiling job {}", job.id))
     }
@@ -423,11 +433,73 @@ impl Scheduler {
 
 /// The uploaded file a tiling job reads, which the upload route wrote as the
 /// only entry under the asset's `input` directory.
-async fn input_file(data_dir: &Path, asset_id: Uuid) -> Option<String> {
+async fn input_file(data_dir: &Path, asset_id: Uuid) -> std::io::Result<Option<String>> {
     let input_dir = data_dir.join(asset_id.to_string()).join("input");
-    let mut entries = tokio::fs::read_dir(&input_dir).await.ok()?;
-    let entry = entries.next_entry().await.ok()??;
-    Some(entry.path().to_string_lossy().into_owned())
+    let mut entries = match tokio::fs::read_dir(&input_dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let entry = entries.next_entry().await?;
+    Ok(entry.map(|entry| stored_input_path(&entry.file_name())))
+}
+
+pub(crate) enum RetileError {
+    NoUploadedInput,
+    ReadingJobs(sqlx::Error),
+    ReadingInput(std::io::Error),
+    Submitting(sqlx::Error),
+}
+
+pub(crate) async fn submit_retile_job(
+    db: &Database,
+    data_dir: &Path,
+    job_queue: &JobQueue,
+    asset_id: Uuid,
+) -> Result<JobRecord, RetileError> {
+    let latest_job = db
+        .list_jobs_for_asset(asset_id)
+        .await
+        .map_err(RetileError::ReadingJobs)?
+        .into_iter()
+        .next();
+
+    // catalog assets have a job naming a dataset url and no input directory
+    let first_input = input_file(data_dir, asset_id)
+        .await
+        .map_err(RetileError::ReadingInput)?
+        .ok_or(RetileError::NoUploadedInput)?;
+    // ion uploads keep sidecars beside the main file, so only the job names it
+    let input_path = match &latest_job {
+        Some(job) => Path::new(&job.input_path)
+            .file_name()
+            .map(stored_input_path)
+            .ok_or(RetileError::NoUploadedInput)?,
+        None => first_input,
+    };
+
+    let (placement, mesh_compression, texture_compression, photogrammetry_preset) = latest_job
+        .map(|job| {
+            (
+                job.placement,
+                job.mesh_compression,
+                job.texture_compression,
+                job.photogrammetry_preset,
+            )
+        })
+        .unwrap_or_default();
+
+    job_queue
+        .submit(
+            asset_id,
+            input_path,
+            placement,
+            mesh_compression,
+            texture_compression,
+            photogrammetry_preset,
+        )
+        .await
+        .map_err(RetileError::Submitting)
 }
 
 /// Remove the directories of expired exports, and of exports whose newest file

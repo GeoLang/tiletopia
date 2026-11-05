@@ -20,15 +20,7 @@ pub fn read(path: &Path) -> Result<Heightmap, IngestError> {
         ));
     }
 
-    // Read UHL (User Header Label)
-    let mut uhl = [0u8; UHL_LEN];
-    file.read_exact(&mut uhl)?;
-
-    if &uhl[0..3] != b"UHL" {
-        return Err(IngestError::ParseError(
-            "DTED: missing UHL sentinel".to_string(),
-        ));
-    }
+    let uhl = read_uhl(&mut file)?;
 
     // Parse origin longitude/latitude from UHL
     let origin_lon = parse_dted_lon(&uhl[4..12])?;
@@ -38,16 +30,7 @@ pub fn read(path: &Path) -> Result<Heightmap, IngestError> {
     let lon_interval = parse_uhl_int(&uhl[20..24])? as f64 / 36000.0; // degrees
     let lat_interval = parse_uhl_int(&uhl[24..28])? as f64 / 36000.0; // degrees
 
-    // Number of longitude and latitude lines
-    let num_lon_lines = parse_uhl_int(&uhl[47..51])?;
-    let num_lat_points = parse_uhl_int(&uhl[51..55])?;
-
-    if num_lon_lines == 0 || num_lat_points == 0 {
-        return Err(IngestError::ParseError("DTED: zero dimensions".to_string()));
-    }
-
-    let width = num_lon_lines;
-    let height = num_lat_points;
+    let (width, height) = uhl_dimensions(&uhl)?;
 
     // Skip DSI and ACC headers
     file.seek(SeekFrom::Start(HEADER_TOTAL as u64))?;
@@ -76,7 +59,7 @@ pub fn read(path: &Path) -> Result<Heightmap, IngestError> {
         // then elevation data follows
         for row in 0..height {
             let offset = 8 + row * 2;
-            let raw = i16::from_be_bytes([col_buf[offset], col_buf[offset + 1]]);
+            let raw = signed_magnitude_elevation(col_buf[offset], col_buf[offset + 1]);
             // Row order: south to north. Store as row-major (north to south).
             let out_row = height - 1 - row;
             elevations[out_row * width + col] = raw as f64;
@@ -104,6 +87,41 @@ pub fn read(path: &Path) -> Result<Heightmap, IngestError> {
         bounds,
         nodata: Some(-32767.0),
     })
+}
+
+fn signed_magnitude_elevation(high: u8, low: u8) -> i16 {
+    // DTED stores elevations as signed magnitude, not two's complement
+    let magnitude = i16::from_be_bytes([high & 0x7f, low]);
+    if high & 0x80 == 0 {
+        magnitude
+    } else {
+        -magnitude
+    }
+}
+
+fn read_uhl(file: &mut std::fs::File) -> Result<[u8; UHL_LEN], IngestError> {
+    let mut uhl = [0u8; UHL_LEN];
+    file.read_exact(&mut uhl)?;
+    if &uhl[0..3] != b"UHL" {
+        return Err(IngestError::ParseError(
+            "DTED: missing UHL sentinel".to_string(),
+        ));
+    }
+    Ok(uhl)
+}
+
+fn uhl_dimensions(uhl: &[u8; UHL_LEN]) -> Result<(usize, usize), IngestError> {
+    let width = parse_uhl_int(&uhl[47..51])?;
+    let height = parse_uhl_int(&uhl[51..55])?;
+    if width == 0 || height == 0 {
+        return Err(IngestError::ParseError("DTED: zero dimensions".to_string()));
+    }
+    Ok((width, height))
+}
+
+pub fn dimensions(path: &Path) -> Result<(usize, usize), IngestError> {
+    let mut file = std::fs::File::open(path)?;
+    uhl_dimensions(&read_uhl(&mut file)?)
 }
 
 /// Parse a DTED longitude string (e.g. "0100000E" → 10.0).
@@ -144,16 +162,17 @@ fn parse_dted_lat(bytes: &[u8]) -> Result<f64, IngestError> {
         return Ok(0.0);
     }
     let (num_part, hemi) = s.split_at(s.len() - 1);
+    // the UHL latitude is DDDMMSSH like the longitude, with a leading zero on the degrees
     let dd = num_part
-        .get(0..2)
+        .get(0..3)
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(0.0);
     let mm = num_part
-        .get(2..4)
+        .get(3..5)
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(0.0);
     let ss = num_part
-        .get(4..)
+        .get(5..)
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(0.0);
 
@@ -176,6 +195,20 @@ fn parse_uhl_int(bytes: &[u8]) -> Result<usize, IngestError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origin_latitude_is_three_digits_of_degrees() {
+        assert!((parse_dted_lat(b"0470000N").unwrap() - 47.0).abs() < 1e-9);
+        assert!((parse_dted_lat(b"0333000S").unwrap() + 33.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn elevations_are_signed_magnitude() {
+        assert_eq!(signed_magnitude_elevation(0x01, 0x00), 256);
+        // five metres below the datum, which two's complement reads as -32763
+        assert_eq!(signed_magnitude_elevation(0x80, 0x05), -5);
+        assert_eq!(signed_magnitude_elevation(0xff, 0xff), -32767);
+    }
 
     #[test]
     fn test_read_synthetic_dted() {
@@ -237,6 +270,9 @@ mod tests {
         assert_eq!(hm.width, width);
         assert_eq!(hm.height, height);
         assert_eq!(hm.elevations.len(), width * height);
+        assert_eq!(dimensions(&path).unwrap(), (width, height));
+        assert!((hm.bounds[1] - 47.0).abs() < 1e-9, "{:?}", hm.bounds);
+        assert!((hm.bounds[0] - 11.0).abs() < 1e-9, "{:?}", hm.bounds);
 
         std::fs::remove_dir_all(&dir).ok();
     }

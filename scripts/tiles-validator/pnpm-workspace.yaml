@@ -1,0 +1,4 @@
+# sharp loads when 3d-tiles-validator starts, and better-sqlite3 is only used on .3dtiles archives
+allowBuilds:
+  better-sqlite3: false
+  sharp: true

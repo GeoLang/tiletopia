@@ -12,6 +12,7 @@ path = "src/main.rs"
 [features]
 default = []
 martin = ["tiletopia-server/martin"]
+jp2 = ["tiletopia-server/jp2"]
 
 [dependencies]
 tiletopia-core = { path = "../tiletopia-core", default-features = false }

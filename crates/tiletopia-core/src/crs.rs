@@ -4,7 +4,7 @@
 //! Supports EPSG codes, WKT, and PROJ strings.
 
 use projicio_core::{
-    Ellipsoid, GeocentricCoord, Transform, geocentric_to_geodetic, geodetic_to_geocentric,
+    Ellipsoid, GeocentricCoord, Transform, epsg, geocentric_to_geodetic, geodetic_to_geocentric,
 };
 
 const WGS84_GEODETIC_EPSG: u32 = 4326;
@@ -21,7 +21,39 @@ pub enum CrsDef {
     Wkt(String),
 }
 
+const US_SURVEY_FOOT_METRES: f64 = 1200.0 / 3937.0;
+
+fn metres_per_proj4_axis_unit(definition: &str) -> Option<f64> {
+    let parameter = |name: &str| {
+        definition
+            .split_whitespace()
+            .find_map(|token| token.strip_prefix(name))
+    };
+    if parameter("+proj=").is_none_or(|method| matches!(method, "longlat" | "latlong")) {
+        return None;
+    }
+    if let Some(to_meter) = parameter("+to_meter=") {
+        return to_meter.parse().ok().filter(|metres: &f64| *metres > 0.0);
+    }
+    match parameter("+units=") {
+        // proj takes a projected definition with no unit as metres
+        None | Some("m") => Some(1.0),
+        Some("ft") => Some(0.3048),
+        Some("us-ft") => Some(US_SURVEY_FOOT_METRES),
+        Some(_) => None,
+    }
+}
+
 impl CrsDef {
+    pub fn metres_per_axis_unit(&self) -> Option<f64> {
+        let code = match self {
+            Self::Epsg(code) => *code,
+            Self::Proj(definition) => return metres_per_proj4_axis_unit(definition),
+            Self::Wkt(definition) => epsg::parse_wkt_epsg(definition)?,
+        };
+        metres_per_proj4_axis_unit(epsg::proj4_definition(code)?)
+    }
+
     fn definition(&self) -> String {
         match self {
             Self::Epsg(code) => format!("EPSG:{code}"),
@@ -46,7 +78,7 @@ pub struct Coord3D {
 }
 
 /// How a source/target pair is transformed.
-enum Route {
+pub enum Route {
     Identity,
     GeodeticToGeocentric,
     GeocentricToGeodetic,
@@ -71,7 +103,7 @@ impl Transformer {
         coords.iter().map(|c| route.apply(*c)).collect()
     }
 
-    fn route(&self) -> Result<Route, ReprojError> {
+    pub fn route(&self) -> Result<Route, ReprojError> {
         match (&self.source, &self.target) {
             (CrsDef::Epsg(source), CrsDef::Epsg(target)) if source == target => Ok(Route::Identity),
             (CrsDef::Epsg(WGS84_GEODETIC_EPSG), CrsDef::Epsg(EARTH_CENTERED_EARTH_FIXED_EPSG)) => {
@@ -91,7 +123,7 @@ impl Transformer {
 }
 
 impl Route {
-    fn apply(&self, coord: Coord3D) -> Result<Coord3D, ReprojError> {
+    pub fn apply(&self, coord: Coord3D) -> Result<Coord3D, ReprojError> {
         match self {
             Self::Identity => Ok(coord),
             Self::GeodeticToGeocentric => {
@@ -131,9 +163,43 @@ impl Route {
     }
 }
 
+const MOST_DEFINITION_BYTES: usize = 64 * 1024;
+const MOST_DEFINITION_NESTING: usize = 32;
+
+fn refuse_oversized_definition(definition: &str) -> Result<(), ReprojError> {
+    if definition.len() > MOST_DEFINITION_BYTES {
+        return Err(ReprojError::DefinitionRefused(format!(
+            "the CRS definition is {} bytes, past the {MOST_DEFINITION_BYTES} byte limit",
+            definition.len()
+        )));
+    }
+    let mut nesting = 0usize;
+    let mut in_quotes = false;
+    for byte in definition.bytes() {
+        match byte {
+            b'"' => in_quotes = !in_quotes,
+            // proj4wkt skips quoted names, so a `]` in one closes nothing and must not lower the count
+            _ if in_quotes => {}
+            b'[' | b'(' => nesting += 1,
+            b']' | b')' => nesting = nesting.saturating_sub(1),
+            _ => {}
+        }
+        if nesting > MOST_DEFINITION_NESTING {
+            return Err(ReprojError::DefinitionRefused(format!(
+                "the CRS definition has nesting past the {MOST_DEFINITION_NESTING} level limit"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn build_transform(source: &CrsDef, target: &CrsDef) -> Result<Transform, ReprojError> {
-    Transform::new(&source.definition(), &target.definition())
-        .map_err(|error| ReprojError::Projicio(error.to_string()))
+    let source = source.definition();
+    let target = target.definition();
+    // proj4wkt 0.1.1 recurses once per `[` with no limit, and a stack overflow aborts the process
+    refuse_oversized_definition(&source)?;
+    refuse_oversized_definition(&target)?;
+    Transform::new(&source, &target).map_err(|error| ReprojError::Projicio(error.to_string()))
 }
 
 /// Reprojection errors.
@@ -143,6 +209,8 @@ pub enum ReprojError {
     UnsupportedTransform,
     #[error("projicio error: {0}")]
     Projicio(String),
+    #[error("{0}")]
+    DefinitionRefused(String),
 }
 
 #[cfg(test)]
@@ -151,6 +219,28 @@ mod tests {
 
     // the content of a typical ESRI .prj: NAD83 UTM zone 18N
     const UTM_18N_WKT: &str = r#"PROJCS["NAD_1983_UTM_Zone_18N",GEOGCS["GCS_North_American_1983",DATUM["D_North_American_1983",SPHEROID["GRS_1980",6378137.0,298.257222101]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["False_Easting",500000.0],PARAMETER["False_Northing",0.0],PARAMETER["Central_Meridian",-75.0],PARAMETER["Scale_Factor",0.9996],PARAMETER["Latitude_Of_Origin",0.0],UNIT["Meter",1.0]]"#;
+
+    #[test]
+    fn axis_units_come_from_the_crs_definition() {
+        let metres = |crs: CrsDef| crs.metres_per_axis_unit();
+        assert_eq!(metres(CrsDef::Epsg(32632)), Some(1.0));
+        assert_eq!(metres(CrsDef::Epsg(2248)), Some(US_SURVEY_FOOT_METRES));
+        assert_eq!(metres(CrsDef::Epsg(4326)), None);
+        assert_eq!(metres(CrsDef::Epsg(99999)), None);
+        assert_eq!(
+            metres(CrsDef::Proj("+proj=tmerc +to_meter=0.5".to_string())),
+            Some(0.5)
+        );
+        assert_eq!(
+            metres(CrsDef::Proj("+proj=tmerc +units=ft".to_string())),
+            Some(0.3048)
+        );
+        assert_eq!(
+            metres(CrsDef::Proj("+proj=tmerc +units=link".to_string())),
+            None
+        );
+        assert_eq!(metres(CrsDef::Wkt(UTM_18N_WKT.to_string())), None);
+    }
 
     #[test]
     fn test_identity_transform() {
@@ -236,6 +326,46 @@ mod tests {
         assert!((r.x - (-75.0)).abs() < 1e-6, "lon={}", r.x);
         assert!((r.y - 40.74).abs() < 0.05, "lat={}", r.y);
         assert!((r.z - 12.0).abs() < 1e-9);
+    }
+
+    fn refusal_of(definition: String) -> String {
+        let origin = Coord3D {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        Transformer::new(CrsDef::Wkt(definition), CrsDef::Epsg(WGS84_GEODETIC_EPSG))
+            .transform(origin)
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn nesting_past_the_limit_is_refused_before_any_parse() {
+        let error = refusal_of("A[".repeat(MOST_DEFINITION_NESTING + 1));
+        assert!(error.contains("nesting"), "{error}");
+
+        assert!(refuse_oversized_definition(&"A[".repeat(MOST_DEFINITION_NESTING)).is_ok());
+    }
+
+    #[test]
+    fn a_closing_bracket_inside_a_quoted_name_does_not_hide_nesting() {
+        let error = refusal_of("A[\"]\",".repeat(MOST_DEFINITION_NESTING + 1));
+        assert!(error.contains("nesting"), "{error}");
+    }
+
+    #[test]
+    fn parentheses_count_as_nesting() {
+        let error = refusal_of("A(".repeat(MOST_DEFINITION_NESTING + 1));
+        assert!(error.contains("nesting"), "{error}");
+    }
+
+    #[test]
+    fn a_definition_past_the_byte_limit_is_refused() {
+        let error = refusal_of(" ".repeat(MOST_DEFINITION_BYTES + 1));
+        assert!(error.contains("byte limit"), "{error}");
+
+        assert!(refuse_oversized_definition(&" ".repeat(MOST_DEFINITION_BYTES)).is_ok());
     }
 
     #[test]

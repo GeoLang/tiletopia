@@ -116,13 +116,24 @@ fn may_modify(claims: &Claims, story: &Story) -> bool {
     claims.can_admin() || story.author_id.as_deref() == Some(claims.sub.as_str())
 }
 
-async fn list_stories(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Story>>, StatusCode> {
-    state
+fn may_read(claims: &Claims, story: &Story) -> bool {
+    story.is_public || may_modify(claims, story)
+}
+
+async fn list_stories(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Story>>, StatusCode> {
+    let claims = users::claims_from_headers(&headers)?;
+    let stories = state
         .db
         .list_stories()
         .await
-        .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .filter(|story| may_read(&claims, story))
+        .collect();
+    Ok(Json(stories))
 }
 
 async fn create_story(
@@ -166,12 +177,15 @@ async fn create_story(
 async fn get_story(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<Story>, StatusCode> {
+    let claims = users::claims_from_headers(&headers)?;
     state
         .db
         .get_story(id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter(|story| may_read(&claims, story))
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }

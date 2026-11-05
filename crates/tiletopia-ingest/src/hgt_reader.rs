@@ -86,6 +86,11 @@ fn parse_hgt_filename(name: &str) -> Result<(i32, i32), IngestError> {
             "HGT: filename too short: '{name}'"
         )));
     }
+    if !name.is_ascii() {
+        return Err(IngestError::ParseError(format!(
+            "HGT: filename is not ASCII: '{name}'"
+        )));
+    }
 
     let lat_hemi = &name[0..1];
     let lat_val: i32 = name[1..3]
@@ -115,6 +120,9 @@ mod tests {
         let (lat, lon) = parse_hgt_filename("S33W070").unwrap();
         assert_eq!(lat, -33);
         assert_eq!(lon, -70);
+
+        let error = parse_hgt_filename("éN47E011").unwrap_err().to_string();
+        assert!(error.contains("not ASCII"), "{error}");
     }
 
     #[test]

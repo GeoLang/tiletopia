@@ -18,6 +18,7 @@ pub mod octree;
 pub mod plugin;
 pub mod spatial;
 pub mod spatial_query;
+pub mod splat_tiler;
 pub mod tile;
 pub mod tileset;
 

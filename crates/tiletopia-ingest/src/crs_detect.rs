@@ -6,7 +6,7 @@
 use std::path::Path;
 use tiletopia_core::crs::{Coord3D, CrsDef, ReprojError, Transformer};
 
-const WGS84_GEODETIC_EPSG: u32 = 4326;
+pub(crate) const WGS84_GEODETIC_EPSG: u32 = 4326;
 const EARTH_CENTERED_EARTH_FIXED_EPSG: u32 = 4978;
 
 /// Detected coordinate reference system.
@@ -162,7 +162,7 @@ pub fn detect_crs_from_geotiff(path: &Path) -> DetectedCrs {
     };
 
     // Try GeoKeyDirectoryTag (34735)
-    if let Ok(values) = decoder.get_tag_u16_vec(tiff::tags::Tag::Unknown(34735)) {
+    if let Ok(values) = decoder.get_tag_u16_vec(tiff::tags::Tag::GeoKeyDirectoryTag) {
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         let crs = parse_geo_key_directory(&bytes);
         if !matches!(crs, DetectedCrs::Unknown) {
@@ -171,7 +171,7 @@ pub fn detect_crs_from_geotiff(path: &Path) -> DetectedCrs {
     }
 
     // Try GeoAsciiParamsTag (34737) for WKT strings
-    if let Ok(ascii) = decoder.get_tag_ascii_string(tiff::tags::Tag::Unknown(34737)) {
+    if let Ok(ascii) = decoder.get_tag_ascii_string(tiff::tags::Tag::GeoAsciiParamsTag) {
         return detect_crs_from_wkt(&ascii);
     }
 

@@ -5,10 +5,485 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2026-08-25
+## [Unreleased]
+
+### Changed
+
+- 2026-11-05: `GET /v1/assets/{id}/section` and `GET /v1/assets/{id}/dxf` read
+  an IFC in the tileset's frame for every model. A map-converted IFC that is
+  tiled with each vertex moved into the east-north-up frame was cut and
+  exported in its IFC coordinates, so a section 20 km from the map origin
+  missed the tiled element. Tiling, section and DXF export call one function
+  for that move.
+- 2026-11-05: a storey's `baseHeight` on a model tiled with each vertex moved
+  goes through the same map conversion as its meshes. It was too high by about
+  d²/2R, 31 m at 20 km from the map origin. Stores built before this need a
+  re-tile.
+- 2026-11-05: a storey with no placement whose building placement does not
+  resolve counts under `unresolved_building_placement` instead of
+  `unresolved_storey_placement`.
+- 2026-11-05: a section plane level with a solid's bottom face cuts that face's
+  outline, as one level with its top face did. Vertices within 0.1 mm of the
+  plane count as on it, and an edge in the plane is cut once.
+- 2026-11-05: IDS checks run one at a time in the sidecar across all assets,
+  and the rest wait in order. Each held a sidecar thread loading a whole model.
+- 2026-11-05: the IDS check sidecar answers 401 to a `POST /check` without
+  `Authorization: Bearer` matching its `IDS_CHECK_TOKEN`, and does not start
+  without one. tiletopia sends `TILETOPIA_IDS_CHECK_TOKEN`, which startup
+  requires when `TILETOPIA_IDS_CHECK_URL` is set.
+- 2026-11-05: `scripts/validate-tiles.sh none` runs `scripts/check_dxf.py` with
+  ezdxf 1.4.5 on the DXF export of a tiled IFC, so CI checks the export with a
+  reader other than tiletopia's.
+
+- 2026-11-05: CI runs the IDS check sidecar's tests with uv and builds its
+  Docker image. Tagged releases publish it as
+  `ghcr.io/geolang/tiletopia-ids-check` under the same tag as
+  `ghcr.io/geolang/tiletopia`.
+
+- 2026-11-05: a storey's `baseHeight` is the height of its `ObjectPlacement`,
+  resolved through the building and site placements in the project length
+  unit, instead of its `Elevation` above the model's z of 0. `Elevation` and
+  `ElevationOfRefHeight` no longer move it. A storey with no placement takes
+  its `Elevation` above its building's placement, and the store counts it
+  under `storey_height_from_elevation`. `storey_without_height` and
+  `unresolved_storey_placement` count the storeys left without one. Stores
+  built before this need a re-tile.
+
+- 2026-11-05: `GET /v1/assets/{id}/dxf` writes DXF R2000 (`AC1015`) instead of
+  R12, whose readers ignore `$INSUNITS`, and its coordinates are declared metres.
+  The file carries `$HANDSEED`, the CLASSES, TABLES, BLOCKS and OBJECTS sections
+  R2000 needs, and a handle, an owner and the `AcDbEntity` and `AcDbFace`
+  subclass markers on every `3DFACE`. `scripts/check_dxf.py` checks a DXF with
+  ezdxf's recover and audit.
+- 2026-11-05: meshopt and Draco IFC tiles carry CAD edges too. The merged
+  primitive's indices use the meshopt `INDICES` codec instead of `TRIANGLES`,
+  and Draco sequential connectivity instead of EdgeBreaker, since both of those
+  move triangle corners. Instanced geometry still carries none.
+
+- 2026-11-05: IFC tiles written with `mesh_compression` `none` carry CAD edges
+  through `EXT_mesh_primitive_edge_visibility` on the merged primitive, beside
+  `EXT_mesh_features`. Meshopt and Draco tiles and instanced geometry carry
+  none. The IFC reader maps the file with `memmap2` instead of reading it into
+  a string.
+
+- 2026-11-05: a mesh tile writes geometry that repeats within it once, through
+  `EXT_mesh_gpu_instancing` with per-instance ids in `EXT_instance_features`, when
+  that saves at least 4 KB of the tile. Copies are found by comparing every
+  reader's meshes after the fact: same vertex order and triangles, placed by a
+  rigid translation and rotation to within 1 mm, with matching normals. Mirrored
+  copies, scaled copies and meshes with texcoords are written as before.
+- 2026-11-05: the mesh tiler assigns whole source meshes to child tiles by their
+  centre. Only a mesh with more triangles than `max_triangles_per_tile` is split
+  by triangle. Parent tiles simplify each source mesh alone, with an error limit
+  of 1% of that mesh's longest side, and hold the largest meshes until they reach
+  `max_triangles_per_tile`, which used to apply to leaves only.
+- 2026-11-05: each mesh tile's property table lists only the source meshes with
+  vertices in that tile, with `_FEATURE_ID_0` and `featureCount` numbered per
+  tile, instead of repeating the whole material group's table. An element's
+  fragments in several tiles each carry its `asset_id`. A tile where no mesh has
+  a column value carries no table and no feature ids, because glTF refuses the
+  zero-length buffer view such a column needs.
+- 2026-11-05: `MeshData` carries optional `class` and `storey` strings, written
+  as property table columns only in tiles where a mesh has them. `name` stays
+  out of tiles.
+- 2026-11-05: mesh positions are `f64` through both `MeshData` types, and each
+  GLB holds `f32` offsets from the centre of its tile under a glTF node
+  `translation`. Simplification runs on `f32` offsets from the material group's
+  centre. Tileset bounding volumes and `root_transform` are unchanged. OBJ, FBX,
+  DXF, CityGML and CityJSON coordinates stay `f64` from the file, and glTF and
+  COLLADA stay `f32` at the source because their parsers hold `f32`. tobj now
+  builds with `use_f64`.
+
+### Added
+
+- 2026-11-05: `GET /v1/assets/{id}/section?axis=&position=` answers each IFC
+  element's cross-section on the plane where `x`, `y` or `z` equals `position`,
+  as polygons of rings in the tileset's local frame, outer ring first and holes
+  after it. Cut segments are joined into rings by welding ends within 0.1 mm,
+  and chains that do not close are counted in `openChainsDropped`. Each request
+  reads the IFC again.
+- 2026-11-05: `POST /v1/assets/{id}/ids` checks a ready IFC model against an
+  IDS file in the background, and `GET /v1/assets/{id}/ids` answers the last
+  check with ifctester's JSON report. The check runs in the new
+  `sidecars/ids-check` Python service, which `TILETOPIA_IDS_CHECK_URL` names.
+- 2026-11-05: storeys carry `baseHeight` in `tree/children` and
+  `elements/{elementId}`, their IFC `Elevation` in metres above the ellipsoid,
+  placed like `location.center.height`. A storey with no `Elevation` has none.
+  The store gains a `base_height` column, so a store built before this needs a
+  re-tile.
+- 2026-11-05: ifc-lite moves from 2.4.2 to 28.2, whose CSG kernel is pure Rust,
+  and IFC tiling follows it. Openings cut their walls, and `IfcOpeningElement`,
+  `IfcSpace` and `IfcSpatialZone` are no longer tiled as solids. A finished job
+  reports the IFC elements that lost geometry in `error`, with a count and the
+  first five reasons. `.ifczip` uploads unpack to their single `.ifc`. An IFC
+  with no upload coordinates is placed by `IfcMapConversion` or
+  `ePSet_MapConversion` through projicio, converting map units to the CRS's unit,
+  and then by `IfcSite`. A CRS of unknown unit fails the job naming it. An
+  `IfcMapConversionScaled` factor off by more than 0.1 percent resizes the model
+  however it is placed, and a negative factor or a `Scale` that does not convert
+  the project unit to the map unit fails the job naming it. `RefElevation`
+  now uses the project length unit, so a millimetre project is no longer placed
+  1000 times too high. The root transform carries the map conversion's rotation
+  plus the grid convergence, or `TrueNorth`. An IFC is read once per job, and a
+  file that is not UTF-8 reads.
+- 2026-11-05: a tiling job on an `.ifc` or `.ifczip` writes each element's class, name, type
+  object, storey, spatial parent, property sets, quantities with units, materials,
+  `Tag` and location to `<asset_dir>/elements.sqlite`, with an FTS5 index. Ion's
+  element routes serve it under `/v1/assets/{id}/elements` and `/tree`: list with
+  filter, get, search, aggregate with an added `groupBy`, properties and
+  property-index. They need a JWT from the asset's owner or an admin, where the
+  other `GET /v1/assets/...` reads stay open. Extraction fails past budgets on
+  property rows, object and property set pairs, text bytes and property visits,
+  and after 10 minutes, and it cuts stored text at 64 KiB and lists at 10000
+  entries with a warning. IFC meshes count against the job's memory budget, a
+  WKT past 64 KiB or nested past 32 levels is refused before it is parsed, and
+  tiling jobs run on ifc-lite's 256 MiB stack thread pool.
+- 2026-11-05: `.jp2` and `.j2k` uploads serve imagery tiles through the new `jp2`
+  cargo feature, off by default, which binds Grok through `grokj2k-sys`. The
+  Docker image turns it on. Without the feature the upload answers 400 naming it.
+  A `.jp2` is placed by its GeoJP2 box or else its GMLJP2 box, and `world_file`
+  or `bounds` with `crs` override both and place a `.j2k`. The decode runs in
+  windows of whole tile rows into the scratch file the other imagery uses.
+- 2026-11-05: model coordination. A re-upload with `base_asset_id`, or Ion's
+  `options.baseAssetId` with `existingFileBehavior: KEEP` under `BIM_CAD`, is a
+  new asset and the next version of a model, listed by
+  `GET /v1/assets/{id}/tileset-revisions`. A model keeps its newest 5 ready
+  versions and at most 20 GiB. `POST /v1/assets/compare` queues a comparison of
+  two versions' element stores into a stored `CHANGE_DETECTION` report of added,
+  removed and changed elements with property keys and geometry hashes, read at
+  `/v1/change-reports/{id}`. The element store gains `mesh_hash`, so a store
+  built before this has no hashes and is rebuilt by a re-tile.
+  `POST /v1/assets/{id}/bcf/import` and `GET .../bcf/export` round-trip BCF 3.0
+  topics, comments and viewpoints with camera, selection, visibility, colouring,
+  lines and clipping through a parser on `quick-xml`, and report element ids the
+  store lacks by count. Documents, internal BIM snippets and bitmaps are counted
+  and dropped. `GET /v1/assets/{id}/dxf` writes a model's meshes as `3DFACE`
+  entities in ASCII DXF, clipped below `cutHeight` when it is sent.
+- 2026-11-05: Ion's `uploadComplete` takes one zip or several files under the
+  asset's prefix, so an OBJ with materials and textures or a `.gltf` with
+  external buffers tiles. The main file is the one file whose extension the
+  source type takes, and none or several answer 400 naming them. A zip may
+  unpack to 100 times its size, at most 4 GiB, and hold 10,000 entries, and
+  symbolic links, absolute paths and `..` steps are refused. A file named
+  `zip` with no dot is now refused at upload instead of being treated as a
+  photo set.
+- 2026-11-05: imagery assets serve OGC WMTS 1.0.0 at
+  `/api/v1/assets/{id}/imagery/wmts`, KVP `GetCapabilities` and `GetTile`, and
+  at `/imagery/wmts/1.0.0/WMTSCapabilities.xml`, in the `GoogleMapsCompatible`
+  tile matrix set with `TileMatrixSetLimits` around the image. They also serve
+  an OSGeo TMS 1.0 TileMap at `/imagery/tms/tilemapresource.xml` with tiles at
+  `/imagery/tms/{z}/{x}/{y}.png`, rows counted from the south. Both read the
+  same PNGs as the XYZ route, anonymously, and their absolute URLs come from
+  `TILETOPIA_ION_BASE_URL`.
+- 2026-11-05: a PLY upload with 3DGS splat properties (`f_dc_*`, `opacity`,
+  `scale_*`, `rot_*`, `f_rest_*`) tiles to GLBs with `KHR_gaussian_splatting`
+  and `KHR_gaussian_splatting_compression_spz_2`, which CesiumJS 1.147 draws as
+  splats. It is placed by `longitude` and `latitude` like a mesh, keeps
+  spherical harmonics up to degree 3, and gets coarser tiles holding the 32,768
+  splats with the largest opacity times area. Tile boxes hold each splat out to
+  3 times its largest scale. The job fails naming a missing
+  property, and refuses more than 4,805,821 splats at degree 3 or 12,979,364 at
+  degree 0. Other PLY uploads still tile as point clouds.
+- 2026-11-05: ASCII DXF uploads tile through the native mesh tiler: 3DFACE,
+  polyface and polygon mesh POLYLINE, MESH, and INSERT blocks with their
+  transforms, arrays and nesting, scaled by `$INSUNITS`. 2D entities are skipped
+  with a warning. A drawing with nothing 3D, an ACIS solid (3DSOLID, BODY,
+  REGION) fails the job naming it. A drawing fails past 5,592,405 stored and
+  placed vertices.
+- 2026-11-05: DXF uploads take a `units` field naming the unit of a drawing whose
+  `$INSUNITS` is missing or 0. Such a drawing without the field, a field that
+  disagrees with a nonzero `$INSUNITS`, an unknown unit name and binary DXF answer
+  400 at upload. The job stores the field and a scheduled re-tile reuses it.
+- 2026-11-05: TopoJSON uploads are decoded to GeoJSON and tiled by mago-3d-tiler,
+  up to 29,826,161 bytes.
+- 2026-11-05: CZML uploads are checked for a leading document packet with a
+  version 1 `version`, stored, and served as uploaded at
+  `GET /api/v1/assets/{id}/czml` with no token. `GET /v1/assets/{id}/endpoint`
+  answers type `CZML` with that url. Anything else with a `.czml` name answers
+  400.
+- 2026-11-05: global terrain at `/api/v1/terrain/global/`, generated on demand
+  from Copernicus DEM GLO-30 COGs and a geoid grid, both read over HTTP `Range`,
+  with heights above the WGS84 ellipsoid. Levels 7 to 14 read the DEM, levels 0
+  to 6 carry the geoid alone. Generated tiles go to a disk cache, 1 GiB by
+  default. `TILETOPIA_GLOBAL_TERRAIN_ION_ASSET_ID` makes
+  `GET /v1/assets/{id}/endpoint` answer with this layer and the Copernicus
+  notice, so `CesiumTerrainProvider.fromIonAssetId` loads it. Configured with
+  `TILETOPIA_GLOBAL_TERRAIN_DEM_URL`, `TILETOPIA_GLOBAL_TERRAIN_GEOID_URL`,
+  `TILETOPIA_GLOBAL_TERRAIN_CACHE_DIR` and `TILETOPIA_GLOBAL_TERRAIN_CACHE_MB`.
+- 2026-11-05: a `.zip` of geotagged JPEG photos uploaded to `POST /api/v1/assets`
+  is reconstructed by OpenDroneMap through the NodeODM server named by
+  `TILETOPIA_NODEODM_URL`, and its textured mesh goes through the native mesh
+  tiler, placed by ODM's `coords.txt`. Without the variable the upload answers 400
+  naming it. New upload field `photogrammetry_preset`, new variable
+  `TILETOPIA_PHOTOGRAMMETRY_TIMEOUT_SECS`, and new dependency `kamadak-exif`.
+  `GET /api/v1/photogrammetry/presets` lists `fast`, `default` and `high_quality`
+  with their ODM options, where it used to answer four fixed names.
+- 2026-11-05: Cesium ion's upload flow. `POST /v1/assets` needs `type` and
+  `options.sourceType`, answers 200 where it answered 201, and returns an S3
+  location on this server with credentials that last 12 hours. `POST
+  /v1/assets/{id}/uploadComplete` queues the tiling job. Status now tells
+  `AWAITING_FILES` from `NOT_STARTED`. Types and options it cannot apply answer
+  400, which replaces the 501 for `IMAGERY` and the stored `uploading` row for
+  other types. An upload not completed in 12 hours goes to `error` and its files
+  are deleted. At startup, an asset still `uploading` with no job and no upload
+  credentials goes to `error`. Each asset takes one source file.
+- 2026-11-04: mesh uploads take `mesh_compression`, `meshopt` by default, or
+  `draco` or `none`. The job stores it and a scheduled re-tile reuses it.
+  `meshopt` writes `EXT_meshopt_compression`. `draco` writes
+  `KHR_draco_mesh_compression` through draco-gltf with 14 position, 10 normal
+  and 12 UV bits.
+- 2026-11-04: mesh uploads take `texture_compression`, `none` by default, or
+  `ktx2`, which writes KTX2 textures with ETC1S and BasisLZ through
+  `KHR_texture_basisu`. Builds now need libclang for basisu_c_sys.
+- 2026-11-04: georeferenced GeoTIFF, COG, JPEG and PNG uploads serve web mercator
+  PNG tiles at `GET /api/v1/assets/{id}/imagery/{z}/{x}/{y}.png` and TileJSON at
+  `/imagery/tilejson.json`. `GET /v1/assets/{id}/endpoint` answers `URL_TEMPLATE`
+  for them. New upload fields: `world_file`, `bounds` and `asset_type`. A file
+  that is not served as is decodes up to 14,913,080 samples, 1930x1930 pixels of
+  four bands, in one of the two slots the SRTM terrain builds share.
+- 2026-11-04: DEM uploads (tif, tiff, hgt, dt0, dt1, dt2) queue a job that writes
+  a quantized-mesh bundle under `<data-dir>/terrain_bundles/<asset id>/`.
+  GeoTIFFs not in EPSG:4326 are reprojected through projicio. Refused DEMs fail
+  the job with a named reason, and the cap is 22,369,621 samples.
+- 2026-11-04: the native mesh tiler takes COLLADA 1.4.1 DAE uploads, with scene
+  node transforms, `up_axis`, `unit`, UVs, diffuse colours and textures. A scene
+  fails when its texture copies plus 64 bytes a vertex add up past a third of
+  the 1 GiB task.
+- 2026-11-04: CI runs CesiumGS 3d-tiles-validator on a tiled point cloud, a
+  textured GLB and an IFC, once per mesh compression value.
+
+### Changed
+
+- 2026-11-05: breaking: asset reads need a token and pass the owner check.
+  `GET /v1/assets`, `/v1/assets/{id}` and `/v1/assets/{id}/endpoint` answer 401
+  with no token, and the list holds only the caller's assets. These two and
+  `GET /api/v1/assets/{id}`, `/jobs`, `/annotations` and `GET /api/v1/jobs/{id}`
+  answer another owner the 404 of a missing asset, and `POST /api/v1/exports`
+  does the same for the asset it names. `GET /api/v1/stories` and
+  `/stories/{id}` keep private stories to their author and admins. An asset with
+  no owner is now readable by admins alone. The endpoint of the id in
+  `TILETOPIA_GLOBAL_TERRAIN_ION_ASSET_ID` stays open, since
+  `createWorldTerrainAsync` cannot send a header, and its 409 no longer names the
+  asset holding the id. `GET /api/v1/terrain/bundles` lists a bundle named after
+  an asset id only to a caller who may view that asset, and tiles stay anonymous.
+- 2026-11-05: breaking: an asset with no owner can be modified by admins alone.
+  Webhook events go only to subscriptions whose creator may view the asset. A
+  `retile_asset` scheduled job needs a creator who may modify the asset, when it
+  is created (404 otherwise) and each time it fires (the run fails otherwise).
+  `POST /v1/assets/{id}/uploadComplete` and `GET /api/v1/tilesets/{id}` answer
+  another owner the 404 of a missing id instead of 403.
+- 2026-11-05: the `TILETOPIA_AUTH_DISABLED=true` startup warning says routes that
+  check a role or an owner still need a token.
+- 2026-11-05: breaking: `tiletopia serve` refuses to start unless
+  `TILETOPIA_ION_BASE_URL` is an http or https origin with no path, query or
+  trailing slash. The `http://localhost:3000` default is gone, so every
+  deployment has to set the variable.
+- 2026-11-05: imagery uploads that are not served as is decode in a fixed amount
+  of memory however large the image, so the 1930x1930 cap is gone. TIFFs decode
+  one strip or tile at a time and PNGs one row at a time into a raw file beside
+  the asset, overviews are built from that file two rows at a time, and the COG
+  is written one tile at a time through terrano's `write_cog_tiles`. Samples stay
+  in their own type instead of f64. The limits are 65,535 pixels a side, 2 GiB
+  of decoded samples, and 64 MiB for one TIFF strip or tile. JPEG and interlaced
+  PNG still decode whole and are limited to a third of the build budget,
+  119,304,647 bytes decoded, about 6300x6300 RGB. Overviews of integer images
+  now leave nodata out of the average. Images over 16,384 px a side get more
+  than five overviews, down to 512 px. Needs terrano with `write_cog_tiles`.
+- 2026-11-04: a JPEG or PNG upload with no `crs` and no `world_file` or `bounds`
+  answers 400 naming the reason, where it used to be stored, and so does one with
+  an `asset_type` other than `imagery`. A `.tif` with several bands becomes an
+  `imagery` asset and answers 400 if it cannot be tiled, unless the upload sets
+  `asset_type=terrain`.
+- 2026-11-04: a single band `.tif` stays a `terrain` asset with a quantized-mesh
+  job and no imagery tiles, unless the upload names `asset_type=imagery`. With
+  `world_file` or `bounds` and no `asset_type=imagery` it answers 400.
+- 2026-11-04: a jp2 upload answers 400, where it used to be stored as `uploading`
+  with no job.
+- 2026-11-04: `_FEATURE_ID_0` is written as FLOAT because glTF forbids
+  UNSIGNED_INT attributes, ids above 2^24 raise an error, and
+  `EXT_structural_metadata` schemas have an id.
+- 2026-11-04: geoprocessing simplify, point in polygon, boolean overlay and buffer
+  run on `topoi-core`. Buffer coordinates change because arcs have 32 sides per
+  circle.
+- 2026-11-04: meshopt moved to 0.7.
+- 2026-11-04: token checks and webhook signing come from `platform-auth` and
+  `platform-webhook`. Webhooks to loopback, private and link-local addresses are
+  refused unless `TILETOPIA_WEBHOOK_ALLOW_PRIVATE_HOSTS=true`, delivery uses no
+  proxy, and the refusal texts for a bad URL changed. A platform token with an
+  empty `sub`, `agora_use` or `geolang_use` is refused.
+- 2026-10-28: COG reads share the reader without a lock (f254d5a).
+
+### Fixed
+
+- 2026-11-05: an IFC placed by a map conversion to a projected CRS, too wide for
+  one flat east-north-up frame, has each vertex taken through the map CRS,
+  projicio and ECEF into the east-north-up frame at the conversion origin. The
+  flat frame had elements 20 km out about 31 m above their map position.
+  Models whose flat frame is within half the placement tolerance at every
+  bounding box corner tile as before.
+- 2026-11-05: `percentComplete` on the Ion asset routes is the running job's
+  progress instead of a constant 50.
+- 2026-11-05: breaking: new assets never take the id in
+  `TILETOPIA_GLOBAL_TERRAIN_ION_ASSET_ID`, so id 1 keeps resolving to the global
+  terrain after the first upload. Startup is refused, naming the variable and the
+  asset, when an asset already holds the id. The endpoint's 409 is gone.
+- 2026-11-05: a failed status write during a tiling job fails the job naming the
+  write. A job that cannot record `done` records `failed` instead, and an asset
+  that cannot record `ready` goes to `error`. A job whose failure cannot be written
+  either is logged and reads as running until the next restart, with no webhook.
+- 2026-11-05: deleting an asset stops its running reconstruction between stages
+  and during the download of the result. A tiler still running at the delete runs
+  to its end, then the job removes what it wrote and fails with `job.failed`
+  instead of reporting `job.completed`.
+- 2026-11-05: a void in an uploaded DEM takes the mean of its nearest valid
+  samples, out to 100 samples, before any reprojection, and the fill is logged.
+  It used to become height 0. Ground outside the DEM stays flat at 0.
+- 2026-11-05: `tiletopia edge` prints the target triple and the `tiletopia` binary
+  name. It used to print `target/{}/release/tiletopia-cli`.
+- 2026-11-05: `POST /api/v1/assets/{id}/tile` on an asset with no input directory,
+  such as a catalog asset, answers 404 naming the missing input. It used to answer
+  202 and fail the job on the dataset URL.
+- 2026-11-05: a job's `input_path` is stored relative to the asset's directory, and
+  a re-tile rebases an older absolute path, so it survives moving the data directory.
+- 2026-11-05: Ion's upload route takes `.ifczip` under `BIM_CAD`, `.jp2` under
+  `RASTER_IMAGERY`, a `.dxf` that names its unit under `BIM_CAD`, `.topojson` under
+  `VECTOR_DATA`, and `position` under `POINT_CLOUD` for a Gaussian splat PLY. A
+  unitless DXF, a splat PLY without `position` and another point cloud with it
+  answer 400 at `uploadComplete`.
+- 2026-11-05: a `crs` field on a file the native mesh tiler takes answers 400. It
+  used to be ignored.
+- 2026-11-05: a TIFF with an internal transparency mask answers 400 naming the mask.
+  It used to serve masked pixels as opaque data.
+- 2026-11-05: a DXF export reads its source on ifc-lite's 256 MiB stack thread
+  pool, as tiling does, so a deeply nested IFC no longer overflows the stack of
+  a blocking thread and aborts the server.
+- 2026-11-05: element search answers `total` as the number of matches, where it
+  was the number of hits on the page.
+- 2026-11-05: a BCF import copies its snapshots aside before it writes topics,
+  and moves them into place inside the topic transaction, so a snapshot that
+  cannot be stored answers 500 and leaves the stored topics and snapshots as
+  they were.
+- 2026-11-05: `POST /v1/assets/compare` refuses a version whose element store
+  has no `mesh_hash` column with 409 `ELEMENT_STORE_OUTDATED` naming a re-tile,
+  where the report used to fail later with SQLite's error text.
+- 2026-11-05: a change report whose status write fails goes to `ERROR` naming
+  the failed write, so `compare` replaces it. It used to stay `NOT_STARTED` or
+  `IN_PROGRESS` and answer 409 for the pair until a restart. `percentComplete`
+  is left out while a report is `IN_PROGRESS`, where it was always 50.
+- 2026-11-05: a malformed Guid in the path of `PUT .../bcf/topics/{guid}`
+  answers `INVALID_BCF`, and a version of an asset with no owner has no owner,
+  as the coordination contract says.
+- 2026-11-05: element extraction counts undecodable materials, layers, profiles
+  and constituents, quantity set members that are not quantities and quantities
+  that are not finite as `property-index` warnings.
+- 2026-11-05: an IFC is charged each mesh's struct sizes in the reader and the
+  mesh tiler on top of its bytes per vertex, so a model of many small elements
+  is refused before it passes the job's memory budget.
+- 2026-11-05: `POST /api/v1/assets/{id}/tile` keeps the last job's placement,
+  units, mesh compression and texture compression. It and the scheduled
+  `retile_asset` now both call `submit_retile_job`. A re-tile of a placed mesh
+  used to fail for lack of coordinates.
+- 2026-11-05: a photo set zip skips `__MACOSX` entries with the same check Ion
+  zip uploads use, so a zip from macOS Archive Utility is no longer refused.
+- 2026-11-05: Ion S3 uploads no longer fill the disk past the 4 GiB cap.
+  `.incoming` files are removed when a request ends any way at all, including a
+  disconnect, and by the first scan of an asset after a restart.
+  `CompleteMultipartUpload` reserves the joined size and closes the upload before
+  it joins, so a second complete or a late part answers `NoSuchUpload`, and the
+  join and every rename run past a disconnect.
+- 2026-11-05: one set of Ion upload credentials holds 20,000 files and parts and
+  819 open multipart uploads, and one editor has 16 assets awaiting files. The
+  restart scan runs outside the lock every upload takes, and `uploadComplete`
+  names the first 20 files of a refusal and counts the rest.
+- 2026-11-05: text fields of `POST /api/v1/assets` hold 64 KiB of UTF-8 at most and
+  are counted as they arrive. They used to buffer up to the 4 GiB body limit. A
+  field that is not UTF-8 is now refused instead of decoded by its charset.
+- 2026-11-05: `POST /api/v1/assets` and `POST /api/v1/tilesets` refuse 4 MiB of
+  multipart body with no next field. multer held a preamble or unterminated field
+  headers in memory up to the 4 GiB body limit. An ignored field past 4 MiB is
+  refused too, and a refused tileset upload removes its scratch directory.
+- 2026-11-05: one set of Ion upload credentials stages at most `MAX_UPLOAD_BYTES`
+  across its files and multipart parts, counted per frame while a request
+  streams. A request past that answers `EntityTooLarge` and stores nothing. The
+  limit used to apply per file only.
+- 2026-11-05: `POST /v1/assets/{id}/bcf/import`, `PUT` and `DELETE
+  /v1/assets/{id}/bcf/topics/{guid}` and `POST /v1/assets/compare` need the
+  editor or admin role and pass `may_modify_asset`, the same as deleting or
+  re-tiling an asset. A viewer-role token gets 403. Their reads stay on
+  `may_view_asset`.
+- 2026-11-05: a DEM sample beside a void keeps its value. `Heightmap::elevation_at` multiplied the void by a zero weight, which made the sample a void too.
+
+- 2026-11-05: terrano's `CogReader` moves PixelIsPoint origins to the pixel
+  corner, sizes untagged overviews from the full image and refuses masked COGs.
+  `/api/v1/terrain/global/` takes the corner from it instead of moving the origin
+  itself. Registered COG sources report PixelIsPoint bounds from the pixel corner
+  and the real pixel size of GDAL overviews. Masked uploads still decode to a COG.
+- 2026-11-05: a photo set reconstruction no longer blocks the job queue. Other
+  jobs run while NodeODM works, tiling the result still takes its turn one job
+  at a time, and `TILETOPIA_PHOTOGRAMMETRY_TIMEOUT_SECS` no longer counts time
+  a task spends queued on the node.
+- 2026-11-05: `serve` startup fails every job left `running` by an earlier
+  process, with the restart in its `error`, and puts its asset in `error` the
+  way a failed job does. These jobs used to stay `running` forever.
+- 2026-11-05: a `TILETOPIA_JWT_SECRET` that is set but not valid UTF-8 refuses
+  startup naming the variable, and the auth middleware answers 500 for it
+  instead of letting every request through.
+- 2026-11-05: `POST /v1/assets` with type `IMAGERY` answers 501 naming
+  `POST /api/v1/assets`, where it used to store an asset as `uploading` that no
+  upload or completion step could fill. `POST /api/v1/catalog/{id}/add` of an
+  imagery dataset answers 501, where it used to queue a job that always failed.
+- 2026-11-05: each mesh tile carries only the vertices its triangles use, with
+  its indices renumbered. Tiles written with `mesh_compression` `none` or
+  `draco` used to hold every vertex of their material in memory, and `none`
+  tiles also wrote them all to the GLB.
+- 2026-11-05: the mesh tiler writes each tile GLB, KTX2 texture included, as
+  soon as it is built, so it holds the tiles of one root to leaf path at a
+  time instead of the whole tree. LOD simplification works on the node's own
+  vertices through meshopt's sparse mode, with its error limit still 1% of the
+  material's longest side. `build_mesh_tree`, `write_mesh_tileset` and
+  `MeshTileNode` are gone from `tiletopia_core::mesh_tiler`, and `tile_meshes`
+  is the one entry point.
+- 2026-11-05: glTF and GLB meshes are placed by their node transforms in the
+  default scene, or the first scene when `scene` is unset, and a mesh used by two
+  nodes is tiled twice. They used to sit at their own origin, once each. A
+  mirroring node keeps triangles front-facing. A file with meshes but no scene,
+  or a node with two parents or in a cycle, fails. Triangle strips and fans
+  become triangle lists, non-indexed triangles tile, and line and point
+  primitives are skipped with a warning. A strip or fan under three vertices, or
+  a triangle list that is not whole triangles, fails.
+- 2026-11-05: an FBX mesh under a mirroring node transform, or in a file whose
+  axis settings are left-handed, keeps its triangles front-facing. A polygon
+  naming a control point the mesh does not have fails the file naming the
+  polygon, where it used to drop that corner and misalign every later triangle.
+- 2026-11-04: an uploaded model could name any file the server can read. A `..`
+  or absolute texture path in a DAE, FBX or OBJ pulled in any readable image, an
+  OBJ `mtllib` read any file as materials, and a `.gltf` buffer or image URI read
+  any file. Texture and `mtllib` paths now stay inside the mesh directory, and a
+  `.gltf` naming a file outside it fails.
+- 2026-11-04: DTED origin latitude parsing and signed magnitude elevations, which
+  also changes the terrain bundle export of DTED assets. GeoTIFF reads the GDAL
+  nodata tag. A non-ASCII HGT file name is a parse error rather than a panic.
 
 ### Removed
 
+- 2026-11-05: breaking: `GET /v1/tokens` and `POST /v1/tokens`. The first answered
+  a fixed token and the second a random string that authenticated nothing. Ion's
+  scopes name asset routes that API keys cannot reach, so `/api/v1/api-keys` stays
+  the one route that mints a credential.
+- 2026-11-05: `tiletopia_terrain::global_dem::GlobalTerrainConfig`, which nothing used.
+- 2026-11-05: `tiletopia_server::annotations`, an in-memory annotation store
+  nothing called. The persisted `/api/v1/assets/{id}/annotations` routes stay for
+  the `gui/` dashboard.
+- 2026-11-04: routes that answered canned data: `GET /api/v1/photogrammetry/projects`,
+  `/api/v1/bim4d/projects`, `/api/v1/indoor/buildings`, `/api/v1/metering/summary`
+  and `/api/v1/metering/pricing`, with `petgraph`. Removed modules, each at the
+  last commit that held it:
+  - `crates/tiletopia-server/src/photogrammetry.rs` at 9ace651
+  - `crates/tiletopia-server/src/bim4d.rs` at 9ace651
+  - `crates/tiletopia-server/src/indoor.rs` at 9ace651
+  - `crates/tiletopia-server/src/metering.rs` at 9ace651
+- 2026-11-04: draco-rs, `patches/draco-rs`, the `draco` cargo feature and the
+  ubuntu-24.04 CI pins (added in 9ace651).
 - 2026-10-19: `GET /api/v1/terrain-analysis/operations`,
   `/api/v1/multispectral/indices`, `/api/v1/multispectral/sensors` and
   `/api/v1/classification/models`. Each answered a static list of operations,

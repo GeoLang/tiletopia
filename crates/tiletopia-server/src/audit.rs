@@ -488,9 +488,39 @@ static AUDITED_ROUTES: &[AuditedRoute] = &[
     },
     AuditedRoute {
         method: "POST",
-        template: "/v1/tokens",
+        template: "/v1/assets/{id}/uploadComplete",
+        action: AuditAction::Upload,
+        resource_type: "asset",
+    },
+    AuditedRoute {
+        method: "POST",
+        template: "/v1/assets/{id}/bcf/import",
         action: AuditAction::Create,
-        resource_type: "token",
+        resource_type: "bcf_topic",
+    },
+    AuditedRoute {
+        method: "PUT",
+        template: "/v1/assets/{id}/bcf/topics/{guid}",
+        action: AuditAction::Update,
+        resource_type: "bcf_topic",
+    },
+    AuditedRoute {
+        method: "DELETE",
+        template: "/v1/assets/{id}/bcf/topics/{guid}",
+        action: AuditAction::Delete,
+        resource_type: "bcf_topic",
+    },
+    AuditedRoute {
+        method: "POST",
+        template: "/v1/assets/compare",
+        action: AuditAction::Create,
+        resource_type: "change_report",
+    },
+    AuditedRoute {
+        method: "POST",
+        template: "/v1/assets/{id}/ids",
+        action: AuditAction::Create,
+        resource_type: "ids_check",
     },
 ];
 

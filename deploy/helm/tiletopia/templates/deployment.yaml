@@ -42,6 +42,8 @@ spec:
               value: /data
             - name: TILETOPIA_PORT
               value: "3000"
+            - name: TILETOPIA_ION_BASE_URL
+              value: {{ required "ionBaseUrl must be the http or https origin clients reach this server at" .Values.ionBaseUrl | quote }}
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}

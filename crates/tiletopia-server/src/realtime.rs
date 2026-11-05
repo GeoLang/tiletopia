@@ -459,7 +459,7 @@ pub async fn ws_handler(
     let upgrade = ws
         .max_message_size(MAX_CLIENT_MESSAGE_LEN)
         .max_frame_size(MAX_CLIENT_MESSAGE_LEN)
-        .protocols([crate::auth::BEARER_SUBPROTOCOL]);
+        .protocols([platform_auth::BEARER_SUBPROTOCOL]);
     let tx = match state.realtime.acquire_room(&room, &claims.sub).await {
         Ok(tx) => tx,
         Err(refusal) => {

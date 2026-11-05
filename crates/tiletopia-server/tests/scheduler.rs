@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use tiletopia_core::mesh_tiler::TextureCompression;
 use tiletopia_server::db::{JobRecord, JobStatus, ModelPlacement};
 use tiletopia_server::scheduler::{MAX_RUN_ATTEMPTS, ScheduledAction, Scheduler};
 use tiletopia_server::{AppState, Asset, AssetStatus, AssetType, router};
@@ -164,6 +165,9 @@ async fn settled_job_row(state: &Arc<AppState>, asset_id: Uuid, days_ago: i64) -
         points_processed: 0,
         tiles_written: 4,
         placement: ModelPlacement::default(),
+        mesh_compression: tiletopia_core::glb_writer::MeshCompression::None,
+        texture_compression: Default::default(),
+        photogrammetry_preset: Default::default(),
     };
     state.db.create_job(&job).await.unwrap();
     state.db.update_job(&job).await.unwrap();
@@ -391,16 +395,17 @@ async fn a_failing_job_records_its_error_and_is_disabled_at_the_attempt_bound() 
     let state = common::test_state().await;
     let editor = common::token("editor-five", "editor");
 
-    let gone = Uuid::new_v4();
+    let gone = staged_asset(&state, "editor-five").await;
     let created = schedule(
         &state,
         &editor,
-        "retile a missing asset",
+        "retile an asset that gets deleted",
         serde_json::json!({ "kind": "retile_asset", "asset_id": gone }),
         interval(SHORT_INTERVAL_SECONDS),
     )
     .await;
     let id = job_id(&created);
+    state.db.delete_asset(gone).await.unwrap();
 
     tokio::time::sleep(PAST_DUE).await;
     for attempt in 1..=MAX_RUN_ATTEMPTS {
@@ -601,6 +606,175 @@ async fn the_advertised_action_kinds_are_exactly_the_ones_the_worker_runs() {
     let tiling = state.db.list_jobs_for_asset(asset_id).await.unwrap();
     assert_eq!(tiling.len(), 1, "{tiling:?}");
     assert_eq!(tiling[0].status, JobStatus::Queued);
+}
+
+#[tokio::test]
+async fn a_retile_reuses_the_mesh_compression_of_the_last_job() {
+    use tiletopia_core::glb_writer::MeshCompression;
+
+    let state = common::test_state().await;
+    let editor = common::token("editor-retile", "editor");
+    let asset_id = staged_asset(&state, "editor-retile").await;
+    let input_path = state
+        .data_dir
+        .join(asset_id.to_string())
+        .join("input")
+        .to_string_lossy()
+        .into_owned();
+    state
+        .job_queue
+        .submit(
+            asset_id,
+            input_path,
+            ModelPlacement::default(),
+            MeshCompression::Draco,
+            TextureCompression::None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+    let created = schedule(
+        &state,
+        &editor,
+        "retile",
+        serde_json::json!({ "kind": "retile_asset", "asset_id": asset_id }),
+        one_shot_in(1),
+    )
+    .await;
+    let id = job_id(&created);
+
+    tokio::time::sleep(PAST_DUE).await;
+    assert_eq!(state.scheduler.run_due().await, 1);
+    let job = stored_job(&state, &editor, &id).await;
+    assert_eq!(job["last_outcome"]["outcome"], "success", "{job}");
+
+    let jobs = state.db.list_jobs_for_asset(asset_id).await.unwrap();
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    for job in &jobs {
+        assert_eq!(job.mesh_compression, MeshCompression::Draco, "{job:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_retile_keeps_the_texture_compression_of_the_last_job() {
+    let state = common::test_state().await;
+    let editor = common::token("editor-ktx2", "editor");
+    let asset_id = staged_asset(&state, "editor-ktx2").await;
+    state
+        .job_queue
+        .submit(
+            asset_id,
+            "cube.obj".into(),
+            ModelPlacement::default(),
+            tiletopia_core::glb_writer::MeshCompression::None,
+            TextureCompression::Ktx2,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+    let action = serde_json::json!({ "kind": "retile_asset", "asset_id": asset_id });
+    schedule(&state, &editor, "retile", action, one_shot_in(1)).await;
+    tokio::time::sleep(PAST_DUE).await;
+    assert_eq!(state.scheduler.run_due().await, 1);
+
+    let jobs = state.db.list_jobs_for_asset(asset_id).await.unwrap();
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    assert_eq!(jobs[0].texture_compression, TextureCompression::Ktx2);
+}
+
+#[tokio::test]
+async fn scheduling_a_retile_needs_an_asset_the_creator_may_modify() {
+    let state = common::test_state().await;
+    let owner = common::token("retile-owner", "editor");
+    let stranger = common::token("retile-stranger", "editor");
+    let asset_id = staged_asset(&state, "retile-owner").await;
+    let missing_id = Uuid::new_v4();
+
+    let post = |bearer: &str, target: Uuid| {
+        json_request(
+            "POST",
+            "/api/v1/scheduler/jobs",
+            bearer,
+            serde_json::json!({
+                "name": "retile",
+                "action": { "kind": "retile_asset", "asset_id": target },
+                "schedule": interval(3600),
+            }),
+        )
+    };
+
+    let theirs = send(&state, post(&stranger, asset_id)).await;
+    let missing = send(&state, post(&stranger, missing_id)).await;
+    assert_eq!(theirs.status, StatusCode::NOT_FOUND, "{}", theirs.text);
+    assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.text);
+    assert_eq!(theirs.body["error"], format!("no asset {asset_id}"));
+    assert_eq!(missing.body["error"], format!("no asset {missing_id}"));
+    assert!(state.db.list_scheduled_jobs().await.unwrap().is_empty());
+
+    let mine = send(&state, post(&owner, asset_id)).await;
+    assert_eq!(mine.status, StatusCode::CREATED, "{}", mine.text);
+    let by_admin = send(&state, post(&common::token("root", "admin"), asset_id)).await;
+    assert_eq!(by_admin.status, StatusCode::CREATED, "{}", by_admin.text);
+}
+
+#[tokio::test]
+async fn a_scheduled_retile_stops_once_its_creator_no_longer_owns_the_asset() {
+    let state = common::test_state().await;
+    let owner = common::token("former-owner", "editor");
+    let asset_id = staged_asset(&state, "former-owner").await;
+    let action = serde_json::json!({ "kind": "retile_asset", "asset_id": asset_id });
+    let created = schedule(
+        &state,
+        &owner,
+        "retile",
+        action,
+        interval(SHORT_INTERVAL_SECONDS),
+    )
+    .await;
+    let id = job_id(&created);
+
+    sqlx::query("UPDATE assets SET owner_id = 'new-owner' WHERE id = ?")
+        .bind(asset_id.to_string())
+        .execute(&state.db.pool)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(PAST_DUE).await;
+    assert_eq!(state.scheduler.run_due().await, 1);
+
+    let job = stored_job(&state, &owner, &id).await;
+    assert_eq!(job["last_outcome"]["outcome"], "failure", "{job}");
+    assert!(
+        state
+            .db
+            .list_jobs_for_asset(asset_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the retile reached the tiling queue"
+    );
+}
+
+#[tokio::test]
+async fn a_scheduled_retile_by_a_stored_admin_fires_on_another_owners_asset() {
+    let state = common::test_state().await;
+    let admin = common::stored_admin_token(&state).await;
+    let asset_id = staged_asset(&state, "someone-else").await;
+    let action = serde_json::json!({ "kind": "retile_asset", "asset_id": asset_id });
+    let created = schedule(&state, &admin, "retile", action, one_shot_in(1)).await;
+    let id = job_id(&created);
+
+    tokio::time::sleep(PAST_DUE).await;
+    assert_eq!(state.scheduler.run_due().await, 1);
+
+    let job = stored_job(&state, &admin, &id).await;
+    assert_eq!(job["last_outcome"]["outcome"], "success", "{job}");
+    assert_eq!(
+        state.db.list_jobs_for_asset(asset_id).await.unwrap().len(),
+        1
+    );
 }
 
 #[tokio::test]

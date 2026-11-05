@@ -5,6 +5,9 @@ use std::path::Path;
 use tiff::decoder::{Decoder, DecodingResult};
 use tiff::tags::Tag;
 
+const RASTER_TYPE_GEO_KEY: u16 = 1025;
+const RASTER_PIXEL_IS_POINT: u16 = 2;
+
 /// Parse geographic bounds from GeoTIFF tags.
 ///
 /// Tries (in order):
@@ -16,22 +19,35 @@ fn parse_geo_bounds<R: std::io::Read + std::io::Seek>(
     width: usize,
     height: usize,
 ) -> [f64; 4] {
+    georeferenced_bounds(decoder, width, height).unwrap_or([
+        0.0,
+        0.0,
+        width as f64 / 3600.0,
+        height as f64 / 3600.0,
+    ])
+}
+
+fn georeferenced_bounds<R: std::io::Read + std::io::Seek>(
+    decoder: &mut Decoder<R>,
+    width: usize,
+    height: usize,
+) -> Option<[f64; 4]> {
     // ModelTransformation (34264): 16 doubles forming a 4×4 affine matrix
-    if let Ok(matrix) = decoder.get_tag_f64_vec(Tag::Unknown(34264))
+    if let Ok(matrix) = decoder.get_tag_f64_vec(Tag::ModelTransformationTag)
         && matrix.len() >= 16
     {
         let west = matrix[3];
         let north = matrix[7];
         let east = west + width as f64 * matrix[0];
         let south = north + height as f64 * matrix[5];
-        return [west, south, east, north];
+        return Some([west, south, east, north]);
     }
 
     // ModelPixelScale (33550): [ScaleX, ScaleY, ScaleZ]
     // ModelTiepoint (33922): [I, J, K, X, Y, Z]
     if let (Ok(scale), Ok(tiepoint)) = (
-        decoder.get_tag_f64_vec(Tag::Unknown(33550)),
-        decoder.get_tag_f64_vec(Tag::Unknown(33922)),
+        decoder.get_tag_f64_vec(Tag::ModelPixelScaleTag),
+        decoder.get_tag_f64_vec(Tag::ModelTiepointTag),
     ) && scale.len() >= 2
         && tiepoint.len() >= 6
     {
@@ -43,11 +59,50 @@ fn parse_geo_bounds<R: std::io::Read + std::io::Seek>(
         let north = y + j * scale_y;
         let east = west + width as f64 * scale_x;
         let south = north - height as f64 * scale_y;
-        return [west, south, east, north];
+        return Some([west, south, east, north]);
     }
 
-    // Fallback placeholder bounds
-    [0.0, 0.0, width as f64 / 3600.0, height as f64 / 3600.0]
+    None
+}
+
+pub struct GridLayout {
+    pub width: usize,
+    pub height: usize,
+    pub georeferenced: bool,
+    pub rotated: bool,
+    pub pixel_is_point: bool,
+}
+
+pub fn grid_layout(path: &Path) -> Result<GridLayout, IngestError> {
+    let file = std::fs::File::open(path)?;
+    let mut decoder = Decoder::new(std::io::BufReader::new(file))
+        .map_err(|e| IngestError::ParseError(format!("TIFF decode error: {e}")))?;
+    let (width, height) = decoder
+        .dimensions()
+        .map_err(|e| IngestError::ParseError(format!("TIFF dimensions error: {e}")))?;
+    let (width, height) = (width as usize, height as usize);
+
+    let rotated = decoder
+        .get_tag_f64_vec(Tag::ModelTransformationTag)
+        .is_ok_and(|matrix| matrix.len() >= 16 && (matrix[1] != 0.0 || matrix[4] != 0.0));
+    let pixel_is_point = decoder
+        .get_tag_u16_vec(Tag::GeoKeyDirectoryTag)
+        .is_ok_and(|keys| {
+            // the directory opens with a four-short header, the same size as one key entry
+            keys.as_chunks::<4>()
+                .0
+                .iter()
+                .skip(1)
+                .any(|key| key[0] == RASTER_TYPE_GEO_KEY && key[3] == RASTER_PIXEL_IS_POINT)
+        });
+
+    Ok(GridLayout {
+        width,
+        height,
+        georeferenced: georeferenced_bounds(&mut decoder, width, height).is_some(),
+        rotated,
+        pixel_is_point,
+    })
 }
 
 /// Read a GeoTIFF DEM/DTM into a Heightmap.
@@ -63,6 +118,10 @@ pub fn read(path: &Path) -> Result<Heightmap, IngestError> {
     let height = height as usize;
 
     let bounds = parse_geo_bounds(&mut decoder, width, height);
+    let nodata = decoder
+        .get_tag_ascii_string(Tag::GdalNodata)
+        .ok()
+        .and_then(|text| text.trim().parse().ok());
 
     let image = decoder
         .read_image()
@@ -106,7 +165,7 @@ pub fn read(path: &Path) -> Result<Heightmap, IngestError> {
         height,
         elevations,
         bounds,
-        nodata: None,
+        nodata,
     })
 }
 

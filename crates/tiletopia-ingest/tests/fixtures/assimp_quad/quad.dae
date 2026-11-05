@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset>
+    <contributor>
+      <author>Assimp</author>
+      <authoring_tool>Assimp Exporter</authoring_tool>
+    </contributor>
+    <created>2026-11-04T16:59:39</created>
+    <modified>2026-11-04T16:59:39</modified>
+    <unit name="meter" meter="1" />
+    <up_axis>Y_UP</up_axis>
+  </asset>
+  <library_images>
+    <image id="wall-diffuse-image">
+      <init_from>wall.png</init_from>
+    </image>
+  </library_images>
+  <library_effects>
+    <effect id="wall-fx" name="wall">
+      <profile_COMMON>
+        <newparam sid="wall-diffuse-surface">
+          <surface type="2D">
+            <init_from>wall-diffuse-image</init_from>
+          </surface>
+        </newparam>
+        <newparam sid="wall-diffuse-sampler">
+          <sampler2D>
+            <source>wall-diffuse-surface</source>
+          </sampler2D>
+        </newparam>
+        <technique sid="standard">
+          <phong>
+            <emission>
+              <color sid="emission">0   0   0   1</color>
+            </emission>
+            <diffuse>
+              <texture texture="wall-diffuse-sampler" texcoord="CHANNEL0" />
+            </diffuse>
+            <shininess>
+              <float sid="shininess">0</float>
+            </shininess>
+            <transparency>
+              <float sid="transparency">1</float>
+            </transparency>
+          </phong>
+        </technique>
+      </profile_COMMON>
+    </effect>
+    <effect id="material_1-fx" name="">
+      <profile_COMMON>
+        <technique sid="standard">
+          <phong>
+            <emission>
+              <color sid="emission">0   0   0   1</color>
+            </emission>
+            <diffuse>
+              <color sid="diffuse">1   1   1   1</color>
+            </diffuse>
+            <shininess>
+              <float sid="shininess">0</float>
+            </shininess>
+            <transparency>
+              <float sid="transparency">1</float>
+            </transparency>
+          </phong>
+        </technique>
+      </profile_COMMON>
+    </effect>
+  </library_effects>
+  <library_materials>
+    <material id="wall" name="wall">
+      <instance_effect url="#wall-fx"/>
+    </material>
+    <material id="material_1" name="">
+      <instance_effect url="#material_1-fx"/>
+    </material>
+  </library_materials>
+  <library_geometries>
+    <geometry id="quad" name="quad" >
+      <mesh>
+        <source id="quad-positions" name="quad-positions">
+          <float_array id="quad-positions-array" count="12"> 0 0 0 1 0 0 1 1 0 0 1 0 </float_array>
+          <technique_common>
+            <accessor count="4" offset="0" source="#quad-positions-array" stride="3">
+              <param name="X" type="float" />
+              <param name="Y" type="float" />
+              <param name="Z" type="float" />
+            </accessor>
+          </technique_common>
+        </source>
+        <source id="quad-normals" name="quad-normals">
+          <float_array id="quad-normals-array" count="12"> 0 0 1 0 0 1 0 0 1 0 0 1 </float_array>
+          <technique_common>
+            <accessor count="4" offset="0" source="#quad-normals-array" stride="3">
+              <param name="X" type="float" />
+              <param name="Y" type="float" />
+              <param name="Z" type="float" />
+            </accessor>
+          </technique_common>
+        </source>
+        <source id="quad-tex0" name="quad-tex0">
+          <float_array id="quad-tex0-array" count="8"> 0 1 1 1 1 0 0 0 </float_array>
+          <technique_common>
+            <accessor count="4" offset="0" source="#quad-tex0-array" stride="2">
+              <param name="S" type="float" />
+              <param name="T" type="float" />
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="quad-vertices">
+          <input semantic="POSITION" source="#quad-positions" />
+        </vertices>
+        <polylist count="2" material="defaultMaterial">
+          <input offset="0" semantic="VERTEX" source="#quad-vertices" />
+          <input offset="0" semantic="NORMAL" source="#quad-normals" />
+          <input offset="0" semantic="TEXCOORD" source="#quad-tex0" set="0" />
+          <vcount>3 3 </vcount>
+          <p>0 1 2 0 2 3 </p>
+        </polylist>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_controllers>
+  </library_controllers>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="parent" name="parent" type="NODE">
+        <matrix sid="matrix">1 0 0 10 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+        <node id="child" name="child" type="NODE">
+          <matrix sid="matrix">2 0 0 0 0 2 0 0 0 0 2 0 0 0 0 1</matrix>
+          <instance_geometry url="#quad">
+            <bind_material>
+              <technique_common>
+                <instance_material symbol="defaultMaterial" target="#wall">
+                  <bind_vertex_input semantic="CHANNEL0" input_semantic="TEXCOORD" input_set="0"/>
+                </instance_material>
+              </technique_common>
+            </bind_material>
+          </instance_geometry>
+        </node>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene>
+    <instance_visual_scene url="#Scene" />
+  </scene>
+</COLLADA>

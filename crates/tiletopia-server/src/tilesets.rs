@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Extension;
-use axum::extract::{Multipart, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use serde::Serialize;
@@ -540,23 +540,11 @@ async fn read_name(field: &mut axum::extract::multipart::Field<'_>) -> Result<St
     // the widest a character encodes to, so the byte count refuses only what the
     // character count would refuse too
     const MAX_NAME_BYTES: usize = MAX_NAME_CHARS * 4;
-    let too_long = || bad_request(format!("name is longer than {MAX_NAME_CHARS} characters"));
-
-    let mut bytes: Vec<u8> = Vec::new();
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|_| bad_request("could not read the name"))?
-    {
-        bytes.extend_from_slice(&chunk);
-        if bytes.len() > MAX_NAME_BYTES {
-            return Err(too_long());
-        }
-    }
-
-    let name = String::from_utf8(bytes).map_err(|_| bad_request("name is not text"))?;
+    let name = crate::upload::read_text_field(field, "name", MAX_NAME_BYTES).await?;
     if name.chars().count() > MAX_NAME_CHARS {
-        return Err(too_long());
+        return Err(bad_request(format!(
+            "name is longer than {MAX_NAME_CHARS} characters"
+        )));
     }
     Ok(name)
 }
@@ -572,7 +560,7 @@ fn may_modify(claims: &auth::Claims, tileset: &TilesetRecord) -> bool {
 pub async fn upload_tileset(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    mut multipart: Multipart,
+    mut multipart: crate::upload::UploadMultipart,
 ) -> Result<(StatusCode, Extension<AuditedResource>, Json<UploadResponse>), RouteError> {
     // the route sits behind require_editor, so a valid token is always present
     let owner_id = users::claims_from_headers(&headers)
@@ -584,11 +572,15 @@ pub async fn upload_tileset(
     let mut name = None;
     let mut source = None;
 
-    while let Some(mut field) = multipart
-        .next_field()
-        .await
-        .map_err(|_| bad_request("malformed multipart body"))?
-    {
+    loop {
+        let mut field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(error) => {
+                let _ = tokio::fs::remove_dir_all(&scratch).await;
+                return Err(error);
+            }
+        };
         match field.name().unwrap_or("") {
             "name" => match read_name(&mut field).await {
                 Ok(text) => name = Some(text),
@@ -683,16 +675,14 @@ pub async fn get_tileset(
     headers: HeaderMap,
 ) -> Result<Json<TilesetRecord>, StatusCode> {
     let claims = users::claims_from_headers(&headers)?;
-    let tileset = state
+    state
         .db
         .get_tileset(id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    if !may_modify(&claims, &tileset) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    Ok(Json(tileset))
+        .filter(|tileset| may_modify(&claims, tileset))
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 /// Drop the archive, its registry row and its martin source together, so no

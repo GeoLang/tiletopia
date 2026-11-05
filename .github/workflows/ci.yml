@@ -12,19 +12,14 @@ env:
   MAGO_VERSION: 1.16.2
   MAGO_SHA256: d37e58b634e91d7ce7ca046168b1db2cf950cd9b2ffacb826fd3b10a8d31f7e2
   TIPPECANOE_VERSION: 2.79.0
+  # matches the grokj2k-sys rev in Cargo.toml
+  GROK_REV: 00f9baaed2f41a8dadef1c62cf009d8e80064e9d
 
 jobs:
   check:
     strategy:
       matrix:
-        include:
-          # ubuntu-26.04 fails to compile draco-rs's generated PointCloud move constructor
-          - os: ubuntu-24.04
-            features: draco,plugin-dylib,ml,martin
-          - os: macos-latest
-            features: draco,plugin-dylib,ml,martin
-          - os: windows-latest
-            features: plugin-dylib,ml,martin
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -35,7 +30,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets --no-default-features --features ${{ matrix.features }} -- -D warnings
+        run: cargo clippy --all-targets --no-default-features --features plugin-dylib,ml,martin -- -D warnings
       # the mago jar ships linux/x64 and windows/x64 natives only, so the
       # external tiler test skips itself on macos
       - uses: actions/setup-java@v4
@@ -80,7 +75,71 @@ jobs:
           fi
           echo "$prefix/bin" >> "$GITHUB_PATH"
       - name: Test
-        run: cargo test --all --no-default-features --features ${{ matrix.features }}
+        run: cargo test --all --no-default-features --features plugin-dylib,ml,martin
+
+  jp2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/grok
+          key: grok-${{ env.GROK_REV }}-${{ runner.os }}
+      # grok's cmake builds its mercury crate with cargo, under this workflow's RUSTFLAGS
+      - name: Build Grok
+        env:
+          RUSTFLAGS: ""
+        run: |
+          prefix="$RUNNER_TEMP/grok"
+          if [ ! -f "$prefix/lib/pkgconfig/libgrokj2k.pc" ]; then
+            src="$RUNNER_TEMP/grok-src"
+            git init "$src"
+            git -C "$src" remote add origin https://github.com/GrokImageCompression/grok.git
+            git -C "$src" fetch --depth 1 origin "$GROK_REV"
+            git -C "$src" checkout FETCH_HEAD
+            git -C "$src" submodule update --init --recursive
+            cmake -S "$src" -B "$src/build" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="$prefix" \
+              -DCMAKE_INSTALL_LIBDIR=lib \
+              -DGRK_BUILD_CODEC=OFF \
+              -DGRK_BUILD_CORE_EXAMPLES=OFF \
+              -DGRK_BUILD_CORE_SWIG_BINDINGS=OFF \
+              -DGRK_BUILD_JPEG=OFF
+            cmake --build "$src/build" -j"$(nproc)"
+            cmake --install "$src/build"
+          fi
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Clippy
+        run: cargo clippy -p tiletopia-server --all-targets --features jp2 -- -D warnings
+      - name: Test
+        run: cargo test -p tiletopia-server --features jp2 jp2
+
+  validate-tiles:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compression: [none, meshopt, draco]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: scripts/tiles-validator/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # validate-tiles.sh runs scripts/check_dxf.py on a DXF export with uv
+      - uses: astral-sh/setup-uv@v10.3.3
+      - name: Tile the fixtures and run 3d-tiles-validator
+        run: scripts/validate-tiles.sh ${{ matrix.compression }}
 
   deny:
     runs-on: ubuntu-latest
@@ -96,7 +155,7 @@ jobs:
         continue-on-error: true
 
   coverage:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -106,7 +165,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage
-        run: cargo llvm-cov --features draco,plugin-dylib,ml --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --features plugin-dylib,ml --workspace --lcov --output-path lcov.info
       - name: Upload coverage
         uses: codecov/codecov-action@v4
         with:
@@ -121,4 +180,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build Docker image
         run: docker build -t tiletopia:ci .
+
+  ids-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sidecars/ids-check
+    steps:
+      - uses: actions/checkout@v4
+      # setup-uv publishes no floating major tag
+      - uses: astral-sh/setup-uv@v10.3.3
+      - run: uv sync --locked
+      - run: uv run pytest
+
+  ids-check-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t tiletopia-ids-check:ci sidecars/ids-check
 

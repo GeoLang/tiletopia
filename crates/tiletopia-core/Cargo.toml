@@ -6,8 +6,6 @@ license.workspace = true
 description = "Core tiling engine — spatial indexing, LOD generation, 3D Tiles output"
 
 [features]
-default = ["draco"]
-draco = ["dep:draco-rs"]
 plugin-dylib = ["dep:libloading"]
 ml = ["dep:reqwest"]
 
@@ -23,11 +21,14 @@ memmap2 = { workspace = true }
 projicio-core = { workspace = true }
 meshopt = { workspace = true }
 bytemuck = { workspace = true }
-draco-rs = { workspace = true, optional = true }
+draco-gltf = { workspace = true }
 libloading = { version = "0.8", optional = true }
 image = { workspace = true }
+basisu_c_sys = { workspace = true }
+flate2 = "1"
 reqwest = { version = "0.12", features = ["json"], optional = true }
 
 [dev-dependencies]
 criterion.workspace = true
 gltf = { workspace = true }
+ktx2 = { workspace = true }

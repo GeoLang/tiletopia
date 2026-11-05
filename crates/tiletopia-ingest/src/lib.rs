@@ -1,25 +1,31 @@
-//! tiletopia-ingest: geospatial format readers
-//!
-//! Parse point clouds (LAS/LAZ/E57/PLY), 3D models (glTF/OBJ/FBX/CityGML/CityJSON/IFC)
-//! and terrain (GeoTIFF/DTED/HGT/USGS DEM).
-
 pub mod citygml_reader;
 pub mod cityjson_reader;
 pub mod crs_detect;
+pub mod dae_reader;
+pub mod dem_wgs84;
 pub mod dted_reader;
+pub mod dxf_reader;
 pub mod e57_reader;
 pub mod fbx_reader;
 pub mod gltf_reader;
 pub mod hgt_reader;
+pub mod ifc_elements;
 pub mod ifc_reader;
 pub mod las_reader;
 pub mod obj_reader;
 pub mod ply_reader;
+pub mod splat_ply_reader;
 pub mod texture_image;
 pub mod tiff_reader;
 pub mod usgs_dem_reader;
 
 use thiserror::Error;
+
+// MeshData and the tiler's material group each have 24 + 12 + 8 bytes of position, normal and texcoord a vertex, and the tiler holds 12 more for simplification
+// TODO: measure peak bytes per vertex on a large public model before changing this or JOB_BUDGET_BYTES
+const BYTES_HELD_PER_VERTEX: u64 = 100;
+const BYTES_HELD_PER_MESH: u64 =
+    std::mem::size_of::<MeshData>() as u64 + tiletopia_core::mesh_tiler::TILER_BYTES_PER_MESH;
 
 /// Ingest errors.
 #[derive(Debug, Error)]
@@ -32,6 +38,12 @@ pub enum IngestError {
     Io(#[from] std::io::Error),
     #[error("reprojection error: {0}")]
     Reprojection(#[from] tiletopia_core::crs::ReprojError),
+    #[error("{0}")]
+    DemRefused(String),
+    #[error("{0}")]
+    SplatRefused(String),
+    #[error("{0}")]
+    ElementRefused(String),
 }
 
 /// A 3D point with optional colour and classification.
@@ -119,13 +131,43 @@ pub struct Heightmap {
     pub nodata: Option<f64>,
 }
 
+impl Heightmap {
+    pub fn elevation_at(&self, x: f64, y: f64) -> Option<f64> {
+        let [west, south, east, north] = self.bounds;
+        let last_column = (self.width - 1) as f64;
+        let last_row = (self.height - 1) as f64;
+        // tiff_reader::read bounds run to the pixel edges, dem_wgs84 moves them onto the outer samples
+        let column = (x - west) / (east - west) * last_column;
+        let row = (north - y) / (north - south) * last_row;
+        if !(0.0..=last_column).contains(&column) || !(0.0..=last_row).contains(&row) {
+            return None;
+        }
+
+        let (left, top) = (column as usize, row as usize);
+        let right = (left + 1).min(self.width - 1);
+        let bottom = (top + 1).min(self.height - 1);
+        let (east_weight, south_weight) = (column - left as f64, row - top as f64);
+        let at = |row: usize, column: usize| self.elevations[row * self.width + column];
+
+        // nan times a zero weight is still nan
+        let weighted = |value: f64, weight: f64| if weight == 0.0 { 0.0 } else { value * weight };
+        let top_edge =
+            weighted(at(top, left), 1.0 - east_weight) + weighted(at(top, right), east_weight);
+        let bottom_edge = weighted(at(bottom, left), 1.0 - east_weight)
+            + weighted(at(bottom, right), east_weight);
+        let elevation =
+            weighted(top_edge, 1.0 - south_weight) + weighted(bottom_edge, south_weight);
+        elevation.is_finite().then_some(elevation)
+    }
+}
+
 /// Mesh data from glTF/OBJ/etc.
 ///
 /// One material per mesh: a source mesh painted with several materials is read
 /// as several `MeshData`, which is what the GLB writer takes.
 #[derive(Debug, Clone)]
 pub struct MeshData {
-    pub positions: Vec<[f32; 3]>,
+    pub positions: Vec<[f64; 3]>,
     pub normals: Vec<[f32; 3]>,
     /// glTF UV space, origin at the top left. Empty, or one per position.
     pub texcoords: Vec<[f32; 2]>,
@@ -135,6 +177,8 @@ pub struct MeshData {
     /// The source element's stable identity, carried into the tiles as the
     /// `asset_id` feature property. IFC fills it with the element's GlobalId.
     pub asset_id: Option<String>,
+    pub class: Option<String>,
+    pub storey: Option<String>,
 }
 
 /// The single material a `MeshData` is painted with.
@@ -168,6 +212,8 @@ impl From<MeshData> for tiletopia_core::mesh_tiler::MeshData {
             indices: mesh.indices,
             name: mesh.name,
             asset_id: mesh.asset_id,
+            class: mesh.class,
+            storey: mesh.storey,
             base_color_factor,
             texture: texture.map(|texture| tiletopia_core::glb_writer::TextureData {
                 image_data: texture.image_data,
@@ -242,7 +288,11 @@ fn reproject_positions<T>(
 
 /// Read a heightmap from a GeoTIFF, DTED, or HGT file.
 pub fn read_heightmap(path: &std::path::Path) -> Result<Heightmap, IngestError> {
-    match path.extension().and_then(|e| e.to_str()) {
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase);
+    match extension.as_deref() {
         Some("tif" | "tiff") => tiff_reader::read(path),
         Some("dt0" | "dt1" | "dt2") => dted_reader::read(path),
         Some("hgt") => hgt_reader::read(path),
@@ -252,13 +302,20 @@ pub fn read_heightmap(path: &std::path::Path) -> Result<Heightmap, IngestError> 
     }
 }
 
-/// Read a 3D mesh from a glTF/GLB, OBJ, CityGML, or CityJSON file.
-pub fn read_mesh(path: &std::path::Path) -> Result<Vec<MeshData>, IngestError> {
-    match path.extension().and_then(|e| e.to_str()) {
+pub fn read_mesh(
+    path: &std::path::Path,
+    max_bytes_held: u64,
+) -> Result<Vec<MeshData>, IngestError> {
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
         Some("gltf" | "glb") => gltf_reader::read(path),
         Some("obj") => obj_reader::read(path),
         Some("fbx") => fbx_reader::read(path),
-        Some("ifc") => ifc_reader::read(path),
+        Some("dae") => dae_reader::read(path, max_bytes_held),
+        Some("ifc") => ifc_reader::read(path, max_bytes_held),
         Some("gml" | "xml") => citygml_reader::read(path),
         Some("json") => {
             // Check if it's CityJSON by peeking at the content

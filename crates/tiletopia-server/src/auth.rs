@@ -7,14 +7,14 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use jsonwebtoken::{DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::sync::Arc;
 
 use crate::AppState;
 use crate::api_keys::{ApiKey, Permission, RateLimitResult, hash_presented_key};
+use crate::global_terrain::GlobalTerrain;
 
-const TOOL_TOKEN_USE: &str = "tool";
 pub const TILETOPIA_READ_SCOPE: &str = "tiletopia:read";
 pub const TILETOPIA_WRITE_SCOPE: &str = "tiletopia:write";
 
@@ -30,18 +30,6 @@ pub struct Claims {
     /// [`Claims::parsed_role`], never by comparing the string, so an unknown
     /// role is refused instead of landing in a tier.
     pub role: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TokenClaims {
-    sub: String,
-    exp: usize,
-    #[serde(default)]
-    role: Option<String>,
-    #[serde(default)]
-    token_use: Option<String>,
-    #[serde(default)]
-    scope: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,44 +70,23 @@ pub(crate) fn verify_token_with_secret(
     token: &str,
     secret: &str,
 ) -> Result<AuthenticatedClaims, StatusCode> {
-    let claims = decode::<TokenClaims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
-    )
-    .map_err(|_| StatusCode::UNAUTHORIZED)?
-    .claims;
+    let verified =
+        platform_auth::verify_token(token, secret).map_err(|_| StatusCode::UNAUTHORIZED)?;
 
-    let (authority, role) = match claims.token_use.as_deref() {
-        None => (
+    let (authority, role) = match verified.authority {
+        platform_auth::TokenAuthority::Platform { role } => (
             TokenAuthority::Platform,
-            claims.role.ok_or(StatusCode::UNAUTHORIZED)?,
+            role.ok_or(StatusCode::UNAUTHORIZED)?,
         ),
-        Some(TOOL_TOKEN_USE) => {
-            if claims.sub.is_empty() || claims.role.is_some() {
-                return Err(StatusCode::UNAUTHORIZED);
-            }
-            let scopes = claims
-                .scope
-                .and_then(|scope| scope.as_array().cloned())
-                .ok_or(StatusCode::UNAUTHORIZED)?
-                .into_iter()
-                .map(|scope| {
-                    scope
-                        .as_str()
-                        .map(str::to_owned)
-                        .ok_or(StatusCode::UNAUTHORIZED)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+        platform_auth::TokenAuthority::Tool { scopes } => {
             (TokenAuthority::Tool(scopes), String::new())
         }
-        Some(_) => return Err(StatusCode::UNAUTHORIZED),
     };
 
     Ok(AuthenticatedClaims {
         claims: Claims {
-            sub: claims.sub,
-            exp: claims.exp,
+            sub: verified.sub,
+            exp: verified.exp,
             role,
         },
         authority,
@@ -175,6 +142,16 @@ fn auth_disabled() -> bool {
     std::env::var("TILETOPIA_AUTH_DISABLED").as_deref() == Ok("true")
 }
 
+fn utf8_jwt_secret(value: Option<OsString>) -> Result<Option<String>, String> {
+    value
+        .map(|secret| {
+            secret
+                .into_string()
+                .map_err(|_| "TILETOPIA_JWT_SECRET is set but not UTF-8".to_string())
+        })
+        .transpose()
+}
+
 /// Check the auth environment before serving. Returns Err when
 /// `TILETOPIA_JWT_SECRET` is missing or too short, so the server refuses to
 /// start rather than coming up with every write endpoint open. Explicitly
@@ -183,7 +160,7 @@ fn auth_disabled() -> bool {
 ///
 /// The error text carries the secret's length, never the secret.
 pub fn startup_check() -> Result<(), String> {
-    let secret = std::env::var("TILETOPIA_JWT_SECRET").ok();
+    let secret = utf8_jwt_secret(std::env::var_os("TILETOPIA_JWT_SECRET"))?;
     check_secret(secret.as_deref(), auth_disabled())
 }
 
@@ -192,7 +169,7 @@ pub fn startup_check() -> Result<(), String> {
 pub fn check_secret(secret: Option<&str>, auth_disabled: bool) -> Result<(), String> {
     if auth_disabled {
         // also on stderr: a warning this important must not depend on RUST_LOG
-        const MSG: &str = "TILETOPIA_AUTH_DISABLED=true: authentication is OFF, every endpoint is open to anonymous callers";
+        const MSG: &str = "TILETOPIA_AUTH_DISABLED=true: the auth middleware is OFF, so any route with no role or owner check of its own is open to anonymous callers. Routes that check a role or an owner still need a token";
         eprintln!("WARNING: {MSG}");
         tracing::warn!("{MSG}");
         return Ok(());
@@ -217,10 +194,6 @@ pub fn check_secret(secret: Option<&str>, auth_disabled: bool) -> Result<(), Str
 /// Path prefix of the realtime collaboration WebSocket.
 pub const REALTIME_PREFIX: &str = "/api/v1/realtime/";
 
-/// Subprotocol name that marks a WebSocket handshake as carrying a bearer token.
-/// See [`request_token`] for the full contract.
-pub const BEARER_SUBPROTOCOL: &str = "bearer";
-
 /// Whether this request is an anonymous tile-DATA read. CesiumJS and deck.gl
 /// fetch these with no Authorization header, so they stay open.
 ///
@@ -231,8 +204,8 @@ pub const BEARER_SUBPROTOCOL: &str = "bearer";
 /// auth for every GET. Adding a public route is now a deliberate edit here
 /// rather than a side effect of what the route is called.
 ///
-/// GET only, so the mutating `POST /v1/assets` and `POST /v1/tokens` stay
-/// behind auth. Anything not listed here is protected by default.
+/// GET only, so the mutating `POST /v1/assets` stays behind auth. Anything not
+/// listed here is protected by default.
 pub fn is_public_read(method: &Method, path: &str) -> bool {
     if *method != Method::GET {
         return false;
@@ -253,12 +226,31 @@ pub fn is_public_read(method: &Method, path: &str) -> bool {
         // one trailing segment the same way
         ["api", "v1", "assets", _, "data", _] => true,
 
+        // map libraries fetch imagery tiles and their TileJSON with no Authorization header
+        ["api", "v1", "assets", _, "imagery", "tilejson.json"] => true,
+        ["api", "v1", "assets", _, "imagery", _, _, _] => true,
+        // desktop GIS clients send WMTS and TMS requests with no Authorization header
+        ["api", "v1", "assets", _, "imagery", "wmts"] => true,
+        [
+            "api",
+            "v1",
+            "assets",
+            _,
+            "imagery",
+            "tms",
+            "tilemapresource.xml",
+        ] => true,
+        ["api", "v1", "assets", _, "imagery", "tms", _, _, _] => true,
+
+        // CzmlDataSource fetches the document like a tileset, with no token from this server
+        ["api", "v1", "assets", _, "czml"] => true,
+
         // quantized-mesh terrain: layer.json, the {z}/{x}/{y} tiles it
         // advertises, the terrain-rgb variant, and the same two under
         // /bundles/{name}/ for a prebuilt bundle. A terrain provider is a tile
-        // layer like any other and cannot send a header, and the bundle listing
-        // names directories an operator chose to serve, so the whole subtree is
-        // read-open.
+        // layer like any other and cannot send a header. The bundle listing is
+        // read-open too, and terrain_bundle::list_bundles scopes its answer to
+        // who is asking.
         ["api", "v1", "terrain", rest @ ..] => !rest.is_empty(),
 
         // On-demand terrain-analysis tiles. A map library fetches these with no
@@ -266,10 +258,6 @@ pub fn is_public_read(method: &Method, path: &str) -> bool {
         // segments are all matched, so the POST compute routes under
         // /api/v1/analysis/ stay gated.
         ["api", "v1", "analysis", "xyz", _, _, _, _] => true,
-
-        // Ion-compat reads
-        ["v1", "tokens"] => true,
-        ["v1", "assets", ..] => true,
 
         _ => false,
     }
@@ -432,29 +420,28 @@ async fn authorize_api_key(
 /// because proxies do not log request headers. It is scoped to the realtime
 /// path, so nowhere else does a subprotocol act as a credential.
 pub fn request_token<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> Option<&'a str> {
-    let header_token = headers
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+    let header_token = platform_auth::bearer_header_value(headers, "Authorization");
 
     let token = match header_token {
         Some(token) => Some(token),
-        None if uri.path().starts_with(REALTIME_PREFIX) => subprotocol_token(headers),
+        None if uri.path().starts_with(REALTIME_PREFIX) => {
+            platform_auth::subprotocol_token(headers)
+        }
         None => None,
     };
     token.filter(|t| !t.is_empty())
 }
 
-/// Token out of a `Sec-WebSocket-Protocol: bearer, <jwt>` offer. Order is fixed:
-/// the marker first, the token second, both in one header value, which is what
-/// `new WebSocket(url, ["bearer", jwt])` sends.
-fn subprotocol_token(headers: &HeaderMap) -> Option<&str> {
-    let offered = headers.get("Sec-WebSocket-Protocol")?.to_str().ok()?;
-    let mut entries = offered.split(',').map(str::trim);
-    if entries.next()? != BEARER_SUBPROTOCOL {
-        return None;
+fn is_global_terrain_endpoint(global_terrain: &GlobalTerrain, method: &Method, path: &str) -> bool {
+    if *method != Method::GET {
+        return false;
     }
-    entries.next()
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    // createWorldTerrainAsync takes no token option and asks for one fixed asset id
+    matches!(
+        segments.as_slice(),
+        ["v1", "assets", id, "endpoint"] if global_terrain.is_named_by_ion_id(id)
+    )
 }
 
 /// Auth middleware — validates the JWT in the Authorization header, or the API
@@ -474,7 +461,10 @@ pub async fn auth_middleware(
         return Ok(next.run(request).await);
     }
 
-    let secret = std::env::var("TILETOPIA_JWT_SECRET").ok();
+    let secret = utf8_jwt_secret(std::env::var_os("TILETOPIA_JWT_SECRET")).map_err(|error| {
+        tracing::error!("{error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // If no secret configured, allow all requests (development mode)
     let Some(secret) = secret else {
@@ -490,7 +480,13 @@ pub async fn auth_middleware(
         return Ok(next.run(request).await);
     }
 
-    if is_public_read(request.method(), request.uri().path()) {
+    if is_public_read(request.method(), request.uri().path())
+        || is_global_terrain_endpoint(
+            &state.global_terrain,
+            request.method(),
+            request.uri().path(),
+        )
+    {
         return Ok(next.run(request).await);
     }
 
@@ -673,6 +669,15 @@ mod tests {
         assert!(check_secret(None, true).is_ok());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_secret_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let error =
+            utf8_jwt_secret(Some(std::ffi::OsStr::from_bytes(&[0xff]).to_owned())).unwrap_err();
+        assert_eq!(error, "TILETOPIA_JWT_SECRET is set but not UTF-8");
+    }
+
     #[test]
     fn tile_data_reads_are_public() {
         assert!(is_public_read(
@@ -684,16 +689,52 @@ mod tests {
             &Method::GET,
             "/api/v1/assets/abc/tiles/037.glb"
         ));
-        assert!(is_public_read(&Method::GET, "/v1/assets"));
-        assert!(is_public_read(&Method::GET, "/v1/assets/1/endpoint"));
+    }
+
+    #[test]
+    fn ion_asset_reads_are_gated() {
+        for path in ["/v1/assets", "/v1/assets/1", "/v1/assets/1/endpoint"] {
+            assert!(!is_public_read(&Method::GET, path), "GET {path}");
+        }
+    }
+
+    #[test]
+    fn only_the_configured_id_endpoint_skips_the_token() {
+        let global_terrain = GlobalTerrain::new(crate::global_terrain::GlobalTerrainSettings {
+            dem_url: None,
+            geoid_url: None,
+            cache_dir: None,
+            cache_bytes: 1,
+            ion_asset_id: Some(1),
+        });
+        assert!(is_global_terrain_endpoint(
+            &global_terrain,
+            &Method::GET,
+            "/v1/assets/1/endpoint"
+        ));
+        for path in [
+            "/v1/assets/2/endpoint",
+            "/v1/assets/1",
+            "/v1/assets/1/uploadComplete",
+            "/v1/assets",
+        ] {
+            assert!(
+                !is_global_terrain_endpoint(&global_terrain, &Method::GET, path),
+                "GET {path}"
+            );
+        }
+        assert!(!is_global_terrain_endpoint(
+            &global_terrain,
+            &Method::POST,
+            "/v1/assets/1/endpoint"
+        ));
     }
 
     #[test]
     fn terrain_reads_are_public() {
         assert!(is_public_read(&Method::GET, "/api/v1/terrain/layer.json"));
         assert!(is_public_read(&Method::GET, "/api/v1/terrain/12/2200/1400"));
-        // a prebuilt bundle is the same tile layer from a directory, and the
-        // listing is the names an operator chose to host
+        // a prebuilt bundle is the same tile layer from a directory
         assert!(is_public_read(&Method::GET, "/api/v1/terrain/bundles"));
         assert!(is_public_read(
             &Method::GET,
@@ -711,7 +752,6 @@ mod tests {
             "/api/v1/terrain/layer.json",
             "/api/v1/assets/abc/tileset.json",
             "/v1/assets",
-            "/v1/tokens",
         ] {
             assert!(!is_public_read(&Method::POST, path), "POST {path}");
             assert!(!is_public_read(&Method::PUT, path), "PUT {path}");
@@ -759,6 +799,16 @@ mod tests {
             "/api/v1/assets/8d1f/tiles/root.glb",
             "/api/v1/assets/8d1f/tiles/037.glb",
             "/api/v1/assets/8d1f/tiles/0.b3dm",
+            // imagery::imagery_routes
+            "/api/v1/assets/8d1f/imagery/tilejson.json",
+            "/api/v1/assets/8d1f/imagery/12/2132/1493.png",
+            // imagery_services::imagery_service_routes
+            "/api/v1/assets/8d1f/imagery/wmts",
+            "/api/v1/assets/8d1f/imagery/wmts/1.0.0/WMTSCapabilities.xml",
+            "/api/v1/assets/8d1f/imagery/tms/tilemapresource.xml",
+            "/api/v1/assets/8d1f/imagery/tms/12/2132/2602.png",
+            // czml::czml_routes
+            "/api/v1/assets/8d1f/czml",
             // terrain_api.rs:55-56, terrain_rgb.rs:29
             "/api/v1/terrain/layer.json",
             "/api/v1/terrain/12/2200/1400",
@@ -766,11 +816,6 @@ mod tests {
             // analysis_tiles::analysis_tile_routes
             "/api/v1/analysis/xyz/hillshade/12/2132/1493.png",
             "/api/v1/analysis/xyz/slope/12/2132/1493.png",
-            // ion_compat.rs:91-94
-            "/v1/assets",
-            "/v1/assets/42",
-            "/v1/assets/42/endpoint",
-            "/v1/tokens",
         ] {
             assert!(is_public_read(&Method::GET, path), "GET {path}");
         }
@@ -804,15 +849,51 @@ mod tests {
             "/api/v1/assets",
             "/api/v1/assets/8d1f",
             "/api/v1/assets/8d1f/annotations",
+            "/api/v1/assets/8d1f/imagery",
+            "/api/v1/assets/8d1f/imagery/12/2132",
+            "/api/v1/assets/8d1f/imagery/tms",
+            "/api/v1/assets/8d1f/imagery/tms/12",
             "/api/v1/terrain",
             "/api/v1/terrain-rgb/12/2200/1400",
             "/v1/assetsandmore",
+            "/v1/tokens",
             "/v1/tokens/42",
             // not anchored at the root
             "/proxy/api/v1/terrain/layer.json",
             "/proxy/api/v1/assets/8d1f/tileset.json",
         ] {
             assert!(!is_public_read(&Method::GET, path), "GET {path}");
+        }
+    }
+
+    #[test]
+    fn element_routes_are_never_a_public_read() {
+        for path in [
+            "/v1/assets/42/elements",
+            "/v1/assets/42/elements/",
+            "/v1/assets/42/elements/2O2Fr$t4X7Zf8NOew3FLOH",
+            "/v1/assets/42/elements/search",
+            "/v1/assets/42/elements/aggregate",
+            "/v1/assets/42/elements/properties",
+            "/v1/assets/42/elements/property-index",
+            "/v1/assets/42/tree/children",
+            "/v1/assets/42/tree/children/",
+            "/v1/assets/42/tree/parents",
+            "/v1//assets/42/elements",
+            "//v1/assets/42//elements",
+            "/v1/assets/42/%65lements",
+            "/v1/assets/42/ELEMENTS",
+            "/v1/assets/42/%2Felements",
+            "/v1/assets/42%2Felements/search",
+            "/v1/assets/42/endpoint/../elements",
+            "/v1/assets/42/endpoint/elements",
+        ] {
+            assert!(!is_public_read(&Method::GET, path), "GET {path}");
+            assert_eq!(
+                route_access(&Method::GET, path),
+                RouteAccess::None,
+                "{path}"
+            );
         }
     }
 
@@ -835,6 +916,10 @@ mod tests {
         for path in [
             "/api/v1/assets/8d1f/tiles/0.b3dm",
             "/api/v1/assets/8d1f/tileset.json",
+            "/api/v1/assets/8d1f/imagery/tilejson.json",
+            "/api/v1/assets/8d1f/imagery/12/2132/1493.png",
+            "/api/v1/assets/8d1f/imagery/wmts",
+            "/api/v1/assets/8d1f/imagery/tms/12/2132/2602.png",
             "/api/v1/terrain/12/2200/1400",
             "/api/v1/analysis/xyz/hillshade/12/2132/1493.png",
             "/v1/assets/42",
@@ -937,7 +1022,6 @@ mod tests {
             "/api/v1/portal/items",
             "/api/v1/tilesets",
             "/v1/assets",
-            "/v1/tokens",
         ] {
             for method in [Method::GET, Method::POST, Method::DELETE, Method::PUT] {
                 assert_eq!(

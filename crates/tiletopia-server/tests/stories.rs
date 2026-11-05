@@ -98,7 +98,7 @@ async fn a_viewer_cannot_write_a_story() {
 
     let listed = send(&state, empty_request("GET", "/api/v1/stories", &viewer)).await;
     assert_eq!(listed.status, StatusCode::OK);
-    assert_eq!(listed.body.as_array().unwrap().len(), 1);
+    assert_eq!(listed.body.as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]

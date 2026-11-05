@@ -6,7 +6,7 @@
 use crate::Texture;
 use image::ImageFormat;
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const PNG_MIME: &str = "image/png";
 const JPEG_MIME: &str = "image/jpeg";
@@ -115,14 +115,18 @@ fn encode_png(image: &image::DynamicImage, source: &str) -> Option<Texture> {
     })
 }
 
-/// Where a texture named by a mesh file sits on disk. Backslashes come from
-/// files authored on Windows, and an absolute path from another machine is
-/// retried as a bare file name beside the mesh.
+pub(crate) fn stays_inside_the_mesh_directory(name: &str) -> bool {
+    Path::new(name)
+        .components()
+        .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
 pub fn resolve(mesh_dir: &Path, name: &str) -> Option<PathBuf> {
+    // texture paths in meshes authored on windows have backslashes
     let name = name.replace('\\', "/");
 
     let beside_the_mesh = mesh_dir.join(&name);
-    if beside_the_mesh.is_file() {
+    if stays_inside_the_mesh_directory(&name) && beside_the_mesh.is_file() {
         return Some(beside_the_mesh);
     }
 
@@ -130,11 +134,6 @@ pub fn resolve(mesh_dir: &Path, name: &str) -> Option<PathBuf> {
     let by_file_name = mesh_dir.join(file_name);
     if by_file_name.is_file() {
         return Some(by_file_name);
-    }
-
-    let absolute = Path::new(&name);
-    if absolute.is_file() {
-        return Some(absolute.to_path_buf());
     }
 
     tracing::warn!(
@@ -197,6 +196,23 @@ mod tests {
         assert_eq!(resolved, dir.path().join("wall.png"));
 
         assert!(resolve(dir.path(), "missing.png").is_none());
+    }
+
+    #[test]
+    fn a_texture_path_cannot_leave_the_mesh_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("secret.png");
+        std::fs::write(&outside, png_bytes(1, 1)).unwrap();
+        let mesh_dir = dir.path().join("asset");
+        std::fs::create_dir_all(mesh_dir.join("textures")).unwrap();
+        std::fs::write(mesh_dir.join("textures/wall.png"), png_bytes(1, 1)).unwrap();
+
+        assert!(resolve(&mesh_dir, "../secret.png").is_none());
+        assert!(resolve(&mesh_dir, outside.to_str().unwrap()).is_none());
+        assert_eq!(
+            resolve(&mesh_dir, "textures/wall.png"),
+            Some(mesh_dir.join("textures/wall.png"))
+        );
     }
 
     #[test]

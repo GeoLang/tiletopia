@@ -4,6 +4,9 @@ aws_region    = "us-east-1"
 project_name  = "tiletopia"
 environment   = "prod"
 
+# Required: the http or https origin clients reach this server at, with no path or trailing slash
+ion_base_url = "https://tiles.yourdomain.com"
+
 # Fargate sizing (see https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html)
 cpu    = 512   # 0.5 vCPU  (~$15/month)
 memory = 1024  # 1 GB

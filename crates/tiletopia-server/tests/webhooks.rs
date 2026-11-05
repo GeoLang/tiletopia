@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
+use tiletopia_core::glb_writer::MeshCompression;
 use tiletopia_server::db::ModelPlacement;
 use tiletopia_server::webhooks::{
     DELIVERY_HEADER, EVENT_HEADER, MAX_ATTEMPTS, SIGNATURE_HEADER, WebhookEvent,
@@ -218,12 +219,9 @@ async fn wait_for_recorded_delivery(
     }
 }
 
-/// Drive both workers until the asset's only job settles, so the job's event is
-/// queued for delivery.
 async fn settle_only_job(state: &Arc<AppState>, asset_id: Uuid) -> tiletopia_server::db::JobRecord {
     use tiletopia_server::db::JobStatus;
 
-    let worker = Arc::clone(&state.job_queue).start().await;
     let deadline = std::time::Instant::now() + WAIT_LIMIT;
     let mut settled = None;
     while std::time::Instant::now() < deadline {
@@ -235,7 +233,6 @@ async fn settle_only_job(state: &Arc<AppState>, asset_id: Uuid) -> tiletopia_ser
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    worker.abort();
     settled.expect("job never settled")
 }
 
@@ -545,11 +542,11 @@ async fn subscribing_refuses_an_unknown_event_and_a_url_that_is_not_http() {
         ),
         (
             serde_json::json!({ "url": "file:///etc/passwd", "events": ["asset.deleted"] }),
-            "not http or https",
+            "must be http or https",
         ),
         (
             serde_json::json!({ "url": "/hook", "events": ["asset.deleted"] }),
-            "not a URL",
+            "not a url",
         ),
         (
             serde_json::json!({
@@ -575,6 +572,156 @@ async fn subscribing_refuses_an_unknown_event_and_a_url_that_is_not_http() {
     }
 }
 
+struct Subscribers {
+    owner: ReceivedDeliveries,
+    stranger: ReceivedDeliveries,
+    admin: ReceivedDeliveries,
+}
+
+async fn subscribers_to(state: &Arc<AppState>, event: WebhookEvent, owner: &str) -> Subscribers {
+    let stranger_bearer = common::token("event-stranger", "editor");
+    let owner_bearer = common::token(owner, "editor");
+    let admin_bearer = common::stored_admin_token(state).await;
+    let mut received = Vec::new();
+    for bearer in [&owner_bearer, &stranger_bearer, &admin_bearer] {
+        let (url, deliveries) = receiver(StatusCode::OK).await;
+        subscribe(state, bearer, &url, &[event.name()]).await;
+        received.push(deliveries);
+    }
+    let admin = received.pop().unwrap();
+    let stranger = received.pop().unwrap();
+    let owner = received.pop().unwrap();
+    Subscribers {
+        owner,
+        stranger,
+        admin,
+    }
+}
+
+fn delivery_count(deliveries: &ReceivedDeliveries) -> usize {
+    deliveries.lock().unwrap().len()
+}
+
+#[tokio::test]
+async fn asset_deleted_reaches_only_subscriptions_whose_creator_may_view_the_asset() {
+    let state = common::test_state().await;
+    let subscribers = subscribers_to(&state, WebhookEvent::AssetDeleted, "event-owner").await;
+
+    let (asset_id, _) = staged_asset(&state, "event-owner", CUBE_OBJ).await;
+    let deleted = send(
+        &state,
+        empty_request(
+            "DELETE",
+            &format!("/api/v1/assets/{asset_id}"),
+            &common::token("event-owner", "editor"),
+        ),
+    )
+    .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.text);
+
+    state.webhooks.deliver_due().await;
+    assert_eq!(delivery_count(&subscribers.owner), 1);
+    assert_eq!(delivery_count(&subscribers.admin), 1);
+    assert_eq!(delivery_count(&subscribers.stranger), 0);
+}
+
+#[tokio::test]
+async fn an_admin_deleting_an_asset_still_tells_its_owner_and_not_a_stranger() {
+    let state = common::test_state().await;
+    let subscribers = subscribers_to(&state, WebhookEvent::AssetDeleted, "event-owner").await;
+
+    let (asset_id, _) = staged_asset(&state, "event-owner", CUBE_OBJ).await;
+    let deleted = send(
+        &state,
+        empty_request(
+            "DELETE",
+            &format!("/api/v1/assets/{asset_id}"),
+            &common::token("some-admin", "admin"),
+        ),
+    )
+    .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.text);
+
+    state.webhooks.deliver_due().await;
+    assert_eq!(delivery_count(&subscribers.owner), 1);
+    assert_eq!(delivery_count(&subscribers.stranger), 0);
+}
+
+#[tokio::test]
+async fn a_job_event_reaches_only_subscriptions_whose_creator_may_view_the_asset() {
+    let state = common::test_state().await;
+    let subscribers = subscribers_to(&state, WebhookEvent::JobFailed, "event-owner").await;
+    // job_queue emits after it writes the settled row, and aborting this worker cancels the emit
+    let _job_worker = Arc::clone(&state.job_queue).start().await;
+
+    // a mesh with no placement fails its job
+    let (asset_id, input) = staged_asset(&state, "event-owner", CUBE_OBJ).await;
+    state
+        .job_queue
+        .submit(
+            asset_id,
+            input,
+            ModelPlacement::default(),
+            MeshCompression::None,
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let settled = settle_only_job(&state, asset_id).await;
+    assert_eq!(settled.status, tiletopia_server::db::JobStatus::Failed);
+
+    // job_queue writes the settled row before it emits
+    let deadline = std::time::Instant::now() + WAIT_LIMIT;
+    while state.webhooks.pending_count().await == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no delivery was queued"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    state.webhooks.deliver_due().await;
+    assert_eq!(delivery_count(&subscribers.owner), 1);
+    assert_eq!(delivery_count(&subscribers.admin), 1);
+    assert_eq!(delivery_count(&subscribers.stranger), 0);
+}
+
+#[tokio::test]
+async fn an_event_for_an_ownerless_asset_reaches_admins_alone() {
+    let state = common::test_state().await;
+    let subscribers = subscribers_to(&state, WebhookEvent::AssetDeleted, "event-owner").await;
+
+    let asset = Asset {
+        id: Uuid::new_v4(),
+        name: "legacy".into(),
+        asset_type: AssetType::Model,
+        status: AssetStatus::Ready,
+        created_at: chrono::Utc::now(),
+        tile_count: 0,
+        size_bytes: 0,
+        description: String::new(),
+        tags: Vec::new(),
+        owner_id: None,
+    };
+    state.db.create_asset(&asset).await.unwrap();
+    let deleted = send(
+        &state,
+        empty_request(
+            "DELETE",
+            &format!("/api/v1/assets/{}", asset.id),
+            &common::token("some-admin", "admin"),
+        ),
+    )
+    .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.text);
+
+    state.webhooks.deliver_due().await;
+    assert_eq!(delivery_count(&subscribers.admin), 1);
+    assert_eq!(delivery_count(&subscribers.owner), 0);
+    assert_eq!(delivery_count(&subscribers.stranger), 0);
+}
+
 /// The events route advertises exactly what the server emits: one subscription
 /// takes every advertised event, and the three real paths that emit fill it.
 #[tokio::test]
@@ -582,6 +729,8 @@ async fn the_advertised_event_types_are_exactly_the_ones_the_server_emits() {
     let state = common::test_state().await;
     let editor = common::token("editor-eight", "editor");
     let worker = Arc::clone(&state.webhooks).start();
+    // job_queue emits after it writes the settled row, and aborting this worker cancels the emit
+    let _job_worker = Arc::clone(&state.job_queue).start().await;
 
     let advertised = send(
         &state,
@@ -612,7 +761,11 @@ async fn the_advertised_event_types_are_exactly_the_ones_the_server_emits() {
                 longitude: Some(10.0),
                 latitude: Some(20.0),
                 crs: None,
+                units: None,
             },
+            MeshCompression::None,
+            Default::default(),
+            Default::default(),
         )
         .await
         .unwrap();
@@ -628,7 +781,14 @@ async fn the_advertised_event_types_are_exactly_the_ones_the_server_emits() {
     let (failed_asset, failed_input) = staged_asset(&state, "editor-eight", CUBE_OBJ).await;
     state
         .job_queue
-        .submit(failed_asset, failed_input, ModelPlacement::default())
+        .submit(
+            failed_asset,
+            failed_input,
+            ModelPlacement::default(),
+            MeshCompression::None,
+            Default::default(),
+            Default::default(),
+        )
         .await
         .unwrap();
     let settled = settle_only_job(&state, failed_asset).await;

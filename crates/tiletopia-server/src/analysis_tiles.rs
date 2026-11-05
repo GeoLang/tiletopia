@@ -67,10 +67,10 @@ use crate::users::to_hex;
 
 /// Zooms past this are refused: the tile maths shifts by `z`, and no viewer
 /// asks for more than sub-metre pixels anyway.
-const MAX_ZOOM: u8 = 22;
+pub(crate) const MAX_ZOOM: u8 = 22;
 
 /// Chunk cache budget per engine.
-const CHUNK_BUDGET_BYTES: usize = 64 << 20;
+pub(crate) const CHUNK_BUDGET_BYTES: usize = 64 << 20;
 
 /// How many engines to keep. A viewer runs one or two analysis layers at a
 /// time, and each engine holds a cache of its own.
@@ -341,7 +341,7 @@ impl AnalysisEngines {
     /// A render slot, waiting up to the horizon for one to free, `None` when it
     /// does not. The permit is held for the pull, so the slot count is the
     /// number of tiles being computed at once.
-    async fn render_slot(&self) -> Option<SemaphorePermit<'_>> {
+    pub(crate) async fn render_slot(&self) -> Option<SemaphorePermit<'_>> {
         timeout(self.render_wait, self.render_slots.acquire())
             .await
             .ok()?
@@ -495,19 +495,19 @@ async fn analysis_tile(
 
 /// Web mercator's latitude edge: the projection sends the poles to infinity,
 /// so an export bbox is clamped to the square domain first.
-const MERCATOR_MAX_LAT: f64 = 85.05112878;
+pub(crate) const MERCATOR_MAX_LAT: f64 = 85.05112878;
 
-const WEB_MERCATOR_EXTENT: f64 = 20037508.342789244;
+pub(crate) const WEB_MERCATOR_EXTENT: f64 = 20037508.342789244;
 
 /// Pixels one export may cover. 4096 squared f64 pixels is 128 MiB per band in
 /// flight, roughly what one authenticated request may pin.
 const EXPORT_MAX_PIXELS: f64 = 4096.0 * 4096.0;
 
-fn mercator_x(lon: f64) -> f64 {
+pub(crate) fn mercator_x(lon: f64) -> f64 {
     lon / 180.0 * WEB_MERCATOR_EXTENT
 }
 
-fn mercator_y(lat: f64) -> f64 {
+pub(crate) fn mercator_y(lat: f64) -> f64 {
     lat.to_radians().tan().asinh() / std::f64::consts::PI * WEB_MERCATOR_EXTENT
 }
 
@@ -566,7 +566,7 @@ fn export_grid(bbox: [f64; 4], resolution: f64) -> Result<ExportGrid, String> {
 
 /// Overviews down to roughly one 512 px tile, capped where deeper levels stop
 /// buying a viewer anything.
-fn overview_levels(cols: usize, rows: usize) -> u32 {
+pub(crate) fn overview_levels(cols: usize, rows: usize) -> u32 {
     let max_side = cols.max(rows) as f64;
     (max_side / 512.0).log2().ceil().clamp(0.0, 5.0) as u32
 }

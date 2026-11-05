@@ -373,7 +373,7 @@ impl RangeRead for RangeSource {
 
 /// Shared blocking client. Every call sits on a blocking thread, which is what
 /// `reqwest::blocking` requires, and one client keeps one connection pool.
-fn http_client() -> &'static reqwest::blocking::Client {
+pub(crate) fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()

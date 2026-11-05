@@ -1,6 +1,8 @@
 //! Persistent SQLite database for assets, jobs, API keys, webhook subscriptions
 //! and scheduled jobs.
 
+use std::collections::{HashMap, HashSet};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqlitePoolOptions;
@@ -9,10 +11,14 @@ use uuid::Uuid;
 
 use crate::api_keys::{ApiKey, Permission, RateLimitTier};
 use crate::audit::{AuditAction, AuditEntry, AuditQuery};
+use crate::ion_upload::{IonUpload, MOST_ASSETS_AWAITING_FILES_PER_OWNER};
+use crate::photogrammetry::PhotogrammetryPreset;
 use crate::scheduler::{Outcome, RunOutcome, Schedule, ScheduledAction, ScheduledJob};
 use crate::users::{Organization, User, UserRole};
 use crate::webhooks::{WebhookEvent, WebhookSubscription};
 use crate::{Asset, AssetStatus, AssetType};
+use tiletopia_core::glb_writer::MeshCompression;
+use tiletopia_core::mesh_tiler::TextureCompression;
 
 /// Where a model with local coordinates sits on the globe, and which CRS its
 /// coordinates are in. The uploader supplies these, the external tiler has its
@@ -22,6 +28,7 @@ pub struct ModelPlacement {
     pub longitude: Option<f64>,
     pub latitude: Option<f64>,
     pub crs: Option<String>,
+    pub units: Option<String>,
 }
 
 /// Persistent database record for a tiling job.
@@ -41,6 +48,12 @@ pub struct JobRecord {
     pub tiles_written: u64,
     #[serde(default)]
     pub placement: ModelPlacement,
+    #[serde(default)]
+    pub mesh_compression: MeshCompression,
+    #[serde(default)]
+    pub texture_compression: TextureCompression,
+    #[serde(default)]
+    pub photogrammetry_preset: PhotogrammetryPreset,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -121,7 +134,7 @@ pub enum SignupOutcome {
 const ASSET_COLUMNS: &str =
     "id, name, asset_type, status, created_at, tile_count, size_bytes, description, tags, owner_id";
 
-const JOB_COLUMNS: &str = "id, asset_id, status, progress, input_path, output_format, created_at, started_at, completed_at, error, points_processed, tiles_written, longitude, latitude, crs";
+const JOB_COLUMNS: &str = "id, asset_id, status, progress, input_path, output_format, created_at, started_at, completed_at, error, points_processed, tiles_written, longitude, latitude, crs, mesh_compression, texture_compression, units, photogrammetry_preset";
 
 const TILESET_COLUMNS: &str = "id, name, status, source_id, object_key, original_filename, layer_name, argv, size_bytes, created_at, started_at, built_at, error, owner_id";
 
@@ -132,6 +145,9 @@ const WEBHOOK_COLUMNS: &str = "id, url, events, secret, created_by, active, crea
 const SCHEDULED_JOB_COLUMNS: &str = "id, name, action, schedule, enabled, created_by, created_at, next_run, last_run, last_outcome, last_detail, run_count, consecutive_failures";
 
 const AUDIT_COLUMNS: &str = "id, timestamp, user_id, action, resource_type, resource_id, details, ip_address, org_id, success";
+
+const ION_UPLOAD_COLUMNS: &str =
+    "asset_id, access_key, secret_access_key, session_token, expires_at, tiling";
 
 fn enum_to_str<T: Serialize>(val: &T) -> String {
     serde_json::to_string(val)
@@ -215,11 +231,24 @@ impl Database {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS ion_id_counter (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                last_ion_id INTEGER NOT NULL
+                last_ion_id INTEGER NOT NULL,
+                reserved_ion_id INTEGER
             )",
         )
         .execute(&self.pool)
         .await?;
+
+        let has_reserved_ion_id = sqlx::query(
+            "SELECT 1 FROM pragma_table_info('ion_id_counter') WHERE name = 'reserved_ion_id'",
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some();
+        if !has_reserved_ion_id {
+            sqlx::query("ALTER TABLE ion_id_counter ADD COLUMN reserved_ion_id INTEGER")
+                .execute(&self.pool)
+                .await?;
+        }
 
         // the counter only ever climbs, so deleting an asset does not put its
         // number back in circulation for a client holding a stale link
@@ -247,7 +276,13 @@ impl Database {
                 tiles_written INTEGER DEFAULT 0,
                 longitude REAL,
                 latitude REAL,
-                crs TEXT
+                crs TEXT,
+                mesh_compression TEXT NOT NULL DEFAULT 'none' CHECK (mesh_compression IN ('none', 'meshopt', 'draco')),
+                texture_compression TEXT NOT NULL DEFAULT 'none'
+                    CHECK (texture_compression IN ('none', 'ktx2')),
+                units TEXT,
+                photogrammetry_preset TEXT NOT NULL DEFAULT 'default'
+                    CHECK (photogrammetry_preset IN ('fast', 'default', 'high_quality'))
             )",
         )
         .execute(&self.pool)
@@ -256,7 +291,17 @@ impl Database {
         // jobs predates the placement the external tiler takes. same
         // ADD COLUMN dance as assets above; rows written before this stay NULL,
         // which is what "the uploader gave no placement" already means
-        for column in ["longitude REAL", "latitude REAL", "crs TEXT"] {
+        for column in [
+            "longitude REAL",
+            "latitude REAL",
+            "crs TEXT",
+            "mesh_compression TEXT NOT NULL DEFAULT 'none' CHECK (mesh_compression IN ('none', 'meshopt', 'draco'))",
+            "texture_compression TEXT NOT NULL DEFAULT 'none' \
+             CHECK (texture_compression IN ('none', 'ktx2'))",
+            "units TEXT",
+            "photogrammetry_preset TEXT NOT NULL DEFAULT 'default' \
+             CHECK (photogrammetry_preset IN ('fast', 'default', 'high_quality'))",
+        ] {
             let name = column.split(' ').next().unwrap_or_default();
             let present = sqlx::query("SELECT 1 FROM pragma_table_info('jobs') WHERE name = ?")
                 .bind(name)
@@ -503,6 +548,81 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        // expires_at is unix seconds
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS ion_uploads (
+                asset_id TEXT PRIMARY KEY REFERENCES assets(id),
+                access_key TEXT NOT NULL UNIQUE,
+                secret_access_key TEXT NOT NULL,
+                session_token TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                tiling TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS asset_versions (
+                asset_id TEXT PRIMARY KEY,
+                base_asset_id TEXT NOT NULL,
+                version_number INTEGER NOT NULL,
+                UNIQUE (base_asset_id, version_number)
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS change_reports (
+                id TEXT PRIMARY KEY,
+                from_asset_id TEXT NOT NULL,
+                to_asset_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                added INTEGER NOT NULL DEFAULT 0,
+                removed INTEGER NOT NULL DEFAULT 0,
+                changed INTEGER NOT NULL DEFAULT 0,
+                unchanged INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                UNIQUE (from_asset_id, to_asset_id)
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS bcf_topics (
+                base_asset_id TEXT NOT NULL,
+                guid TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                PRIMARY KEY (base_asset_id, guid)
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS bcf_projects (
+                base_asset_id TEXT PRIMARY KEY,
+                project TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS ids_checks (
+                asset_id TEXT PRIMARY KEY,
+                ids_file_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                checked_at TEXT,
+                error TEXT
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -544,9 +664,12 @@ impl Database {
 
         // one statement, so two creates at once take different numbers, and the
         // unique index on ion_id refuses a repeat rather than leaving two assets
-        // a client cannot tell apart
+        // a client cannot tell apart. sqlite's IS answers 1 or 0, and 0 for a NULL
+        // reservation
         let ion_id: i64 = sqlx::query_scalar(
-            "UPDATE ion_id_counter SET last_ion_id = last_ion_id + 1 WHERE id = 1 RETURNING last_ion_id",
+            "UPDATE ion_id_counter
+             SET last_ion_id = last_ion_id + 1 + (last_ion_id + 1 IS reserved_ion_id)
+             WHERE id = 1 RETURNING last_ion_id",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -570,6 +693,14 @@ impl Database {
         .await?;
 
         Ok(ion_id)
+    }
+
+    pub async fn set_reserved_ion_id(&self, ion_id: Option<i64>) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE ion_id_counter SET reserved_ion_id = ? WHERE id = 1")
+            .bind(ion_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn get_asset(&self, id: Uuid) -> Result<Option<Asset>, sqlx::Error> {
@@ -665,6 +796,14 @@ impl Database {
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
+        sqlx::query("DELETE FROM ion_uploads WHERE asset_id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM asset_versions WHERE asset_id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
         sqlx::query("DELETE FROM assets WHERE id = ?")
             .bind(id.to_string())
             .execute(&self.pool)
@@ -684,7 +823,7 @@ impl Database {
 
         sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO jobs ({JOB_COLUMNS})
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )))
         .bind(&id)
         .bind(&asset_id)
@@ -701,6 +840,10 @@ impl Database {
         .bind(job.placement.longitude)
         .bind(job.placement.latitude)
         .bind(&job.placement.crs)
+        .bind(enum_to_str(&job.mesh_compression))
+        .bind(enum_to_str(&job.texture_compression))
+        .bind(&job.placement.units)
+        .bind(enum_to_str(&job.photogrammetry_preset))
         .execute(&self.pool)
         .await?;
 
@@ -756,10 +899,16 @@ impl Database {
         Ok(())
     }
 
-    pub async fn next_queued_job(&self) -> Result<Option<JobRecord>, sqlx::Error> {
+    pub async fn next_queued_job(
+        &self,
+        excluded_asset_ids: &[Uuid],
+    ) -> Result<Option<JobRecord>, sqlx::Error> {
         let row = sqlx::query(AssertSqlSafe(format!(
-            "SELECT {JOB_COLUMNS} FROM jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
+            "SELECT {JOB_COLUMNS} FROM jobs
+             WHERE status = 'queued' AND asset_id NOT IN (SELECT value FROM json_each(?))
+             ORDER BY created_at ASC LIMIT 1"
         )))
+        .bind(serde_json::json!(excluded_asset_ids).to_string())
         .fetch_optional(&self.pool)
         .await?;
 
@@ -1180,6 +1329,107 @@ impl Database {
         .await?;
 
         Ok(result.rows_affected())
+    }
+
+    // -- Ion uploads --
+
+    pub async fn create_ion_upload(&self, upload: &IonUpload) -> Result<bool, sqlx::Error> {
+        // sqlite holds its write lock across one statement, so two creates cannot both take the last place
+        let result = sqlx::query(
+            "INSERT INTO ion_uploads \
+             (asset_id, access_key, secret_access_key, session_token, expires_at, tiling) \
+             SELECT ?, ?, ?, ?, ?, ? \
+             WHERE (SELECT COUNT(*) FROM ion_uploads \
+                    JOIN assets ON assets.id = ion_uploads.asset_id \
+                    WHERE assets.owner_id = (SELECT owner_id FROM assets WHERE id = ?)) < ?",
+        )
+        .bind(upload.asset_id.to_string())
+        .bind(&upload.access_key)
+        .bind(&upload.secret_access_key)
+        .bind(&upload.session_token)
+        .bind(upload.expires_at.timestamp())
+        .bind(to_json(&upload.tiling))
+        .bind(upload.asset_id.to_string())
+        .bind(MOST_ASSETS_AWAITING_FILES_PER_OWNER)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn ion_upload_by_access_key(
+        &self,
+        access_key: &str,
+    ) -> Result<Option<IonUpload>, sqlx::Error> {
+        let row = sqlx::query(AssertSqlSafe(format!(
+            "SELECT {ION_UPLOAD_COLUMNS} FROM ion_uploads WHERE access_key = ?"
+        )))
+        .bind(access_key)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.as_ref().map(row_to_ion_upload).transpose()
+    }
+
+    pub async fn take_ion_upload(&self, asset_id: Uuid) -> Result<Option<IonUpload>, sqlx::Error> {
+        let row = sqlx::query(AssertSqlSafe(format!(
+            "DELETE FROM ion_uploads WHERE asset_id = ? RETURNING {ION_UPLOAD_COLUMNS}"
+        )))
+        .bind(asset_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.as_ref().map(row_to_ion_upload).transpose()
+    }
+
+    pub async fn take_expired_ion_uploads(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Uuid>, sqlx::Error> {
+        let asset_ids: Vec<String> =
+            sqlx::query_scalar("DELETE FROM ion_uploads WHERE expires_at <= ? RETURNING asset_id")
+                .bind(now.timestamp())
+                .fetch_all(&self.pool)
+                .await?;
+
+        asset_ids.iter().map(|id| parse_uuid(id)).collect()
+    }
+
+    pub async fn fail_stranded_uploads(&self) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE assets SET status = ? WHERE status = ? \
+             AND id NOT IN (SELECT asset_id FROM jobs) \
+             AND id NOT IN (SELECT asset_id FROM ion_uploads)",
+        )
+        .bind(enum_to_str(&AssetStatus::Error))
+        .bind(enum_to_str(&AssetStatus::Uploading))
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    pub async fn asset_ids_awaiting_files(&self) -> Result<HashSet<Uuid>, sqlx::Error> {
+        let asset_ids: Vec<String> = sqlx::query_scalar("SELECT asset_id FROM ion_uploads")
+            .fetch_all(&self.pool)
+            .await?;
+
+        asset_ids.iter().map(|id| parse_uuid(id)).collect()
+    }
+
+    pub async fn running_job_progress(&self) -> Result<HashMap<Uuid, f64>, sqlx::Error> {
+        let rows = sqlx::query("SELECT asset_id, progress FROM jobs WHERE status = ?")
+            .bind(enum_to_str(&JobStatus::Running))
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.iter()
+            .map(|row| {
+                let asset_id: String = row.get("asset_id");
+                let progress: f64 = row.get("progress");
+                Ok((parse_uuid(&asset_id)?, progress))
+            })
+            .collect()
     }
 
     // -- Audit trail --
@@ -1644,6 +1894,16 @@ impl Database {
         Ok(rows.iter().map(row_to_asset).collect())
     }
 
+    pub async fn list_running_jobs(&self) -> Result<Vec<JobRecord>, sqlx::Error> {
+        let rows = sqlx::query(AssertSqlSafe(format!(
+            "SELECT {JOB_COLUMNS} FROM jobs WHERE status = 'running'"
+        )))
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.iter().map(row_to_job).collect())
+    }
+
     pub async fn list_recent_jobs(&self, limit: u32) -> Result<Vec<JobRecord>, sqlx::Error> {
         let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT {JOB_COLUMNS} FROM jobs ORDER BY created_at DESC LIMIT ?"
@@ -2039,6 +2299,7 @@ fn row_to_job(row: &sqlx::sqlite::SqliteRow) -> JobRecord {
     let created_at_str: String = row.get("created_at");
     let started_at: Option<String> = row.get("started_at");
     let completed_at: Option<String> = row.get("completed_at");
+    let mesh_compression: String = row.get("mesh_compression");
 
     JobRecord {
         id: Uuid::parse_str(&id_str).unwrap_or_default(),
@@ -2057,7 +2318,18 @@ fn row_to_job(row: &sqlx::sqlite::SqliteRow) -> JobRecord {
             longitude: row.get("longitude"),
             latitude: row.get("latitude"),
             crs: row.get("crs"),
+            units: row.get("units"),
         },
+        mesh_compression: serde_json::from_str(&format!("\"{mesh_compression}\""))
+            .expect("the jobs table CHECK allows only MeshCompression names"),
+        texture_compression: serde_json::from_value(serde_json::Value::String(
+            row.get("texture_compression"),
+        ))
+        .expect("texture_compression is limited by a CHECK constraint"),
+        photogrammetry_preset: serde_json::from_value(serde_json::Value::String(
+            row.get("photogrammetry_preset"),
+        ))
+        .expect("photogrammetry_preset is limited by a CHECK constraint"),
     }
 }
 
@@ -2119,6 +2391,30 @@ fn row_to_webhook_subscription(row: &sqlx::sqlite::SqliteRow) -> WebhookSubscrip
 
 fn to_json<T: Serialize>(value: &T) -> String {
     serde_json::to_string(value).unwrap_or_default()
+}
+
+fn parse_uuid(text: &str) -> Result<Uuid, sqlx::Error> {
+    Uuid::parse_str(text).map_err(|error| sqlx::Error::Decode(Box::new(error)))
+}
+
+fn row_to_ion_upload(row: &sqlx::sqlite::SqliteRow) -> Result<IonUpload, sqlx::Error> {
+    let expires_at_seconds: i64 = row.get("expires_at");
+    let tiling_json: String = row.get("tiling");
+
+    let expires_at = DateTime::from_timestamp(expires_at_seconds, 0).ok_or_else(|| {
+        sqlx::Error::Decode(format!("expires_at {expires_at_seconds} is out of range").into())
+    })?;
+    let tiling =
+        serde_json::from_str(&tiling_json).map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+
+    Ok(IonUpload {
+        asset_id: parse_uuid(&row.get::<String, _>("asset_id"))?,
+        access_key: row.get("access_key"),
+        secret_access_key: row.get("secret_access_key"),
+        session_token: row.get("session_token"),
+        expires_at,
+        tiling,
+    })
 }
 
 /// A stored scheduled job. Its action and its schedule have no narrowest thing

@@ -1,0 +1,8 @@
+{
+  "name": "tiletopia-tiles-validator",
+  "private": true,
+  "devDependencies": {
+    "3d-tiles-validator": "0.6.1"
+  },
+  "packageManager": "pnpm@11.27.0"
+}

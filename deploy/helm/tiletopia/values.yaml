@@ -5,6 +5,9 @@ image:
   pullPolicy: IfNotPresent
   tag: "latest"
 
+# required: the http or https origin clients reach this server at, with no path or trailing slash
+ionBaseUrl: ""
+
 service:
   type: ClusterIP
   port: 3000

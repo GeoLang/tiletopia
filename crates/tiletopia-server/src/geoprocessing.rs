@@ -1,13 +1,7 @@
-//! Geoprocessing / spatial analysis — buffer, boolean overlay, hull, centroid, simplify.
-//!
-//! Input and output geometry is GeoJSON-shaped lon/lat degrees. Buffer distances
-//! are meters. The buffer and the boolean overlay come from the `geo` crate, so
-//! a buffered square gains rounded corners and a union of two overlapping
-//! squares is the L-shaped region rather than a hull around both.
-
 use geo::geometry::{Coord, LineString, MultiPolygon, Point, Polygon};
-use geo::{BooleanOps, Buffer, Centroid, CoordsIter, Geodesic, GeodesicArea, Length, MapCoords};
+use geo::{Centroid, CoordsIter, Geodesic, GeodesicArea, Length, MapCoords};
 use serde::{Deserialize, Serialize};
+use topoi_core::geojson::FeatureGeometry;
 
 /// Meters per degree of latitude, and of longitude at the equator.
 pub const METERS_PER_DEGREE: f64 = 111320.0;
@@ -222,6 +216,9 @@ fn second<'a>(
     other.ok_or(GeoprocessingError::MissingSecondGeometry { operation })
 }
 
+// circles of 32 sides cover 0.64 percent less area than true circles
+const BUFFER_CIRCLE_SEGMENTS: usize = 32;
+
 /// Buffer a geometry by a distance in meters, positive to expand and negative to
 /// shrink. Always answers a MultiPolygon, one part per piece of the result.
 pub fn buffer(
@@ -231,8 +228,7 @@ pub fn buffer(
     if !distance_m.is_finite() {
         return Err(GeoprocessingError::MissingDistance);
     }
-    let input = geo_geometry(geometry, INPUT)?;
-    let latitude = input
+    let latitude = geo_geometry(geometry, INPUT)?
         .centroid()
         .ok_or(GeoprocessingError::NoCentroid { role: INPUT })?
         .y();
@@ -244,20 +240,48 @@ pub fn buffer(
     // latitude: fine for local-scale geometry, wrong near the poles and for
     // continent-scale shapes
     let longitude_scale = METERS_PER_DEGREE * latitude.to_radians().cos();
-    let projected = input.map_coords(|coord| Coord {
-        x: coord.x * longitude_scale,
-        y: coord.y * METERS_PER_DEGREE,
-    });
-    Ok(projected.buffer(distance_m).map_coords(|coord| Coord {
+    let projected = projected_feature_geometry(geometry, longitude_scale);
+    let buffered = topoi_core::buffer_geometry(&projected, distance_m, BUFFER_CIRCLE_SEGMENTS);
+    Ok(geo_multi_polygon(&buffered).map_coords(|coord| Coord {
         x: coord.x / longitude_scale,
         y: coord.y / METERS_PER_DEGREE,
     }))
 }
 
+fn projected_feature_geometry(geometry: &Geometry, longitude_scale: f64) -> FeatureGeometry {
+    let project = |position: &[f64; 2]| {
+        topoi_core::Coord::new(
+            position[0] * longitude_scale,
+            position[1] * METERS_PER_DEGREE,
+        )
+    };
+    match geometry {
+        Geometry::Point(position) => FeatureGeometry::Point(topoi_core::Point(project(position))),
+        // i_overlay strokes a zero-length line to nothing
+        Geometry::LineString(positions)
+            if positions.iter().all(|position| *position == positions[0]) =>
+        {
+            FeatureGeometry::Point(topoi_core::Point(project(&positions[0])))
+        }
+        Geometry::LineString(positions) => FeatureGeometry::LineString(
+            topoi_core::LineString::new(positions.iter().map(project).collect()),
+        ),
+        Geometry::Polygon(rings) => FeatureGeometry::Polygon(topoi_polygon(rings, &project)),
+        Geometry::MultiPolygon(polygons) => {
+            FeatureGeometry::MultiPolygon(topoi_core::MultiPolygon::new(
+                polygons
+                    .iter()
+                    .map(|rings| topoi_polygon(rings, &project))
+                    .collect(),
+            ))
+        }
+    }
+}
+
 /// The region covered by either polygon.
 pub fn polygon_union(a: &Geometry, b: &Geometry) -> Result<MultiPolygon<f64>, GeoprocessingError> {
     let (left, right) = overlay_inputs(a, b, UNION)?;
-    Ok(left.union(&right))
+    Ok(geo_multi_polygon(&topoi_core::union(&left, &right)))
 }
 
 /// The region covered by both polygons. Correct for concave polygons, unlike a
@@ -267,7 +291,7 @@ pub fn polygon_intersection(
     b: &Geometry,
 ) -> Result<MultiPolygon<f64>, GeoprocessingError> {
     let (left, right) = overlay_inputs(a, b, INTERSECTION)?;
-    Ok(left.intersection(&right))
+    Ok(geo_multi_polygon(&topoi_core::intersection(&left, &right)))
 }
 
 /// The region of `a` not covered by `b`. Cuts holes and notches, and may answer
@@ -277,14 +301,14 @@ pub fn polygon_difference(
     b: &Geometry,
 ) -> Result<MultiPolygon<f64>, GeoprocessingError> {
     let (left, right) = overlay_inputs(a, b, DIFFERENCE)?;
-    Ok(left.difference(&right))
+    Ok(geo_multi_polygon(&topoi_core::difference(&left, &right)))
 }
 
 fn overlay_inputs(
     a: &Geometry,
     b: &Geometry,
     operation: &'static str,
-) -> Result<(MultiPolygon<f64>, MultiPolygon<f64>), GeoprocessingError> {
+) -> Result<(Vec<topoi_core::Polygon>, Vec<topoi_core::Polygon>), GeoprocessingError> {
     Ok((
         polygons(a, INPUT, operation)?,
         polygons(b, OTHER, operation)?,
@@ -395,62 +419,58 @@ fn cross(o: &[f64; 2], a: &[f64; 2], b: &[f64; 2]) -> f64 {
 /// Simplify a polyline using the Douglas-Peucker algorithm. The tolerance is in
 /// the units of the coordinates.
 pub fn simplify(points: &[[f64; 2]], tolerance: f64) -> Vec<[f64; 2]> {
-    if points.len() < 3 {
-        return points.to_vec();
-    }
-    let mut max_dist = 0.0;
-    let mut index = 0;
-    let end = points.len() - 1;
-
-    for i in 1..end {
-        let d = perpendicular_distance(&points[i], &points[0], &points[end]);
-        if d > max_dist {
-            max_dist = d;
-            index = i;
-        }
-    }
-
-    if max_dist > tolerance {
-        let mut left = simplify(&points[..=index], tolerance);
-        let right = simplify(&points[index..], tolerance);
-        left.pop(); // remove duplicate
-        left.extend_from_slice(&right);
-        left
-    } else {
-        vec![points[0], points[end]]
-    }
+    let coords: Vec<topoi_core::Coord> = points.iter().map(topoi_coord).collect();
+    topoi_core::simplify(&coords, tolerance)
+        .iter()
+        .map(|coord| [coord.x, coord.y])
+        .collect()
 }
 
-/// Perpendicular distance from point to line segment.
-fn perpendicular_distance(point: &[f64; 2], line_start: &[f64; 2], line_end: &[f64; 2]) -> f64 {
-    let dx = line_end[0] - line_start[0];
-    let dy = line_end[1] - line_start[1];
-    let mag = (dx * dx + dy * dy).sqrt();
-    if mag < 1e-10 {
-        let pdx = point[0] - line_start[0];
-        let pdy = point[1] - line_start[1];
-        return (pdx * pdx + pdy * pdy).sqrt();
-    }
-    ((point[0] - line_start[0]) * dy - (point[1] - line_start[1]) * dx).abs() / mag
-}
-
-/// Ray-casting point-in-polygon test against a single ring.
 pub fn point_in_polygon(point: &[f64; 2], polygon: &[[f64; 2]]) -> bool {
-    let mut inside = false;
-    let n = polygon.len();
-    let mut j = n - 1;
-    for i in 0..n {
-        if ((polygon[i][1] > point[1]) != (polygon[j][1] > point[1]))
-            && (point[0]
-                < (polygon[j][0] - polygon[i][0]) * (point[1] - polygon[i][1])
-                    / (polygon[j][1] - polygon[i][1])
-                    + polygon[i][0])
-        {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
+    let ring: Vec<topoi_core::Coord> = polygon.iter().map(topoi_coord).collect();
+    topoi_core::contains(
+        &topoi_core::Polygon::from_coords(&ring),
+        &topoi_coord(point),
+    )
+}
+
+fn topoi_coord(position: &[f64; 2]) -> topoi_core::Coord {
+    topoi_core::Coord::new(position[0], position[1])
+}
+
+fn topoi_polygon(
+    rings: &[Vec<[f64; 2]>],
+    to_coord: &impl Fn(&[f64; 2]) -> topoi_core::Coord,
+) -> topoi_core::Polygon {
+    let ring =
+        |positions: &Vec<[f64; 2]>| topoi_core::Ring::new(positions.iter().map(to_coord).collect());
+    topoi_core::Polygon::new(ring(&rings[0]), rings[1..].iter().map(ring).collect())
+}
+
+fn geo_multi_polygon(multi: &topoi_core::MultiPolygon) -> MultiPolygon<f64> {
+    let geo_ring = |ring: &topoi_core::Ring| {
+        LineString::new(
+            ring.coords()
+                .iter()
+                .map(|coord| Coord {
+                    x: coord.x,
+                    y: coord.y,
+                })
+                .collect(),
+        )
+    };
+    MultiPolygon::new(
+        multi
+            .polygons()
+            .iter()
+            .map(|part| {
+                Polygon::new(
+                    geo_ring(part.exterior()),
+                    part.interiors().iter().map(geo_ring).collect(),
+                )
+            })
+            .collect(),
+    )
 }
 
 fn point_result(point: Point<f64>) -> (Geometry, Option<f64>, Option<f64>) {
@@ -514,10 +534,14 @@ fn polygons(
     geometry: &Geometry,
     role: &'static str,
     operation: &'static str,
-) -> Result<MultiPolygon<f64>, GeoprocessingError> {
-    match geo_geometry(geometry, role)? {
-        geo::Geometry::Polygon(polygon) => Ok(MultiPolygon::new(vec![polygon])),
-        geo::Geometry::MultiPolygon(multi) => Ok(multi),
+) -> Result<Vec<topoi_core::Polygon>, GeoprocessingError> {
+    geo_geometry(geometry, role)?;
+    match geometry {
+        Geometry::Polygon(rings) => Ok(vec![topoi_polygon(rings, &topoi_coord)]),
+        Geometry::MultiPolygon(polygons) => Ok(polygons
+            .iter()
+            .map(|rings| topoi_polygon(rings, &topoi_coord))
+            .collect()),
         _ => Err(GeoprocessingError::NotAPolygon {
             operation,
             given: geometry.type_name(),
@@ -709,6 +733,21 @@ mod tests {
         assert!(
             (area_m2 - circle).abs() / circle < 0.01,
             "buffered point covers {area_m2}, a circle of radius {RADIUS_M} covers {circle}"
+        );
+    }
+
+    #[test]
+    fn buffer_of_a_zero_length_line_is_a_circle() {
+        const RADIUS_M: f64 = 500.0;
+        let line = Geometry::LineString(vec![[0.0, 0.0], [0.0, 0.0]]);
+
+        let buffered = buffer(&line, RADIUS_M).unwrap();
+
+        let area_m2 = buffered.unsigned_area() * METERS_PER_DEGREE * METERS_PER_DEGREE;
+        let circle = std::f64::consts::PI * RADIUS_M * RADIUS_M;
+        assert!(
+            (area_m2 - circle).abs() / circle < 0.01,
+            "buffered line covers {area_m2}, a circle of radius {RADIUS_M} covers {circle}"
         );
     }
 

@@ -39,6 +39,7 @@ sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite-bundled"] }
 memmap2 = "0.9"
 las = "0.9"
 tiff = "0.9"
+png = "0.18"
 gltf = "1"
 async-trait = "0.1"
 futures = "0.3"
@@ -51,25 +52,28 @@ metrics-exporter-prometheus = "0.16"
 e57 = "0.11"
 ply-rs = "0.1"
 geo = { version = "0.33", default-features = false }
-geo-types = "0.7"
 
 # CRS transforms
 projicio-core = { git = "https://github.com/GeoLang/projicio.git", branch = "master" }
 
 # Mesh compression
-meshopt = "0.6"
+meshopt = "0.7"
 bytemuck = { version = "1", features = ["derive"] }
-draco-rs = "0.1"
+draco-gltf = { version = "0.7", default-features = false, features = ["draco-encode"] }
 
 # OBJ loading
-tobj = "4"
+tobj = { version = "4", features = ["use_f64"] }
 
 # FBX loading
 fbxcel-dom = "0.0.10"
 
+# COLLADA loading
+dae-parser = "0.11"
+percent-encoding = "2"
+
 # IFC geometry
-ifc-lite-core = "2.3"
-ifc-lite-geometry = "2.3"
+ifc-lite-core = "28.2"
+ifc-lite-geometry = "28.2"
 
 # XML parsing (CityGML, KML)
 quick-xml = "0.39"
@@ -80,6 +84,13 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Image generation (static maps)
 image = "0.25"
 
+# IFC property and quantity decoding, its version has to match ifc-lite-core
+ifc-lite-processing = "28.2"
+
+# KHR_texture_basisu tile textures
+basisu_c_sys = { version = "0.9", features = ["encoder", "extra"] }
+ktx2 = "0.5"
+
 # Random bytes (api keys, webhook secrets)
 rand = "0.9"
 
@@ -89,9 +100,6 @@ sha2 = "0.10"
 
 # Password hashing (argon2id), matching collecta
 argon2 = { version = "0.5", features = ["std"] }
-
-# Graph algorithms (indoor routing)
-petgraph = "0.7"
 
 # Cron parsing (scheduler)
 cron = "0.15"
@@ -106,10 +114,14 @@ tilejson = "0.4"
 # must be the object_store martin-core hands to pmtiles, or PmtilesSource::new rejects our store
 object_store = { version = "0.14", features = ["fs"] }
 
+# JPEG 2000 uploads (jp2 feature). The rev matches GROK_REV in the Dockerfile and ci.yml
+grokj2k-sys = { git = "https://github.com/GrokImageCompression/grok.git", rev = "00f9baaed2f41a8dadef1c62cf009d8e80064e9d" }
+
 # GeoLang ecosystem crates
 nubis-core = { git = "https://github.com/GeoLang/nubis.git", tag = "v0.1.0" }
 terrano-core = { git = "https://github.com/GeoLang/terrano.git", branch = "master" }
 geoplumb = { git = "https://github.com/GeoLang/geoplumb.git", branch = "master" }
+topoi-core = { git = "https://github.com/GeoLang/topoi.git", branch = "master" }
+platform-auth = { git = "https://github.com/GeoLang/platform-crates.git", branch = "master" }
+platform-webhook = { git = "https://github.com/GeoLang/platform-crates.git", branch = "master" }
 
-[patch.crates-io]
-draco-rs = { path = "patches/draco-rs" }

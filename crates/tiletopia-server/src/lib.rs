@@ -6,28 +6,41 @@
 pub mod admin;
 pub mod analysis;
 pub mod analysis_tiles;
-pub mod annotations;
 pub mod api_keys;
 pub mod audit;
 pub mod auth;
-pub mod bim4d;
+pub mod bcf;
+pub(crate) mod bcf_xml;
 pub mod catalog;
+pub mod change_reports;
 pub mod cicd;
 pub mod cog;
+pub mod czml;
 pub mod db;
+pub mod dxf_export;
+pub(crate) mod element_query;
+pub mod element_store;
+pub mod elements;
 pub mod elevation;
 pub mod entity_linking;
 pub mod export;
 pub mod geoprocessing;
 pub mod geostatistics;
+pub mod global_terrain;
 pub mod http_cache;
-pub mod indoor;
+pub mod ids_check;
+pub mod imagery;
+pub mod imagery_services;
 pub mod ion_compat;
+pub mod ion_s3_endpoint;
+pub mod ion_upload;
 pub mod job_queue;
+#[cfg(any(feature = "jp2", test))]
+mod jp2;
 pub mod map_tiles;
-pub mod metering;
 pub mod metrics;
 pub mod model_registry;
+pub mod model_versions;
 pub mod offline_export;
 pub mod photogrammetry;
 pub mod plugin_registry;
@@ -35,6 +48,8 @@ pub mod portal;
 pub mod premium_routes;
 pub mod realtime;
 pub mod scheduler;
+pub(crate) mod scratch_files;
+mod section;
 pub mod stac;
 pub mod static_map;
 pub mod stories_api;
@@ -43,9 +58,11 @@ pub mod terrain_bundle;
 pub mod terrain_rgb;
 #[cfg(feature = "martin")]
 pub mod tilesets;
+pub mod topojson;
 pub mod upload;
 pub mod users;
 pub mod webhooks;
+pub(crate) mod zip_unpack;
 
 use audit::AuditedResource;
 use axum::{
@@ -70,6 +87,8 @@ pub struct AppState {
     /// Where the terrain routes fetch SRTM tiles from, see
     /// [`tiletopia_terrain::dem_cache::srtm_base_url_from_env`].
     pub srtm_base_url: String,
+    pub ion_base_url: String,
+    pub staged_upload_ledgers: ion_s3_endpoint::StagedLedgers,
     pub job_queue: Arc<job_queue::JobQueue>,
     pub realtime: realtime::RealtimeState,
     /// Records the mutations that answered 2xx, written by
@@ -81,7 +100,6 @@ pub struct AppState {
     /// [`auth::auth_middleware`]; the keys themselves live in the database.
     pub api_key_rate_limiter: api_keys::RateLimiter,
     pub account_limits: users::AccountLimits,
-    pub metering_store: metering::MeteringStore,
     /// Queues and delivers webhook events. Shared with [`job_queue::JobQueue`],
     /// which emits the job lifecycle events.
     pub webhooks: Arc<webhooks::WebhookQueue>,
@@ -92,14 +110,15 @@ pub struct AppState {
     /// [`job_queue::JobQueue`] the routes use, so a scheduled re-tile lands on
     /// the same queue an uploader's does.
     pub scheduler: Arc<scheduler::Scheduler>,
-    pub photogrammetry_engine: photogrammetry::PhotogrammetryEngine,
     pub model_registry: model_registry::ModelRegistry,
-    pub bim4d_engine: bim4d::Bim4DEngine,
     pub cog_engine: cog::CogEngine,
     /// Shared, so the analysis tile engines can sample it from their own graph.
     pub elevation_store: Arc<elevation::DemStore>,
     pub analysis_engines: analysis_tiles::AnalysisEngines,
+    pub imagery_layers: imagery::ImageryLayers,
+    pub global_terrain: global_terrain::GlobalTerrain,
     pub entity_link_store: entity_linking::EntityLinkStore,
+    pub ids_check: Option<ids_check::IdsCheckSidecar>,
     /// Sources served under `/martin`. Filled in before [`router`] is called,
     /// because registering an archive is async and `router` is not.
     #[cfg(feature = "martin")]
@@ -145,29 +164,26 @@ pub struct Asset {
     pub owner_id: Option<String>,
 }
 
-/// Whether these claims may run a destructive write on an asset with this
-/// owner. Admins may touch anything; a `None` owner is a legacy row from
-/// before ownership existed, so any caller that got past the Edit-tier gate
-/// may modify it.
 pub fn may_modify_asset(claims: &auth::Claims, owner_id: Option<&str>) -> bool {
-    match owner_id {
-        None => true,
-        Some(owner) => claims.can_admin() || owner == claims.sub,
-    }
+    claims.can_admin() || owner_id == Some(claims.sub.as_str())
 }
 
-/// Whether these claims may see this asset in a listing. Admins see every
-/// asset, everyone else sees their own plus the legacy ownerless rows.
-///
-/// Same owner rule as [`may_modify_asset`] today, kept separate because the two
-/// decisions are free to diverge: this one has no Edit-tier gate in front of it.
-/// It hides other tenants' asset metadata, not their tiles, which are public by
-/// design (see [`auth::is_public_read`]).
 pub fn may_view_asset(claims: &auth::Claims, owner_id: Option<&str>) -> bool {
-    match owner_id {
-        None => true,
-        Some(owner) => claims.can_admin() || owner == claims.sub,
-    }
+    claims.can_admin() || owner_id == Some(claims.sub.as_str())
+}
+
+pub(crate) async fn viewable_asset(
+    state: &AppState,
+    id: Uuid,
+    claims: &auth::Claims,
+) -> Result<Asset, StatusCode> {
+    state
+        .db
+        .get_asset(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter(|asset| may_view_asset(claims, asset.owner_id.as_deref()))
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -178,6 +194,7 @@ pub enum AssetType {
     Model,
     Imagery,
     Vector,
+    Czml,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,7 +263,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
     // Annotations are asset content, so writing one is an asset mutation: same
     // Edit tier as the writes above, plus the owner-or-admin check the handlers
-    // do. Listing them stays on the main router, readable with any valid token.
+    // do. Listing them stays on the main router behind may_view_asset.
     let annotation_write_routes = Router::new()
         .route(
             "/api/v1/assets/{id}/annotations",
@@ -293,17 +310,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(catalog::catalog_routes())
         .merge(terrain_api::terrain_routes())
         .merge(terrain_bundle::terrain_bundle_routes())
+        .merge(global_terrain::global_terrain_routes())
         .merge(terrain_rgb::terrain_rgb_routes())
         .merge(premium_routes::api_key_routes())
-        .merge(premium_routes::metering_routes())
         .merge(premium_routes::webhook_routes())
         .merge(premium_routes::export_routes())
         .merge(premium_routes::scheduler_routes())
-        .merge(premium_routes::photogrammetry_routes())
+        .merge(photogrammetry::photogrammetry_routes())
         .merge(model_registry::model_registry_routes())
-        .merge(premium_routes::bim4d_routes())
         .merge(premium_routes::stac_routes())
-        .merge(premium_routes::indoor_routes())
         .merge(premium_routes::cog_routes())
         // Batch 2: competitive gap-closing
         .merge(premium_routes::geoprocessing_routes())
@@ -311,6 +326,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(premium_routes::static_map_routes())
         .merge(analysis::analysis_routes())
         .merge(analysis_tiles::analysis_tile_routes())
+        .merge(imagery::imagery_routes())
+        .merge(imagery_services::imagery_service_routes())
+        .merge(czml::czml_routes())
         .merge(premium_routes::geostatistics_routes())
         .merge(premium_routes::entity_linking_routes())
         .merge(stories_api::story_routes())
@@ -318,7 +336,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(catalog::add_dataset_routes())
         .merge(plugin_registry::plugin_registry_routes())
         .merge(ion_compat::ion_compat_read_routes())
-        .merge(ion_compat::ion_compat_write_routes());
+        .merge(ion_compat::ion_compat_write_routes())
+        .merge(elements::element_routes())
+        .merge(bcf::bcf_routes())
+        .merge(change_reports::change_report_routes())
+        .merge(dxf_export::dxf_export_routes())
+        .merge(section::section_routes())
+        .merge(ids_check::ids_check_routes())
+        .merge(model_versions::model_version_routes());
 
     // merged before the auth layer below, so /martin needs a token like the rest
     // of the API. no source is public: there is nothing to mark one public with,
@@ -366,6 +391,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         auth::auth_middleware,
     ))
     .merge(auth_routes)
+    // s3 clients sign with the upload credential POST /v1/assets issued, never a JWT
+    .merge(ion_s3_endpoint::ion_s3_routes())
     .layer(CorsLayer::permissive())
     .with_state(state)
 }
@@ -426,14 +453,10 @@ async fn list_assets(
 async fn get_asset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Asset>, StatusCode> {
-    state
-        .db
-        .get_asset(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+    let claims = users::claims_from_headers(&headers)?;
+    viewable_asset(&state, id, &claims).await.map(Json)
 }
 
 async fn delete_asset(
@@ -452,20 +475,31 @@ async fn delete_asset(
         return Err(StatusCode::FORBIDDEN);
     }
 
+    model_versions::forget_asset(&state.db, &state.data_dir, id)
+        .await
+        .map_err(|reason| {
+            tracing::error!("{reason}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     state
         .db
         .delete_asset(id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    state.imagery_layers.forget(id);
+    state.job_queue.cancel_reconstruction(id);
+
     // Remove asset directory
     let asset_dir = state.data_dir.join(id.to_string());
     let _ = tokio::fs::remove_dir_all(&asset_dir).await;
+    let _ = tokio::fs::remove_dir_all(terrain_bundle::asset_bundle_dir(&state.data_dir, id)).await;
 
     state
         .webhooks
         .emit(
             webhooks::WebhookEvent::AssetDeleted,
+            asset.owner_id.as_deref(),
             serde_json::json!({
                 "asset_id": id,
                 "name": asset.name,
@@ -536,37 +570,31 @@ async fn start_tiling(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
     headers: axum::http::HeaderMap,
-) -> Result<(StatusCode, Json<db::JobRecord>), StatusCode> {
+) -> Result<(StatusCode, Json<db::JobRecord>), (StatusCode, String)> {
     let asset = state
         .db
         .get_asset(id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let claims = users::claims_from_headers(&headers)?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, String::new()))?
+        .ok_or((StatusCode::NOT_FOUND, format!("no asset {id}")))?;
+    let claims = users::claims_from_headers(&headers).map_err(|status| (status, String::new()))?;
     if !may_modify_asset(&claims, asset.owner_id.as_deref()) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err((StatusCode::FORBIDDEN, String::new()));
     }
 
-    // Find the input file
-    let input_dir = state.data_dir.join(id.to_string()).join("input");
-    let mut entries = tokio::fs::read_dir(&input_dir)
+    let job = scheduler::submit_retile_job(&state.db, &state.data_dir, &state.job_queue, id)
         .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-    let input_path = entries
-        .next_entry()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?
-        .path()
-        .to_string_lossy()
-        .to_string();
-
-    let job = state
-        .job_queue
-        .submit(id, input_path, db::ModelPlacement::default())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| match error {
+            scheduler::RetileError::NoUploadedInput => (
+                StatusCode::NOT_FOUND,
+                format!("asset {id} has no uploaded input to tile"),
+            ),
+            scheduler::RetileError::ReadingJobs(_)
+            | scheduler::RetileError::ReadingInput(_)
+            | scheduler::RetileError::Submitting(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+            }
+        })?;
 
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
@@ -576,7 +604,10 @@ async fn start_tiling(
 async fn list_asset_jobs(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Vec<db::JobRecord>>, StatusCode> {
+    let claims = users::claims_from_headers(&headers)?;
+    viewable_asset(&state, id, &claims).await?;
     state
         .db
         .list_jobs_for_asset(id)
@@ -588,14 +619,17 @@ async fn list_asset_jobs(
 async fn get_job_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<db::JobRecord>, StatusCode> {
-    state
+    let claims = users::claims_from_headers(&headers)?;
+    let job = state
         .db
         .get_job(id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    viewable_asset(&state, job.asset_id, &claims).await?;
+    Ok(Json(job))
 }
 
 // ─── Annotation Endpoints ────────────────────────────────────────────────────
@@ -613,7 +647,10 @@ struct CreateAnnotation {
 async fn list_annotations(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Vec<db::AnnotationRecord>>, StatusCode> {
+    let claims = users::claims_from_headers(&headers)?;
+    viewable_asset(&state, id, &claims).await?;
     let annotations = state
         .db
         .list_annotations(id)

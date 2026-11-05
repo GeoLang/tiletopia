@@ -55,17 +55,12 @@ mod tests {
 
     #[tokio::test]
     async fn get_asset_not_found() {
-        let app = router(test_state().await);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/assets/00000000-0000-0000-0000-000000000000")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let state = test_state().await;
+        let (token, _uid) = signup(&state, "get-missing@example.com").await;
+        let uri = "/api/v1/assets/00000000-0000-0000-0000-000000000000";
+        assert_eq!(get(&state, uri).await.status(), StatusCode::UNAUTHORIZED);
+        let (status, _) = get_with_token(&state, uri, &token).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1898,7 +1893,7 @@ mod tests {
         uri: &str,
         token: Option<&str>,
         body: serde_json::Value,
-    ) -> StatusCode {
+    ) -> axum::response::Response {
         let mut req = Request::builder()
             .method("POST")
             .uri(uri)
@@ -1910,7 +1905,6 @@ mod tests {
             .oneshot(req.body(Body::from(body.to_string())).unwrap())
             .await
             .unwrap()
-            .status()
     }
 
     #[tokio::test]
@@ -1922,7 +1916,8 @@ mod tests {
             None,
             serde_json::json!({ "name": "anon", "type": "3DTILES" }),
         )
-        .await;
+        .await
+        .status();
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
@@ -1936,7 +1931,8 @@ mod tests {
             Some(&viewer_token),
             serde_json::json!({ "name": "nope", "type": "3DTILES" }),
         )
-        .await;
+        .await
+        .status();
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
@@ -1948,15 +1944,19 @@ mod tests {
             &state,
             "/v1/assets",
             Some(&editor_token),
-            serde_json::json!({ "name": "yes", "type": "3DTILES" }),
+            serde_json::json!({
+                "name": "yes",
+                "type": "3DTILES",
+                "options": { "sourceType": "POINT_CLOUD" },
+            }),
         )
-        .await;
-        assert_eq!(status, StatusCode::CREATED);
+        .await
+        .status();
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
-    async fn ion_list_assets_anonymous_ok() {
-        // a legitimate anonymous tile-data GET (the Ion read layer) still works
+    async fn ion_list_assets_anonymous_rejected() {
         let state = test_state().await;
         let resp = router(Arc::clone(&state))
             .oneshot(
@@ -1967,43 +1967,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn ion_create_token_requires_auth() {
-        let state = test_state().await;
-        // anonymous is rejected
-        let status = post_ion(
-            &state,
-            "/v1/tokens",
-            None,
-            serde_json::json!({ "name": "t", "scopes": [] }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-        // editor is not enough (admin-only credential mint)
-        let editor_token = bootstrap_editor(&state, "ion-tok-editor@example.com").await;
-        let status = post_ion(
-            &state,
-            "/v1/tokens",
-            Some(&editor_token),
-            serde_json::json!({ "name": "t", "scopes": [] }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        // admin can mint
-        let admin_token = bootstrap_admin(&state, "ion-tok-admin@example.com").await;
-        let status = post_ion(
-            &state,
-            "/v1/tokens",
-            Some(&admin_token),
-            serde_json::json!({ "name": "t", "scopes": [] }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     // -- ion endpoint resolution --
@@ -2034,18 +1998,29 @@ mod tests {
         id
     }
 
+    // tiletopia reads the role out of the token, so one admin token works against every state
+    async fn ion_reader_token() -> String {
+        static TOKEN: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+        TOKEN
+            .get_or_init(|| async {
+                let state = test_state().await;
+                bootstrap_admin(&state, "ion-reader@example.com").await
+            })
+            .await
+            .clone()
+    }
+
     async fn ion_endpoint(
         state: &Arc<AppState>,
         id: impl std::fmt::Display,
     ) -> (StatusCode, serde_json::Value) {
-        let resp = get(state, &format!("/v1/assets/{id}/endpoint")).await;
-        let status = resp.status();
-        let body = serde_json::from_slice(&body_bytes(resp).await).unwrap_or_default();
+        let token = ion_reader_token().await;
+        let (status, bytes) =
+            get_with_token(state, &format!("/v1/assets/{id}/endpoint"), &token).await;
+        let body = serde_json::from_slice(&bytes).unwrap_or_default();
         (status, body)
     }
 
-    /// Path of an absolute url, so a test can follow the endpoint back into the
-    /// router without depending on TILETOPIA_ION_BASE_URL.
     fn url_path(url: &str) -> String {
         let after_scheme = url.split_once("://").unwrap().1;
         format!("/{}", after_scheme.split_once('/').unwrap().1)
@@ -2119,6 +2094,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ion_endpoint_urls_start_with_the_base_url_in_the_state() {
+        let mut state = test_state().await;
+        Arc::get_mut(&mut state).unwrap().ion_base_url = "https://tiles.example.com".to_string();
+        let id = seed_asset(&state, tiletopia_server::AssetType::PointCloud).await;
+
+        let (status, body) = ion_endpoint(&state, id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["url"],
+            format!("https://tiles.example.com/api/v1/assets/{id}/tileset.json")
+        );
+    }
+
+    #[tokio::test]
     async fn ion_endpoint_for_imagery_refuses_instead_of_naming_a_tileset() {
         let state = test_state().await;
         let id = seed_asset(&state, tiletopia_server::AssetType::Imagery).await;
@@ -2136,9 +2125,10 @@ mod tests {
     }
 
     async fn ion_assets(state: &Arc<AppState>) -> Vec<serde_json::Value> {
-        let resp = get(state, "/v1/assets").await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let token = ion_reader_token().await;
+        let (status, bytes) = get_with_token(state, "/v1/assets", &token).await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         body["items"].as_array().unwrap().clone()
     }
 
@@ -2152,9 +2142,10 @@ mod tests {
 
         // the number off the list is all an Ion client has, and
         // IonImageryProvider.fromAssetId refuses an id that is not one
-        let resp = get(&state, &format!("/v1/assets/{ion_id}")).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let asset: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let token = ion_reader_token().await;
+        let (status, bytes) = get_with_token(&state, &format!("/v1/assets/{ion_id}"), &token).await;
+        assert_eq!(status, StatusCode::OK);
+        let asset: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(asset["id"].as_i64().unwrap(), ion_id);
 
         let (status, body) = ion_endpoint(&state, ion_id).await;
@@ -2229,6 +2220,132 @@ mod tests {
         let (status, body) = ion_endpoint(&state, uuid::Uuid::new_v4()).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body["url"].is_null());
+    }
+
+    // -- czml uploads --
+
+    const CZML_DOCUMENT: &str = r#"[{"id":"document","version":"1.0"},
+{"id":"pin","position":{"cartographicDegrees":[-75.0, 40.0, 0.0]}}]"#;
+
+    #[tokio::test]
+    async fn a_czml_upload_is_served_back_byte_for_byte_and_resolves_as_czml() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "czml-editor@example.com").await;
+
+        let (status, asset) = upload_parts(
+            &state,
+            Some(&editor_token),
+            &[(
+                "file",
+                Some("scene.czml"),
+                CZML_DOCUMENT.as_bytes().to_vec(),
+            )],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{asset}");
+        assert_eq!(asset["asset_type"], "czml");
+        assert_eq!(asset["status"], "ready");
+        assert!(asset["job_id"].is_null());
+
+        let id = asset["id"].as_str().unwrap();
+        let (status, endpoint) = ion_endpoint(&state, id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(endpoint["type"], "CZML");
+        let document_uri = url_path(endpoint["url"].as_str().unwrap());
+        assert_eq!(document_uri, format!("/api/v1/assets/{id}/czml"));
+
+        let response = get(&state, &document_uri).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "application/json");
+        assert_eq!(body_bytes(response).await, CZML_DOCUMENT.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn a_czml_upload_that_does_not_open_with_a_document_packet_is_refused() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "bad-czml-editor@example.com").await;
+
+        let (status, _) = upload_parts(
+            &state,
+            Some(&editor_token),
+            &[("file", Some("scene.czml"), br#"[{"id":"pin"}]"#.to_vec())],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(asset_directories(&state).is_empty());
+    }
+
+    // -- dxf units --
+
+    const DXF_TRIANGLE_ENTITIES: &str = "0\nSECTION\n2\nENTITIES\n0\n3DFACE\n\
+        10\n0\n20\n0\n30\n0\n11\n1000\n21\n0\n31\n0\n\
+        12\n0\n22\n1000\n32\n0\n13\n0\n23\n1000\n33\n0\n\
+        0\nENDSEC\n0\nEOF\n";
+
+    fn dxf_with_insunits(code: &str) -> String {
+        format!(
+            "0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n{code}\n0\nENDSEC\n{DXF_TRIANGLE_ENTITIES}"
+        )
+    }
+
+    async fn upload_dxf(
+        state: &Arc<AppState>,
+        token: &str,
+        drawing: &str,
+        units: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut parts: Vec<UploadPart<'_>> = vec![
+            ("file", Some("drawing.dxf"), drawing.as_bytes().to_vec()),
+            ("longitude", None, b"10".to_vec()),
+            ("latitude", None, b"20".to_vec()),
+        ];
+        if let Some(units) = units {
+            parts.push(("units", None, units.as_bytes().to_vec()));
+        }
+        upload_parts(state, Some(token), &parts).await
+    }
+
+    #[tokio::test]
+    async fn a_unitless_dxf_upload_needs_a_units_field_and_its_job_keeps_it() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "dxf-units-editor@example.com").await;
+        let unitless = dxf_with_insunits("0");
+
+        let (status, _) = upload_dxf(&state, &token, &unitless, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(asset_directories(&state).is_empty());
+
+        let (status, asset) = upload_dxf(&state, &token, &unitless, Some("millimetres")).await;
+        assert_eq!(status, StatusCode::CREATED, "{asset}");
+        let job_id = uuid::Uuid::parse_str(asset["job_id"].as_str().unwrap()).unwrap();
+        let job = state.job_queue.get_status(job_id).await.unwrap().unwrap();
+        assert_eq!(job.placement.units.as_deref(), Some("millimetres"));
+    }
+
+    #[tokio::test]
+    async fn a_dxf_units_field_that_conflicts_or_names_no_unit_is_refused() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "dxf-conflict-editor@example.com").await;
+        let millimetre_drawing = dxf_with_insunits("4");
+
+        for units in ["inches", "furlongs"] {
+            let (status, _) = upload_dxf(&state, &token, &millimetre_drawing, Some(units)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "units={units}");
+        }
+        let (status, asset) =
+            upload_dxf(&state, &token, &millimetre_drawing, Some("millimetres")).await;
+        assert_eq!(status, StatusCode::CREATED, "{asset}");
+
+        let (status, _) = upload_parts(
+            &state,
+            Some(&token),
+            &[
+                ("file", Some("t.glb"), b"glTF-bytes".to_vec()),
+                ("units", None, b"millimetres".to_vec()),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     // -- native asset write auth --
@@ -2479,10 +2596,9 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
         assert!(model["job_id"].as_str().is_some());
 
-        // terrain has no 3D Tiles path at all, so it reports no job
         let (status, terrain) = upload_named(&state, Some(&editor_token), "dem.tif").await;
         assert_eq!(status, StatusCode::CREATED);
-        assert!(terrain.get("job_id").is_none());
+        assert!(terrain["job_id"].as_str().is_some());
     }
 
     #[tokio::test]
@@ -2564,10 +2680,14 @@ mod tests {
 
     // -- catalog dataset add auth --
 
-    async fn catalog_add(state: &Arc<AppState>, token: Option<&str>) -> StatusCode {
+    async fn catalog_add(
+        state: &Arc<AppState>,
+        dataset_id: &str,
+        token: Option<&str>,
+    ) -> axum::response::Response {
         let mut req = Request::builder()
             .method("POST")
-            .uri("/api/v1/catalog/copernicus-dem-30/add")
+            .uri(format!("/api/v1/catalog/{dataset_id}/add"))
             .header("content-type", "application/json");
         if let Some(t) = token {
             req = req.header("authorization", format!("Bearer {t}"));
@@ -2580,13 +2700,17 @@ mod tests {
             .oneshot(req.body(Body::from(body.to_string())).unwrap())
             .await
             .unwrap()
-            .status()
     }
 
     #[tokio::test]
     async fn catalog_add_anonymous_rejected() {
         let state = test_state().await;
-        assert_eq!(catalog_add(&state, None).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            catalog_add(&state, "copernicus-dem-30", None)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
         assert!(state.db.list_assets().await.unwrap().is_empty());
     }
 
@@ -2595,10 +2719,34 @@ mod tests {
         let state = test_state().await;
         let (viewer_token, _) = signup(&state, "catalog-viewer@example.com").await;
         assert_eq!(
-            catalog_add(&state, Some(&viewer_token)).await,
+            catalog_add(&state, "copernicus-dem-30", Some(&viewer_token))
+                .await
+                .status(),
             StatusCode::FORBIDDEN
         );
         assert!(state.db.list_assets().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn catalog_add_imagery_is_refused_and_creates_nothing() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "catalog-imagery-editor@example.com").await;
+        let imagery_ids: Vec<String> = state
+            .catalog
+            .list(Some(&tiletopia_server::catalog::DatasetCategory::Imagery))
+            .into_iter()
+            .map(|dataset| dataset.id.clone())
+            .collect();
+        assert!(!imagery_ids.is_empty());
+
+        for dataset_id in imagery_ids {
+            let resp = catalog_add(&state, &dataset_id, Some(&editor_token)).await;
+            assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "{dataset_id}");
+            let message = String::from_utf8(body_bytes(resp).await).unwrap();
+            assert!(message.contains(&dataset_id), "{message}");
+        }
+        assert!(state.db.list_assets().await.unwrap().is_empty());
+        assert!(state.db.next_queued_job(&[]).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2607,13 +2755,47 @@ mod tests {
         let (editor_token, uid) =
             bootstrap_editor_with_id(&state, "catalog-editor@example.com").await;
         assert_eq!(
-            catalog_add(&state, Some(&editor_token)).await,
+            catalog_add(&state, "copernicus-dem-30", Some(&editor_token))
+                .await
+                .status(),
             StatusCode::CREATED
         );
 
         let assets = state.db.list_assets().await.unwrap();
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].owner_id.as_deref(), Some(uid.as_str()));
+    }
+
+    #[tokio::test]
+    async fn re_tiling_a_catalog_asset_is_refused_naming_the_missing_input() {
+        let state = test_state().await;
+        let editor_token = bootstrap_editor(&state, "catalog-retile-editor@example.com").await;
+        assert_eq!(
+            catalog_add(&state, "copernicus-dem-30", Some(&editor_token))
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        let asset_id = state.db.list_assets().await.unwrap()[0].id;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/assets/{asset_id}/tile"))
+            .header("authorization", format!("Bearer {editor_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = router(Arc::clone(&state)).oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let message = String::from_utf8_lossy(&bytes);
+        assert!(message.contains("no uploaded input"), "{message}");
+        assert_eq!(
+            state.db.list_jobs_for_asset(asset_id).await.unwrap().len(),
+            1
+        );
     }
 
     // -- realtime collaboration websocket --
@@ -3156,8 +3338,9 @@ mod tests {
         assert!(may_modify_asset(&owner, Some("user-a")));
         assert!(!may_modify_asset(&other, Some("user-a")));
         assert!(may_modify_asset(&admin, Some("user-a")));
-        // legacy rows have no owner and stay writable for any editor
-        assert!(may_modify_asset(&other, None));
+        // rows with no owner are for admins alone
+        assert!(!may_modify_asset(&other, None));
+        assert!(may_modify_asset(&admin, None));
     }
 
     #[tokio::test]
@@ -3184,10 +3367,15 @@ mod tests {
             &state,
             "/v1/assets",
             Some(&editor_token),
-            serde_json::json!({ "name": "owned", "type": "3DTILES" }),
+            serde_json::json!({
+                "name": "owned",
+                "type": "3DTILES",
+                "options": { "sourceType": "POINT_CLOUD" },
+            }),
         )
-        .await;
-        assert_eq!(status, StatusCode::CREATED);
+        .await
+        .status();
+        assert_eq!(status, StatusCode::OK);
 
         let assets = state.db.list_assets().await.unwrap();
         assert_eq!(assets.len(), 1);
@@ -3234,10 +3422,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_ownerless_asset_accepts_any_editor() {
+    async fn legacy_ownerless_asset_refuses_an_editor_and_accepts_an_admin() {
         use tiletopia_server::{Asset, AssetStatus, AssetType};
         let state = test_state().await;
         let editor_token = bootstrap_editor(&state, "own-legacy-editor@example.com").await;
+        let admin_token = bootstrap_admin(&state, "own-legacy-admin@example.com").await;
 
         // a row from before owner_id existed
         let asset = Asset {
@@ -3257,6 +3446,11 @@ mod tests {
         let uri = format!("/api/v1/assets/{}", asset.id);
         assert_eq!(
             asset_write(&state, "DELETE", &uri, Some(&editor_token)).await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(state.db.get_asset(asset.id).await.unwrap().is_some());
+        assert_eq!(
+            asset_write(&state, "DELETE", &uri, Some(&admin_token)).await,
             StatusCode::NO_CONTENT
         );
     }
@@ -3328,7 +3522,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn asset_list_shows_only_your_own_and_legacy_rows() {
+    async fn asset_list_shows_only_your_own_rows() {
         use tiletopia_server::{Asset, AssetStatus, AssetType};
         let state = test_state().await;
         let a_token = bootstrap_editor(&state, "list-a@example.com").await;
@@ -3340,7 +3534,7 @@ mod tests {
         let a_id = a_asset["id"].as_str().unwrap().to_string();
         let b_id = b_asset["id"].as_str().unwrap().to_string();
 
-        // a row from before owner_id existed stays visible to everyone
+        // a row from before owner_id existed is visible to admins alone
         let legacy = Asset {
             id: uuid::Uuid::new_v4(),
             name: "legacy.glb".into(),
@@ -3358,14 +3552,14 @@ mod tests {
 
         let (status, seen) = list_assets(&state, Some(&a_token), "").await;
         assert_eq!(status, StatusCode::OK);
-        let mut expected = vec![a_id.clone(), legacy_id.clone()];
-        expected.sort();
-        assert_eq!(asset_ids(&seen), expected, "A must not see B's asset");
+        assert_eq!(
+            asset_ids(&seen),
+            vec![a_id.clone()],
+            "A must not see B's asset"
+        );
 
         let (_s, seen) = list_assets(&state, Some(&b_token), "").await;
-        let mut expected = vec![b_id.clone(), legacy_id.clone()];
-        expected.sort();
-        assert_eq!(asset_ids(&seen), expected);
+        assert_eq!(asset_ids(&seen), vec![b_id.clone()]);
 
         // an admin sees every asset
         let (_s, seen) = list_assets(&state, Some(&admin_token), "").await;
@@ -3601,28 +3795,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn annotation_list_stays_readable_with_any_token() {
+    async fn annotation_list_is_for_the_owner() {
         let state = test_state().await;
         let owner_token = bootstrap_editor(&state, "annlist-owner@example.com").await;
         let (_s, asset) = upload_glb(&state, Some(&owner_token)).await;
         let asset_id = asset["id"].as_str().unwrap();
         post_annotation(&state, asset_id, Some(&owner_token)).await;
+        let uri = format!("/api/v1/assets/{asset_id}/annotations");
 
         let (viewer_token, _) = signup(&state, "annlist-viewer@example.com").await;
-        let resp = router(Arc::clone(&state))
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/assets/{asset_id}/annotations"))
-                    .header("authorization", format!("Bearer {viewer_token}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
+        let (status, _) = get_with_token(&state, &uri, &viewer_token).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, bytes) = get_with_token(&state, &uri, &owner_token).await;
+        assert_eq!(status, StatusCode::OK);
         let v: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v.len(), 1);
     }
@@ -3874,11 +4060,7 @@ mod tests {
 
     // -- persistence and the job worker --
 
-    const PLY_FIXTURE: &str = "\
-ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\n\
-property float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\n\
-end_header\n0.0 0.0 0.0 255 0 0\n1.0 0.0 0.0 0 255 0\n0.0 1.0 0.0 0 0 255\n\
-1.0 1.0 1.0 255 255 255\n";
+    use crate::common::PLY_FIXTURE;
 
     /// Rows written through one `Database` are still there after the handle is
     /// dropped and the same file is reopened, which is the whole point of
@@ -3920,6 +4102,9 @@ end_header\n0.0 0.0 0.0 255 0 0\n1.0 0.0 0.0 0 255 0\n0.0 1.0 0.0 0 0 255\n\
             points_processed: 42,
             tiles_written: 7,
             placement: tiletopia_server::db::ModelPlacement::default(),
+            mesh_compression: tiletopia_core::glb_writer::MeshCompression::None,
+            texture_compression: Default::default(),
+            photogrammetry_preset: Default::default(),
         };
 
         {
@@ -4003,6 +4188,9 @@ end_header\n0.0 0.0 0.0 255 0 0\n1.0 0.0 0.0 0 255 0\n0.0 1.0 0.0 0 0 255\n\
                 id,
                 input_path.to_string_lossy().into_owned(),
                 tiletopia_server::db::ModelPlacement::default(),
+                tiletopia_core::glb_writer::MeshCompression::None,
+                Default::default(),
+                Default::default(),
             )
             .await
             .unwrap();
@@ -4015,7 +4203,7 @@ end_header\n0.0 0.0 0.0 255 0 0\n1.0 0.0 0.0 0 255 0\n0.0 1.0 0.0 0 0 255\n\
         assert!(queued.progress.abs() < 1e-9);
         assert!(queued.started_at.is_none());
         assert_eq!(
-            state.db.next_queued_job().await.unwrap().unwrap().id,
+            state.db.next_queued_job(&[]).await.unwrap().unwrap().id,
             job.id
         );
 
@@ -4064,12 +4252,14 @@ end_header\n0.0 0.0 0.0 255 0 0\n1.0 0.0 0.0 0 255 0\n0.0 1.0 0.0 0 0 255\n\
         assert_eq!(tiled.tile_count, settled.tiles_written);
 
         // and no queued work is left behind
-        assert!(state.db.next_queued_job().await.unwrap().is_none());
+        assert!(state.db.next_queued_job(&[]).await.unwrap().is_none());
     }
 
     // -- the external tiler --
 
     const MAGO_JAR_VAR: &str = "TILETOPIA_MAGO_JAR";
+    const ASSIMP_QUAD_DAE: &str =
+        include_str!("../../tiletopia-ingest/tests/fixtures/assimp_quad/quad.dae");
 
     const CUBE_OBJ: &str = "\
 v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\n\
@@ -4092,17 +4282,35 @@ f 1 2 3 4\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
         contents: &str,
         fields: &[(&str, &str)],
     ) -> (StatusCode, Vec<u8>) {
+        upload_bytes_with_fields(state, token, filename, contents.as_bytes(), fields).await
+    }
+
+    async fn upload_bytes_with_fields(
+        state: &Arc<AppState>,
+        token: &str,
+        filename: &str,
+        contents: &[u8],
+        fields: &[(&str, &str)],
+    ) -> (StatusCode, Vec<u8>) {
         let boundary = "tiletopiatestboundary";
-        let mut body = String::new();
+        let mut body = Vec::new();
         for (name, value) in fields {
-            body.push_str(&format!(
-                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
-            ));
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+                )
+                .as_bytes(),
+            );
         }
-        body.push_str(&format!(
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
-             filename=\"{filename}\"\r\n\r\n{contents}\r\n--{boundary}--\r\n"
-        ));
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
+                 filename=\"{filename}\"\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(contents);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
         let req = Request::builder()
             .method("POST")
@@ -4121,6 +4329,52 @@ f 1 2 3 4\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
             .await
             .unwrap();
         (status, bytes.to_vec())
+    }
+
+    #[tokio::test]
+    async fn a_text_field_past_the_cap_is_refused_by_name_and_stores_no_asset() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "long-field-editor@example.com").await;
+        let too_long = "1".repeat(tiletopia_server::upload::MAX_TEXT_FIELD_BYTES + 1);
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "ortho.png",
+            "never read",
+            &[("world_file", too_long.as_str())],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(String::from_utf8_lossy(&body).contains("world_file is longer than"));
+        assert!(state.db.list_assets().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_multipart_body_with_no_field_is_refused_on_both_upload_routes() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "no-field-editor@example.com").await;
+        let no_boundary = vec![b'x'; tiletopia_server::upload::MAX_BYTES_AWAITING_FIELD + 1];
+
+        for uri in ["/api/v1/assets", "/api/v1/tilesets"] {
+            let req = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "multipart/form-data; boundary=bound")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(no_boundary.clone()))
+                .unwrap();
+            let resp = router(Arc::clone(&state)).oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&bytes).contains("without reaching a field"),
+                "{uri}"
+            );
+        }
     }
 
     async fn get_with_token(
@@ -4449,6 +4703,65 @@ END-ISO-10303-21;
         );
     }
 
+    fn declares_edge_visibility(tile: &[u8]) -> bool {
+        let glb = gltf::Glb::from_slice(tile).expect("a parseable GLB");
+        let json: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+        json["meshes"][0]["primitives"][0]["extensions"]
+            .get("EXT_mesh_primitive_edge_visibility")
+            .is_some()
+    }
+
+    #[tokio::test]
+    async fn ifc_tiles_of_every_mesh_compression_carry_cad_edges() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "cad-edges-editor@example.com").await;
+
+        for (filename, contents, mesh_compression, expected) in [
+            ("wall.ifc", WALL_IFC, "none", true),
+            ("wall.ifc", WALL_IFC, "meshopt", true),
+            ("wall.ifc", WALL_IFC, "draco", true),
+            ("cube.obj", CUBE_OBJ, "none", false),
+        ] {
+            let (status, body) = upload_with_fields(
+                &state,
+                &token,
+                filename,
+                contents,
+                &[
+                    ("longitude", "10"),
+                    ("latitude", "20"),
+                    ("mesh_compression", mesh_compression),
+                ],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+            let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+            let settled = settle_only_job(&state, asset_id).await;
+            assert_eq!(
+                settled.status,
+                JobStatus::Done,
+                "{filename} {mesh_compression}: {:?}",
+                settled.error
+            );
+            let (status, tile) = get_with_token(
+                &state,
+                &format!("/api/v1/assets/{asset_id}/tiles/root.glb"),
+                &token,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                declares_edge_visibility(&tile),
+                expected,
+                "{filename} {mesh_compression}"
+            );
+        }
+    }
+
     /// A model at the ECEF origin is not a success, so an IFC with neither an
     /// upload placement nor site coordinates fails saying what to send.
     #[tokio::test]
@@ -4510,6 +4823,240 @@ END-ISO-10303-21;
                 12.5,
             ),
         );
+    }
+
+    // UTM 32N (500000, 0) sits on 9 degrees east at the equator, and x points along the northing
+    const WALL_WITH_A_MAP_CONVERSION_IFC: &str = "\
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('ViewDefinition [CoordinationView]'),'2;1');
+FILE_NAME('mapped.ifc','2024-01-01',(''),(''),'','','');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1=IFCPROJECT('0001',$,'TestProject',$,$,$,$,$,$);
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCLOCALPLACEMENT($,#11);
+#20=IFCRECTANGLEPROFILEDEF(.AREA.,$,#11,2.0,1.0);
+#21=IFCDIRECTION((0.,0.,1.));
+#22=IFCEXTRUDEDAREASOLID(#20,#11,#21,3.0);
+#30=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#22));
+#31=IFCPRODUCTDEFINITIONSHAPE($,$,(#30));
+#40=IFCWALL('0002',$,'TestWall',$,$,#12,#31,$,$);
+#60=IFCPROJECTEDCRS('EPSG:32632',$,$,$,$,$,$);
+#61=IFCMAPCONVERSION($,#60,500000.,0.,100.,0.,1.,1.);
+ENDSEC;
+END-ISO-10303-21;
+";
+
+    fn assert_x_axis_points_north(tileset: &serde_json::Value, latitude: f64, longitude: f64) {
+        let east_north_up = tiletopia_core::spatial::enu_to_ecef_matrix(
+            latitude.to_radians(),
+            longitude.to_radians(),
+            0.0,
+        );
+        for row in 0..3 {
+            let written = tileset["root"]["transform"][row].as_f64().unwrap();
+            assert!(
+                (written - east_north_up[4 + row]).abs() < 1e-3,
+                "row {row}: {written} is not {}",
+                east_north_up[4 + row]
+            );
+        }
+    }
+
+    async fn tileset_of(
+        state: &Arc<AppState>,
+        token: &str,
+        asset_id: uuid::Uuid,
+    ) -> serde_json::Value {
+        let (status, body) = get_with_token(
+            state,
+            &format!("/api/v1/assets/{asset_id}/tileset.json"),
+            token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_ifc_map_conversion_places_and_turns_the_model() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "native-ifc-mapped@example.com").await;
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "mapped.ifc",
+            WALL_WITH_A_MAP_CONVERSION_IFC,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(
+            settled.status,
+            JobStatus::Done,
+            "error: {:?}",
+            settled.error
+        );
+
+        let tileset = tileset_of(&state, &token, asset_id).await;
+        assert_within_a_metre(
+            root_translation(&tileset),
+            tiletopia_core::spatial::geodetic_to_ecef(0.0, 9f64.to_radians(), 100.0),
+        );
+        assert_x_axis_points_north(&tileset, 0.0, 9.0);
+    }
+
+    #[tokio::test]
+    async fn upload_coordinates_outrank_a_map_conversion_and_keep_its_rotation() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "native-ifc-mapped-upload@example.com").await;
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "mapped.ifc",
+            WALL_WITH_A_MAP_CONVERSION_IFC,
+            &[("longitude", "10"), ("latitude", "20")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(
+            settled.status,
+            JobStatus::Done,
+            "error: {:?}",
+            settled.error
+        );
+
+        let tileset = tileset_of(&state, &token, asset_id).await;
+        assert_within_a_metre(
+            root_translation(&tileset),
+            tiletopia_core::spatial::geodetic_to_ecef(20f64.to_radians(), 10f64.to_radians(), 0.0),
+        );
+        assert_x_axis_points_north(&tileset, 20.0, 10.0);
+    }
+
+    #[tokio::test]
+    async fn an_ifczip_is_unpacked_and_tiled_from_its_single_ifc() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "native-ifczip@example.com").await;
+        let ifczip = crate::common::zip_of(&[("nested/model.ifc", WALL_ON_A_SITE_IFC.as_bytes())]);
+
+        let (status, body) =
+            upload_bytes_with_fields(&state, &token, "site.ifczip", &ifczip, &[]).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(
+            settled.status,
+            JobStatus::Done,
+            "error: {:?}",
+            settled.error
+        );
+        assert!(
+            settled.input_path.ends_with("site.ifc"),
+            "{}",
+            settled.input_path
+        );
+        let input_dir = state.data_dir.join(asset_id.to_string()).join("input");
+        let inputs = std::fs::read_dir(input_dir).unwrap().count();
+        assert_eq!(inputs, 1, "the input directory should hold only the .ifc");
+        let asset_dir = state.data_dir.join(asset_id.to_string());
+        assert!(
+            tiletopia_server::element_store::store_path(&asset_dir).exists(),
+            "an ifczip should build the element store"
+        );
+
+        let longitude: f64 = -(7.0 / 60.0 + 40.0 / 3600.0);
+        assert_within_a_metre(
+            root_translation(&tileset_of(&state, &token, asset_id).await),
+            tiletopia_core::spatial::geodetic_to_ecef(
+                51.5f64.to_radians(),
+                longitude.to_radians(),
+                12.5,
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ifczip_without_exactly_one_ifc_is_refused() {
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "native-ifczip-refused@example.com").await;
+        let two_models = crate::common::zip_of(&[
+            ("a.ifc", WALL_IFC.as_bytes()),
+            ("b.ifc", WALL_IFC.as_bytes()),
+        ]);
+        let no_model = crate::common::zip_of(&[("readme.txt", b"no model".as_slice())]);
+
+        for (ifczip, count) in [(two_models, "2"), (no_model, "0")] {
+            let (status, body) = upload_bytes_with_fields(
+                &state,
+                &token,
+                "site.ifczip",
+                &ifczip,
+                &[("longitude", "10"), ("latitude", "20")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let reason = String::from_utf8_lossy(&body);
+            assert!(reason.contains(&format!("holds {count}")), "{reason}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ifc_element_that_fails_to_convert_is_reported_on_the_finished_job() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "native-ifc-dropped@example.com").await;
+        let with_a_broken_wall = WALL_IFC.replace(
+            "ENDSEC;\nEND-ISO",
+            "#41=IFCWALL('0003',$,'Broken',$,$,#12,#999,$);\nENDSEC;\nEND-ISO",
+        );
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "wall.ifc",
+            &with_a_broken_wall,
+            &[("longitude", "10"), ("latitude", "20")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+
+        assert_eq!(settled.status, JobStatus::Done);
+        assert!(settled.tiles_written > 0, "no tiles were counted");
+        let report = settled.error.expect("the job reports the dropped element");
+        assert!(report.starts_with("1 IFC elements"), "{report}");
+        assert!(report.contains("#41"), "{report}");
     }
 
     /// A mesh is tiled by this repository even with a jar configured, and lands
@@ -4587,20 +5134,66 @@ END-ISO-10303-21;
         assert!(error.contains("longitude and latitude"), "{error}");
     }
 
-    /// DAE has no reader here and no mago input type, so it still fails naming
-    /// the format. The check runs before the jar lookup.
     #[tokio::test]
-    async fn a_dae_upload_fails_naming_the_format() {
+    async fn a_dae_upload_is_tiled_natively_at_its_placement() {
         use tiletopia_server::db::JobStatus;
 
-        let jar = std::env::var(MAGO_JAR_VAR)
-            .ok()
-            .map(std::path::PathBuf::from);
-        let state = state_with_external_tiler(jar).await;
+        let state = state_with_external_tiler(Some("/nonexistent/mago.jar".into())).await;
         let token = bootstrap_editor(&state, "dae-editor@example.com").await;
 
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "quad.dae",
+            ASSIMP_QUAD_DAE,
+            &[("longitude", "10"), ("latitude", "20")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(
+            settled.status,
+            JobStatus::Done,
+            "error: {:?}",
+            settled.error
+        );
+        assert!(settled.tiles_written > 0, "no tiles were counted");
+
+        let (status, body) = get_with_token(
+            &state,
+            &format!("/api/v1/assets/{asset_id}/tileset.json"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tileset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_within_a_metre(
+            root_translation(&tileset),
+            tiletopia_core::spatial::geodetic_to_ecef(20f64.to_radians(), 10f64.to_radians(), 0.0),
+        );
+
+        let (status, tile) = get_with_token(
+            &state,
+            &format!("/api/v1/assets/{asset_id}/tiles/root.glb"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&tile[..4], b"glTF", "tile content is not a glb");
+    }
+
+    #[tokio::test]
+    async fn a_dae_upload_with_no_placement_fails_naming_longitude_and_latitude() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "dae-nocoords@example.com").await;
+
         let (status, body) =
-            upload_with_fields(&state, &token, "model.dae", "not really collada", &[]).await;
+            upload_with_fields(&state, &token, "quad.dae", ASSIMP_QUAD_DAE, &[]).await;
         assert_eq!(status, StatusCode::CREATED);
         let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
@@ -4608,9 +5201,58 @@ END-ISO-10303-21;
         let settled = settle_only_job(&state, asset_id).await;
         assert_eq!(settled.status, JobStatus::Failed);
         let error = settled.error.expect("a failed job says why");
-        assert!(error.contains("dae"), "{error}");
-        assert!(error.contains("native tiler"), "{error}");
-        assert!(error.contains("external one"), "{error}");
+        assert!(error.contains("longitude and latitude"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_dae_upload_fails_naming_collada() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "dae-editor@example.com").await;
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "model.dae",
+            "not really collada",
+            &[("longitude", "10"), ("latitude", "20")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(settled.status, JobStatus::Failed);
+        let error = settled.error.expect("a failed job says why");
+        assert!(error.contains("COLLADA"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_collada_1_5_upload_fails_naming_the_version() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "dae-15@example.com").await;
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "model.dae",
+            r#"<COLLADA xmlns="http://www.collada.org/2008/03/COLLADASchema" version="1.5.0"/>"#,
+            &[("longitude", "10"), ("latitude", "20")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(settled.status, JobStatus::Failed);
+        let error = settled.error.expect("a failed job says why");
+        assert!(error.contains("1.5.0"), "{error}");
+        assert!(error.contains("1.4.1"), "{error}");
     }
 
     /// The catch-all that used to call every unknown extension a point cloud is
@@ -4642,12 +5284,551 @@ END-ISO-10303-21;
         assert_eq!(state.db.list_assets().await.unwrap().len(), 0);
     }
 
+    async fn served_mesh_tile(
+        state: &Arc<AppState>,
+        token: &str,
+        fields: &[(&str, &str)],
+    ) -> serde_json::Value {
+        use tiletopia_server::db::JobStatus;
+
+        let (status, body) = upload_with_fields(state, token, "cube.obj", CUBE_OBJ, fields).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(state, asset_id).await;
+        assert_eq!(
+            settled.status,
+            JobStatus::Done,
+            "error: {:?}",
+            settled.error
+        );
+
+        let (status, tile) = get_with_token(
+            state,
+            &format!("/api/v1/assets/{asset_id}/tiles/root.glb"),
+            token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let glb = gltf::Glb::from_slice(&tile).expect("a parseable GLB");
+        serde_json::from_slice(&glb.json).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_upload_tiles_with_the_mesh_compression_it_names_and_meshopt_otherwise() {
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "mesh-compression-editor@example.com").await;
+        let placement = [("longitude", "10"), ("latitude", "20")];
+
+        let unnamed = served_mesh_tile(&state, &token, &placement).await;
+        assert_eq!(
+            unnamed["extensionsRequired"],
+            serde_json::json!(["EXT_meshopt_compression"])
+        );
+
+        for (value, extension) in [
+            ("meshopt", "EXT_meshopt_compression"),
+            ("draco", "KHR_draco_mesh_compression"),
+        ] {
+            let mut fields = placement.to_vec();
+            fields.push(("mesh_compression", value));
+            let tile = served_mesh_tile(&state, &token, &fields).await;
+            assert_eq!(
+                tile["extensionsRequired"],
+                serde_json::json!([extension]),
+                "{value}"
+            );
+        }
+
+        let mut fields = placement.to_vec();
+        fields.push(("mesh_compression", "none"));
+        let plain = served_mesh_tile(&state, &token, &fields).await;
+        assert!(plain.get("extensionsRequired").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_mesh_compression_is_refused_and_nothing_is_stored() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "bad-compression-editor@example.com").await;
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "cube.obj",
+            CUBE_OBJ,
+            &[("mesh_compression", "gzip")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = String::from_utf8_lossy(&body);
+        assert!(message.contains("gzip"), "{message}");
+        assert!(message.contains("draco"), "{message}");
+        assert_eq!(state.db.list_assets().await.unwrap().len(), 0);
+    }
+
+    async fn re_tile_through_the_route(
+        state: &Arc<AppState>,
+        token: &str,
+        asset_id: uuid::Uuid,
+    ) -> tiletopia_server::db::JobRecord {
+        let uri = format!("/api/v1/assets/{asset_id}/tile");
+        assert_eq!(
+            asset_write(state, "POST", &uri, Some(token)).await,
+            StatusCode::ACCEPTED
+        );
+        settle_only_job(state, asset_id).await
+    }
+
+    #[tokio::test]
+    async fn a_re_tile_through_the_route_keeps_the_placement_and_mesh_compression() {
+        use tiletopia_core::glb_writer::MeshCompression;
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "retile-mesh-editor@example.com").await;
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "cube.obj",
+            CUBE_OBJ,
+            &[
+                ("longitude", "10"),
+                ("latitude", "20"),
+                ("mesh_compression", "draco"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+        let first = settle_only_job(&state, asset_id).await;
+        assert_eq!(first.status, JobStatus::Done, "{:?}", first.error);
+
+        let re_tile = re_tile_through_the_route(&state, &token, asset_id).await;
+
+        assert_ne!(re_tile.id, first.id);
+        assert_eq!(re_tile.status, JobStatus::Done, "{:?}", re_tile.error);
+        assert_eq!(re_tile.placement.longitude, Some(10.0));
+        assert_eq!(re_tile.placement.latitude, Some(20.0));
+        assert_eq!(re_tile.mesh_compression, MeshCompression::Draco);
+        let (status, tile) = get_with_token(
+            &state,
+            &format!("/api/v1/assets/{asset_id}/tiles/root.glb"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let glb = gltf::Glb::from_slice(&tile).expect("a parseable GLB");
+        let json: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+        assert_eq!(
+            json["extensionsRequired"],
+            serde_json::json!(["KHR_draco_mesh_compression"])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_re_tile_through_the_route_keeps_the_units_of_a_dxf_upload() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "retile-dxf-editor@example.com").await;
+        let unitless = dxf_with_insunits("0");
+        let (status, asset) = upload_dxf(&state, &token, &unitless, Some("millimetres")).await;
+        assert_eq!(status, StatusCode::CREATED, "{asset}");
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+        let first = settle_only_job(&state, asset_id).await;
+        assert_eq!(first.status, JobStatus::Done, "{:?}", first.error);
+
+        let re_tile = re_tile_through_the_route(&state, &token, asset_id).await;
+
+        assert_ne!(re_tile.id, first.id);
+        assert_eq!(re_tile.status, JobStatus::Done, "{:?}", re_tile.error);
+        assert_eq!(re_tile.placement.units.as_deref(), Some("millimetres"));
+    }
+
+    #[tokio::test]
+    async fn a_re_tile_after_the_data_directory_moves_reads_the_assets_current_input() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "retile-moved-editor@example.com").await;
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "cube.obj",
+            CUBE_OBJ,
+            &[("longitude", "10"), ("latitude", "20")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+        let first = settle_only_job(&state, asset_id).await;
+        assert_eq!(first.status, JobStatus::Done, "{:?}", first.error);
+        assert_eq!(first.input_path, "input/cube.obj");
+
+        sqlx::query("UPDATE jobs SET input_path = ?")
+            .bind(format!("/moved/away/{asset_id}/input/cube.obj"))
+            .execute(&state.db.pool)
+            .await
+            .unwrap();
+
+        let re_tile = re_tile_through_the_route(&state, &token, asset_id).await;
+
+        assert_eq!(re_tile.status, JobStatus::Done, "{:?}", re_tile.error);
+        assert_eq!(re_tile.input_path, "input/cube.obj");
+    }
+
+    #[tokio::test]
+    async fn a_native_mesh_upload_with_a_crs_is_refused_naming_it() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "native-crs-editor@example.com").await;
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "cube.obj",
+            CUBE_OBJ,
+            &[
+                ("longitude", "10"),
+                ("latitude", "20"),
+                ("crs", "EPSG:32632"),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = String::from_utf8_lossy(&body);
+        assert!(
+            message.contains("cube.obj") && message.contains("crs"),
+            "{message}"
+        );
+        assert!(state.db.list_assets().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_re_tile_with_no_job_tells_a_missing_input_from_an_unreadable_one() {
+        let state = test_state().await;
+        let token = bootstrap_admin(&state, "retile-input-admin@example.com").await;
+        let asset_id = seed_asset(&state, tiletopia_server::AssetType::Model).await;
+        let uri = format!("/api/v1/assets/{asset_id}/tile");
+        assert_eq!(
+            asset_write(&state, "POST", &uri, Some(&token)).await,
+            StatusCode::NOT_FOUND
+        );
+
+        // read_dir on a file fails with NotADirectory rather than NotFound
+        let asset_dir = state.data_dir.join(asset_id.to_string());
+        std::fs::create_dir_all(&asset_dir).unwrap();
+        std::fs::write(asset_dir.join("input"), b"").unwrap();
+        assert_eq!(
+            asset_write(&state, "POST", &uri, Some(&token)).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn a_jobs_table_from_before_texture_compression_gains_it_as_none() {
+        use tiletopia_core::mesh_tiler::TextureCompression;
+        use tiletopia_server::db::Database;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_url = format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("tiletopia.db").display()
+        );
+        let db = Database::new(&db_url).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                asset_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                progress REAL DEFAULT 0.0,
+                input_path TEXT NOT NULL,
+                output_format TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                error TEXT,
+                points_processed INTEGER DEFAULT 0,
+                tiles_written INTEGER DEFAULT 0,
+                longitude REAL,
+                latitude REAL,
+                crs TEXT
+            )",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let job_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO jobs (id, asset_id, status, input_path, output_format, created_at)
+             VALUES (?, ?, 'done', 'cube.obj', '3dtiles', ?)",
+        )
+        .bind(job_id.to_string())
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        db.migrate().await.unwrap();
+
+        let job = db.get_job(job_id).await.unwrap().expect("the older row");
+        assert_eq!(job.texture_compression, TextureCompression::None);
+    }
+
+    fn textured_quad_glb() -> Vec<u8> {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(70, 50, image::Rgba([200, 100, 50, 255]))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let mesh = tiletopia_core::glb_writer::GlbMesh {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+            ],
+            normals: None,
+            indices: Some(vec![0, 1, 2, 0, 2, 3]),
+            colors: None,
+            texcoords: Some(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
+            metadata: None,
+            feature_ids: None,
+            texture: Some(tiletopia_core::glb_writer::TextureData {
+                image_data: png.into_inner(),
+                mime_type: "image/png".to_string(),
+                width: 70,
+                height: 50,
+            }),
+            base_color_factor: None,
+            node_translation: None,
+            instanced_meshes: Vec::new(),
+            edge_visibility: None,
+        };
+        let mut glb = Vec::new();
+        tiletopia_core::glb_writer::write_glb(&mesh, &mut glb).unwrap();
+        glb
+    }
+
+    async fn root_tile_json_and_texture(
+        state: &Arc<AppState>,
+        token: &str,
+        asset_id: uuid::Uuid,
+    ) -> (serde_json::Value, Vec<u8>) {
+        let (status, tile) = get_with_token(
+            state,
+            &format!("/api/v1/assets/{asset_id}/tiles/root.glb"),
+            token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let glb = gltf::Glb::from_slice(&tile).expect("a parseable GLB");
+        let json: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+        let view = &json["bufferViews"][json["images"][0]["bufferView"].as_u64().unwrap() as usize];
+        let offset = view["byteOffset"].as_u64().unwrap() as usize;
+        let length = view["byteLength"].as_u64().unwrap() as usize;
+        let texture = glb.bin.unwrap()[offset..offset + length].to_vec();
+        (json, texture)
+    }
+
+    #[tokio::test]
+    async fn a_ktx2_upload_stores_the_choice_and_tiles_basislz_etc1s_textures() {
+        use tiletopia_core::mesh_tiler::TextureCompression;
+        use tiletopia_server::db::JobStatus;
+
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "ktx2-editor@example.com").await;
+        let (status, body) = upload_bytes_with_fields(
+            &state,
+            &token,
+            "quad.glb",
+            &textured_quad_glb(),
+            &[
+                ("longitude", "10"),
+                ("latitude", "20"),
+                ("texture_compression", "ktx2"),
+                ("mesh_compression", "none"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(settled.status, JobStatus::Done, "{:?}", settled.error);
+        assert_eq!(settled.texture_compression, TextureCompression::Ktx2);
+
+        let (json, texture) = root_tile_json_and_texture(&state, &token, asset_id).await;
+        assert_eq!(json["images"][0]["mimeType"], "image/ktx2");
+        assert_eq!(
+            json["extensionsRequired"],
+            serde_json::json!(["KHR_texture_basisu"])
+        );
+        let reader = ktx2::Reader::new(&texture).expect("a parseable KTX2");
+        let header = reader.header();
+        assert_eq!((header.pixel_width, header.pixel_height), (72, 52));
+        assert_eq!(
+            header.supercompression_scheme,
+            Some(ktx2::SupercompressionScheme::BasisLZ)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upload_without_texture_compression_tiles_its_source_texture() {
+        use tiletopia_core::mesh_tiler::TextureCompression;
+        use tiletopia_server::db::JobStatus;
+
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "ktx2-default-editor@example.com").await;
+        let (status, body) = upload_bytes_with_fields(
+            &state,
+            &token,
+            "quad.glb",
+            &textured_quad_glb(),
+            &[
+                ("longitude", "10"),
+                ("latitude", "20"),
+                ("mesh_compression", "none"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(settled.status, JobStatus::Done, "{:?}", settled.error);
+        assert_eq!(settled.texture_compression, TextureCompression::None);
+
+        let (json, texture) = root_tile_json_and_texture(&state, &token, asset_id).await;
+        assert_eq!(json["images"][0]["mimeType"], "image/png");
+        assert!(json.get("extensionsRequired").is_none());
+        assert_eq!(
+            image::guess_format(&texture).unwrap(),
+            image::ImageFormat::Png
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ktx2_texture_stays_readable_under_each_mesh_compression() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "ktx2-mesh-editor@example.com").await;
+
+        for (value, extension) in [
+            ("meshopt", "EXT_meshopt_compression"),
+            ("draco", "KHR_draco_mesh_compression"),
+        ] {
+            let (status, body) = upload_bytes_with_fields(
+                &state,
+                &token,
+                "quad.glb",
+                &textured_quad_glb(),
+                &[
+                    ("longitude", "10"),
+                    ("latitude", "20"),
+                    ("texture_compression", "ktx2"),
+                    ("mesh_compression", value),
+                ],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{value}");
+            let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+            let settled = settle_only_job(&state, asset_id).await;
+            assert_eq!(
+                settled.status,
+                JobStatus::Done,
+                "{value}: {:?}",
+                settled.error
+            );
+
+            let (json, texture) = root_tile_json_and_texture(&state, &token, asset_id).await;
+            assert_eq!(
+                json["extensionsRequired"],
+                serde_json::json!(["KHR_texture_basisu", extension]),
+                "{value}"
+            );
+            assert_eq!(json["images"][0]["mimeType"], "image/ktx2", "{value}");
+            ktx2::Reader::new(&texture).expect("a parseable KTX2");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_texture_compression_is_refused_naming_the_accepted_values() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "ktx2-unknown-editor@example.com").await;
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "cube.obj",
+            CUBE_OBJ,
+            &[("texture_compression", "webp")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = String::from_utf8_lossy(&body);
+        assert!(message.contains("ktx2"), "{message}");
+        assert!(message.contains("none"), "{message}");
+        assert_eq!(state.db.list_assets().await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn ktx2_on_a_file_the_native_mesh_tiler_does_not_take_is_refused() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "ktx2-vector-editor@example.com").await;
+
+        for filename in ["roads.geojson", "scan.las"] {
+            let (status, body) = upload_with_fields(
+                &state,
+                &token,
+                filename,
+                "contents",
+                &[("texture_compression", "ktx2")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{filename}");
+            let message = String::from_utf8_lossy(&body);
+            assert!(message.contains("texture_compression"), "{message}");
+        }
+        assert_eq!(state.db.list_assets().await.unwrap().len(), 0);
+    }
+
     // -- asset exports --
 
     const EXPORT_ASSET: &str = "11111111-1111-1111-1111-111111111111";
 
     fn geojson_export_body() -> serde_json::Value {
         serde_json::json!({ "asset_id": EXPORT_ASSET, "format": "geojson" })
+    }
+
+    async fn bootstrap_export_owner(state: &Arc<AppState>, email: &str) -> String {
+        use tiletopia_server::{Asset, AssetStatus, AssetType};
+        let (token, uid) = bootstrap_editor_with_id(state, email).await;
+        state
+            .db
+            .create_asset(&Asset {
+                id: uuid::Uuid::parse_str(EXPORT_ASSET).unwrap(),
+                name: "cloud.las".into(),
+                asset_type: AssetType::PointCloud,
+                status: AssetStatus::Ready,
+                created_at: chrono::Utc::now(),
+                tile_count: 0,
+                size_bytes: 0,
+                description: String::new(),
+                tags: vec![],
+                owner_id: Some(uid),
+            })
+            .await
+            .unwrap();
+        token
     }
 
     async fn post_export(
@@ -4711,7 +5892,7 @@ END-ISO-10303-21;
     #[tokio::test]
     async fn export_create_poll_and_download() {
         let state = test_state().await;
-        let token = bootstrap_editor(&state, "export-editor@example.com").await;
+        let token = bootstrap_export_owner(&state, "export-editor@example.com").await;
 
         let (status, job) = post_export(&state, Some(&token), geojson_export_body()).await;
         assert_eq!(status, StatusCode::ACCEPTED);
@@ -4860,7 +6041,7 @@ END-ISO-10303-21;
     #[tokio::test]
     async fn offline_viewer_export_bundles_the_page_and_the_tiles() {
         let state = test_state().await;
-        let token = bootstrap_editor(&state, "offline-editor@example.com").await;
+        let token = bootstrap_export_owner(&state, "offline-editor@example.com").await;
         seed_tiled_asset(&state.data_dir, EXPORT_ASSET);
 
         let (status, job) = post_export(
@@ -4913,15 +6094,12 @@ END-ISO-10303-21;
     #[tokio::test]
     async fn offline_viewer_export_of_an_untiled_asset_fails() {
         let state = test_state().await;
-        let token = bootstrap_editor(&state, "offline-untiled@example.com").await;
+        let token = bootstrap_export_owner(&state, "offline-untiled@example.com").await;
 
         let (status, job) = post_export(
             &state,
             Some(&token),
-            serde_json::json!({
-                "asset_id": uuid::Uuid::new_v4().to_string(),
-                "format": "offline_viewer",
-            }),
+            serde_json::json!({ "asset_id": EXPORT_ASSET, "format": "offline_viewer" }),
         )
         .await;
         assert_eq!(status, StatusCode::ACCEPTED);
@@ -5002,7 +6180,7 @@ END-ISO-10303-21;
     #[tokio::test]
     async fn export_of_another_tenant_is_invisible() {
         let state = test_state().await;
-        let owner = bootstrap_editor(&state, "export-owner@example.com").await;
+        let owner = bootstrap_export_owner(&state, "export-owner@example.com").await;
         let other = bootstrap_editor(&state, "export-other@example.com").await;
 
         let (status, job) = post_export(&state, Some(&owner), geojson_export_body()).await;
@@ -5019,7 +6197,7 @@ END-ISO-10303-21;
     #[tokio::test]
     async fn export_listing_is_tenant_scoped() {
         let state = test_state().await;
-        let owner = bootstrap_editor(&state, "list-owner@example.com").await;
+        let owner = bootstrap_export_owner(&state, "list-owner@example.com").await;
         let other = bootstrap_editor(&state, "list-other@example.com").await;
 
         let (status, job) = post_export(&state, Some(&owner), geojson_export_body()).await;

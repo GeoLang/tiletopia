@@ -2,17 +2,32 @@
 
 use crate::{IngestError, Material, MeshData, Texture, texture_image};
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 
 /// Read meshes from a Wavefront OBJ file. tobj starts a new model at every
 /// `usemtl`, so a model already carries at most one material.
 pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
-    let (models, load_materials) = tobj::load_obj(
-        path,
+    let mesh_dir = path.parent().unwrap_or(Path::new("."));
+    let mut reader = BufReader::new(File::open(path)?);
+    let (models, load_materials) = tobj::load_obj_buf(
+        &mut reader,
         &tobj::LoadOptions {
             triangulate: true,
             single_index: true,
             ..Default::default()
+        },
+        |mtllib| {
+            if !texture_image::stays_inside_the_mesh_directory(&mtllib.to_string_lossy()) {
+                tracing::warn!(
+                    "mtllib {} is outside {}, its materials are not read",
+                    mtllib.display(),
+                    mesh_dir.display()
+                );
+                return Ok((Vec::new(), Default::default()));
+            }
+            tobj::load_mtl(mesh_dir.join(mtllib))
         },
     )
     .map_err(|e| IngestError::ParseError(format!("OBJ load error: {e}")))?;
@@ -25,7 +40,6 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
         Vec::new()
     });
 
-    let mesh_dir = path.parent().unwrap_or(Path::new("."));
     let mut textures = TextureCache::default();
     let mut meshes = Vec::with_capacity(models.len());
 
@@ -36,7 +50,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             continue;
         }
 
-        let positions: Vec<[f32; 3]> = (0..num_verts)
+        let positions: Vec<[f64; 3]> = (0..num_verts)
             .map(|i| {
                 [
                     mesh.positions[i * 3],
@@ -50,9 +64,9 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             (0..num_verts)
                 .map(|i| {
                     [
-                        mesh.normals[i * 3],
-                        mesh.normals[i * 3 + 1],
-                        mesh.normals[i * 3 + 2],
+                        mesh.normals[i * 3] as f32,
+                        mesh.normals[i * 3 + 1] as f32,
+                        mesh.normals[i * 3 + 2] as f32,
                     ]
                 })
                 .collect()
@@ -63,7 +77,12 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
         // OBJ counts v from the bottom of the image, glTF from the top
         let texcoords: Vec<[f32; 2]> = if mesh.texcoords.len() == num_verts * 2 {
             (0..num_verts)
-                .map(|i| [mesh.texcoords[i * 2], 1.0 - mesh.texcoords[i * 2 + 1]])
+                .map(|i| {
+                    [
+                        mesh.texcoords[i * 2] as f32,
+                        (1.0 - mesh.texcoords[i * 2 + 1]) as f32,
+                    ]
+                })
                 .collect()
         } else {
             Vec::new()
@@ -75,7 +94,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             .map(|material| Material {
                 base_color_factor: material
                     .diffuse
-                    .map_or([1.0; 4], |[r, g, b]| [r, g, b, 1.0]),
+                    .map_or([1.0; 4], |[r, g, b]| [r as f32, g as f32, b as f32, 1.0]),
                 texture: material
                     .diffuse_texture
                     .as_ref()
@@ -90,6 +109,8 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             name: model.name,
             material,
             asset_id: None,
+            class: None,
+            storey: None,
         });
     }
 
@@ -166,6 +187,20 @@ f 2 4 3
         assert_eq!(m.indices.len(), 6);
         assert!(m.texcoords.is_empty());
         assert!(m.material.is_none());
+    }
+
+    #[test]
+    fn projected_coordinates_keep_their_fractional_metres() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("far.obj");
+        std::fs::write(
+            &path,
+            "v 500000.125 5800000.375 12.5\nv 500001.125 5800000.375 12.5\nv 500000.125 5800001.375 12.5\nf 1 2 3\n",
+        )
+        .unwrap();
+
+        let meshes = read(&path).unwrap();
+        assert_eq!(meshes[0].positions[0], [500000.125, 5800000.375, 12.5]);
     }
 
     #[test]
@@ -255,6 +290,38 @@ usemtl roof\nf 2/2 4/4 3/3\n",
         let material = meshes[0].material.as_ref().expect("a material");
         assert!(material.texture.is_none());
         assert_eq!(material.base_color_factor, [1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn an_mtllib_path_cannot_leave_the_mesh_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("secret.mtl");
+        std::fs::write(&outside, "newmtl wall\nKd 1.0 0.0 0.0\n").unwrap();
+        let mesh_dir = dir.path().join("asset");
+        std::fs::create_dir_all(mesh_dir.join("materials")).unwrap();
+        std::fs::write(
+            mesh_dir.join("materials/inside.mtl"),
+            "newmtl wall\nKd 0.0 1.0 0.0\n",
+        )
+        .unwrap();
+
+        for mtllib in ["../secret.mtl", outside.to_str().unwrap()] {
+            let path = mesh_dir.join("escape.obj");
+            std::fs::write(&path, format!("mtllib {mtllib}\nusemtl wall\n{QUAD}")).unwrap();
+            let meshes = read(&path).unwrap();
+            assert_eq!(meshes[0].positions.len(), 4, "{mtllib}");
+            assert!(meshes[0].material.is_none(), "{mtllib}");
+        }
+
+        let path = mesh_dir.join("inside.obj");
+        std::fs::write(
+            &path,
+            format!("mtllib materials/inside.mtl\nusemtl wall\n{QUAD}"),
+        )
+        .unwrap();
+        let meshes = read(&path).unwrap();
+        let material = meshes[0].material.as_ref().expect("a material");
+        assert_eq!(material.base_color_factor, [0.0, 1.0, 0.0, 1.0]);
     }
 
     #[test]

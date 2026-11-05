@@ -194,21 +194,6 @@ impl DemTile {
     }
 }
 
-/// Configuration for global terrain generation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GlobalTerrainConfig {
-    /// DEM source to use.
-    pub source: DemSource,
-    /// Bounding box to generate terrain for [west, south, east, north] in degrees.
-    pub bounds: [f64; 4],
-    /// Maximum zoom level (terrain LOD depth).
-    pub max_zoom: u32,
-    /// Whether to fill voids (e.g., SRTM voids from radar shadow).
-    pub fill_voids: bool,
-    /// Whether to apply ocean mask (set ocean areas to 0).
-    pub apply_ocean_mask: bool,
-}
-
 /// A terrain tile in the geographic (EPSG:4326) TMS scheme Cesium's
 /// quantized-mesh terrain uses: two square tiles at zoom 0, y counting north
 /// from the south pole.
@@ -259,6 +244,16 @@ pub fn generate_terrain_tile(
     dem_tiles: &[DemTile],
     grid_size: u32,
 ) -> TerrainMesh {
+    sampled_terrain_tile(coord, grid_size, |lat, lon| {
+        sample_dem_tiles(dem_tiles, lat, lon).unwrap_or(0.0) as f64
+    })
+}
+
+pub fn sampled_terrain_tile(
+    coord: &TerrainTileCoord,
+    grid_size: u32,
+    elevation_at: impl Fn(f64, f64) -> f64,
+) -> TerrainMesh {
     let bounds = coord.bounds();
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
@@ -271,8 +266,7 @@ pub fn generate_terrain_tile(
             let lon = bounds[0] + col as f64 * dx;
             let lat = bounds[1] + row as f64 * dy;
 
-            let elevation = sample_dem_tiles(dem_tiles, lat, lon).unwrap_or(0.0);
-            vertices.push([lon, lat, elevation as f64]);
+            vertices.push([lon, lat, elevation_at(lat, lon)]);
         }
     }
 

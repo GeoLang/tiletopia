@@ -5,3 +5,7 @@
 .DS_Store
 gui/node_modules/
 gui/dist/
+scripts/tiles-validator/node_modules/
+sidecars/ids-check/.venv/
+sidecars/ids-check/.pytest_cache/
+__pycache__/

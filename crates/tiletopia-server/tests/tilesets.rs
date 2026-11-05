@@ -466,11 +466,28 @@ async fn another_editor_cannot_read_or_delete_someone_elses_tileset() {
     assert_eq!(status, StatusCode::ACCEPTED);
     let id = accepted["tileset"]["id"].as_str().unwrap().to_string();
 
-    for method in ["GET", "DELETE"] {
-        let (status, _) =
-            request(&state, method, &format!("/api/v1/tilesets/{id}"), &stranger).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{method}");
-    }
+    let (status, theirs) =
+        request(&state, "GET", &format!("/api/v1/tilesets/{id}"), &stranger).await;
+    let missing = uuid::Uuid::new_v4();
+    let (missing_status, nothing) = request(
+        &state,
+        "GET",
+        &format!("/api/v1/tilesets/{missing}"),
+        &stranger,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(missing_status, StatusCode::NOT_FOUND);
+    assert_eq!(theirs, nothing);
+
+    let (status, _) = request(
+        &state,
+        "DELETE",
+        &format!("/api/v1/tilesets/{id}"),
+        &stranger,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
     let listed = json(&state, "/api/v1/tilesets", &stranger).await;
     assert!(listed.as_array().unwrap().is_empty());

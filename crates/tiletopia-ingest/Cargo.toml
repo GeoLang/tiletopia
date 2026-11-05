@@ -3,7 +3,7 @@ name = "tiletopia-ingest"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Format readers: LAS/LAZ, E57, PLY, GeoTIFF, DTED, HGT, USGS DEM, glTF, OBJ, FBX, CityGML, CityJSON, IFC"
+description = "Format readers: LAS/LAZ, E57, PLY, GeoTIFF, DTED, HGT, USGS DEM, glTF, OBJ, FBX, DAE, DXF, CityGML, CityJSON, IFC"
 
 [dependencies]
 tiletopia-core = { path = "../tiletopia-core", default-features = false }
@@ -20,10 +20,16 @@ ply-rs = { workspace = true }
 tobj = { workspace = true }
 quick-xml = { workspace = true }
 fbxcel-dom = { workspace = true }
+dae-parser = { workspace = true }
+percent-encoding = { workspace = true }
 ifc-lite-core = { workspace = true }
 ifc-lite-geometry = { workspace = true }
+ifc-lite-processing = { workspace = true }
+memmap2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
 # writes the small FBX documents the fbx_reader tests read back
 fbxcel = { version = "0.9", features = ["tree", "writer"] }
+# unpacks the spz payload of the splat tiles the round trip test reads back
+flate2 = "1"

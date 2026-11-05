@@ -73,7 +73,52 @@ impl Glb {
             .map(|pair| String::from_utf8(values[pair[0]..pair[1]].to_vec()).unwrap())
             .collect()
     }
+
+    fn attribute_bytes(&self, attribute: &str) -> &[u8] {
+        let accessor = self.json["meshes"][0]["primitives"][0]["attributes"][attribute]
+            .as_u64()
+            .unwrap() as usize;
+        let view = self.json["accessors"][accessor]["bufferView"]
+            .as_u64()
+            .unwrap() as usize;
+        self.buffer_view(view)
+    }
+
+    fn feature_ids(&self) -> Vec<usize> {
+        self.attribute_bytes("_FEATURE_ID_0")
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk) as usize)
+            .collect()
+    }
+
+    fn x_and_y_of_vertices(&self) -> Vec<[f64; 2]> {
+        let translation = &self.json["nodes"][0]["translation"];
+        let translated = |axis: usize, local: &[u8; 4]| {
+            translation[axis].as_f64().unwrap() + f64::from(f32::from_le_bytes(*local))
+        };
+        self.attribute_bytes("POSITION")
+            .as_chunks::<12>()
+            .0
+            .iter()
+            .map(|vertex| {
+                let (coordinates, _) = vertex.as_chunks::<4>();
+                [
+                    translated(0, &coordinates[0]),
+                    translated(1, &coordinates[1]),
+                ]
+            })
+            .collect()
+    }
 }
+
+fn box_center(box_index: usize) -> [f64; 2] {
+    // twin_boxes.ifc places box n at x = 5 * (n % 4), y = 5 * (n / 4), counting from 0
+    [(5 * (box_index % 4)) as f64, (5 * (box_index / 4)) as f64]
+}
+
+const BOX_HALF_WIDTH: f64 = 1.0;
 
 fn tile_paths(output: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(output.join("tiles"))
@@ -93,7 +138,7 @@ fn write_plain_obj(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 fn read_and_tile(source: &std::path::Path, output: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let meshes: Vec<MeshData> = tiletopia_ingest::read_mesh(source)
+    let meshes: Vec<MeshData> = tiletopia_ingest::read_mesh(source, u64::MAX)
         .expect("the fixture should read")
         .into_iter()
         .map(Into::into)
@@ -107,7 +152,7 @@ fn read_and_tile(source: &std::path::Path, output: &std::path::Path) -> Vec<std:
 }
 
 #[test]
-fn ifc_global_ids_reach_every_tile_as_asset_ids() {
+fn every_ifc_global_id_reaches_a_tile_whose_table_lists_only_its_own_elements() {
     let dir = tempfile::tempdir().unwrap();
     let fixture =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/twin_boxes.ifc");
@@ -134,13 +179,37 @@ fn ifc_global_ids_reach_every_tile_as_asset_ids() {
             "{} should point its feature ids at the property table",
             tile.display()
         );
-        assert_eq!(feature_ids["featureCount"], BOX_GLOBAL_IDS.len());
 
         let used = glb.json["extensionsUsed"].as_array().unwrap();
         assert!(used.iter().any(|name| name == "EXT_mesh_features"));
         assert!(used.iter().any(|name| name == "EXT_structural_metadata"));
 
-        seen.extend(glb.asset_ids());
+        let rows = glb.asset_ids();
+        assert_eq!(feature_ids["featureCount"], rows.len());
+        let vertex_features = glb.feature_ids();
+        let distinct: BTreeSet<usize> = vertex_features.iter().copied().collect();
+        assert_eq!(
+            distinct,
+            (0..rows.len()).collect::<BTreeSet<usize>>(),
+            "{} should list exactly the elements its vertices belong to",
+            tile.display()
+        );
+        for (vertex, feature) in glb.x_and_y_of_vertices().iter().zip(&vertex_features) {
+            let box_index = BOX_GLOBAL_IDS
+                .iter()
+                .position(|id| *id == rows[*feature])
+                .expect("a GlobalId from the fixture");
+            let center = box_center(box_index);
+            assert!(
+                (vertex[0] - center[0]).abs() < BOX_HALF_WIDTH + 0.01
+                    && (vertex[1] - center[1]).abs() < BOX_HALF_WIDTH + 0.01,
+                "{}: {vertex:?} is not on {}",
+                tile.display(),
+                rows[*feature]
+            );
+        }
+
+        seen.extend(rows);
     }
 
     let expected: BTreeSet<String> = BOX_GLOBAL_IDS.iter().map(|id| id.to_string()).collect();

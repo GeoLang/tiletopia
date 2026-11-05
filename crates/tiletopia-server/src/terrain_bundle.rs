@@ -1,11 +1,3 @@
-//! Prebuilt quantized-mesh terrain bundles.
-//!
-//! A bundle is the output of an external tiler (ctb-tile and friends) copied
-//! under `<data-dir>/terrain_bundles/<name>/`: a `layer.json` beside a
-//! `{z}/{x}/{y}.terrain` tree. Serving one gives CesiumJS a terrain source that
-//! needs no Ion token and no network beyond this server, which the on-demand
-//! `/api/v1/terrain/` routes cannot do because they reach for SRTM.
-
 use axum::{
     Router,
     extract::{Path, State},
@@ -14,9 +6,16 @@ use axum::{
     routing::get,
 };
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::sync::Arc;
+use tiletopia_terrain::global_dem::{TerrainTileCoord, sampled_terrain_tile};
+use uuid::Uuid;
 
-use crate::{AppState, http_cache::CachePolicy};
+use crate::elevation::JOB_BUDGET_BYTES;
+use crate::terrain_api::{
+    AvailableRange, TerrainLayerInfo, encode_quantized_mesh, terrain_grid_size,
+};
+use crate::{AppState, http_cache::CachePolicy, may_view_asset, users};
 
 /// Directory under the data dir that holds every bundle.
 const BUNDLE_ROOT: &str = "terrain_bundles";
@@ -62,18 +61,50 @@ pub fn terrain_bundle_routes() -> Router<Arc<AppState>> {
     // routes already sit beside it.
 }
 
-/// Names of the bundles this server hosts, so a viewer can offer them without
-/// being told what an operator dropped on disk.
-async fn list_bundles(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, StatusCode> {
+async fn list_bundles(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, StatusCode> {
     let root = state.data_dir.join(BUNDLE_ROOT);
-    let names = bundle_names(&root).await.map_err(|error| {
+    let mut names = bundle_names(&root).await.map_err(|error| {
         tracing::warn!(
             "terrain bundles: {} could not be read: {error}",
             root.display()
         );
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    Ok((cache_headers(CachePolicy::metadata()), Json(names)))
+
+    let claims = headers
+        .contains_key(header::AUTHORIZATION)
+        .then(|| users::claims_from_headers(&headers))
+        .transpose()?;
+    let viewable_asset_ids: HashSet<Uuid> = match &claims {
+        None => HashSet::new(),
+        Some(claims) => state
+            .db
+            .list_assets()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .into_iter()
+            .filter(|asset| may_view_asset(claims, asset.owner_id.as_deref()))
+            .map(|asset| asset.id)
+            .collect(),
+    };
+    // asset_bundle_dir names a DEM upload's bundle after its asset id
+    names.retain(|name| match Uuid::parse_str(name) {
+        Ok(asset_id) => viewable_asset_ids.contains(&asset_id),
+        Err(_) => true,
+    });
+
+    let policy = if claims.is_some() {
+        CachePolicy::no_cache()
+    } else {
+        CachePolicy::metadata()
+    };
+    let mut response_headers = cache_headers(policy);
+    // browsers reuse a cached anonymous list for a tokened fetch of the same url without this
+    response_headers.insert(header::VARY, HeaderValue::from_static("authorization"));
+    Ok((response_headers, Json(names)))
 }
 
 /// Sorted names of the bundles under `root`. A server that was never given a
@@ -134,11 +165,7 @@ async fn bundle_tile(
         .parse()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let path = dir
-        .join(z.to_string())
-        .join(x.to_string())
-        .join(format!("{y}.terrain"));
-    let bytes = tokio::fs::read(&path)
+    let bytes = tokio::fs::read(tile_path(&dir, z, x, y))
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
@@ -153,6 +180,13 @@ async fn bundle_tile(
         headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
     }
     Ok((headers, bytes))
+}
+
+fn tile_path(bundle_dir: &std::path::Path, z: u32, x: u32, y: u32) -> std::path::PathBuf {
+    bundle_dir
+        .join(z.to_string())
+        .join(x.to_string())
+        .join(format!("{y}.terrain"))
 }
 
 /// Whether a bundle by this name is on disk with the layer.json
@@ -174,6 +208,10 @@ fn bundle_dir(state: &AppState, bundle: &str) -> Result<std::path::PathBuf, Stat
         return Err(StatusCode::BAD_REQUEST);
     }
     Ok(state.data_dir.join(BUNDLE_ROOT).join(bundle))
+}
+
+pub(crate) fn asset_bundle_dir(data_dir: &std::path::Path, asset_id: Uuid) -> std::path::PathBuf {
+    data_dir.join(BUNDLE_ROOT).join(asset_id.to_string())
 }
 
 fn is_bundle_name(bundle: &str) -> bool {
@@ -285,7 +323,123 @@ async fn scan_level(level_dir: &std::path::Path) -> Option<[u32; 4]> {
     range
 }
 
-fn cache_headers(policy: CachePolicy) -> HeaderMap {
+// a decoded TIFF sample of up to 8 bytes beside its f64 copy, or two f64 grids while reprojecting
+const DEM_PEAK_BYTES_PER_SAMPLE: u64 = 16;
+const MAX_DEM_SAMPLES: u64 = JOB_BUDGET_BYTES / DEM_PEAK_BYTES_PER_SAMPLE;
+
+const WORLD_BOUNDS: [f64; 4] = [-180.0, -90.0, 180.0, 90.0];
+
+pub(crate) fn write_dem_bundle(
+    input_path: &std::path::Path,
+    staging_dir: &std::path::Path,
+    bundle_dir: &std::path::Path,
+    upload_crs: Option<&str>,
+) -> Result<u64, String> {
+    let fallback_source_epsg = upload_crs
+        .map(|crs| {
+            tiletopia_ingest::crs_detect::parse_epsg_code(crs).ok_or_else(|| {
+                format!(
+                    "dem_crs_unsupported: crs {crs}: DEMs take an EPSG code, such as EPSG:32632"
+                )
+            })
+        })
+        .transpose()?;
+    let dem = tiletopia_ingest::dem_wgs84::read_dem_wgs84(
+        input_path,
+        fallback_source_epsg,
+        MAX_DEM_SAMPLES,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let write_failed =
+        |error: std::io::Error| format!("writing the terrain bundle failed: {error}");
+    let tiles = match write_tile_tree(&dem, staging_dir) {
+        Ok(tiles) => tiles,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(staging_dir);
+            return Err(write_failed(error));
+        }
+    };
+
+    // remove_dir_all fails on a directory that does not exist
+    std::fs::create_dir_all(bundle_dir).map_err(write_failed)?;
+    std::fs::remove_dir_all(bundle_dir).map_err(write_failed)?;
+    std::fs::rename(staging_dir, bundle_dir).map_err(write_failed)?;
+    Ok(tiles)
+}
+
+const UNCOVERED_GROUND_ELEVATION_METRES: f64 = 0.0;
+
+fn write_tile_tree(
+    dem: &tiletopia_ingest::Heightmap,
+    dir: &std::path::Path,
+) -> std::io::Result<u64> {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir)?;
+    }
+    std::fs::create_dir_all(dir)?;
+
+    let deepest_level = deepest_level(dem);
+    let mut available = Vec::new();
+    let mut tiles = 0;
+    for level in 0..=deepest_level {
+        // cesium fails on a root tile that has no data
+        let covered = if level == 0 { WORLD_BOUNDS } else { dem.bounds };
+        let coords = TerrainTileCoord::tiles_in_bounds(level, covered);
+        let grid_size = terrain_grid_size(level);
+        for coord in &coords {
+            // read_dem_wgs84 fills voids near valid samples, so None is ground with no sample
+            let mesh = sampled_terrain_tile(coord, grid_size, |lat, lon| {
+                dem.elevation_at(lon, lat)
+                    .unwrap_or(UNCOVERED_GROUND_ELEVATION_METRES)
+            });
+            let path = tile_path(dir, coord.zoom, coord.x, coord.y);
+            if let Some(column) = path.parent() {
+                std::fs::create_dir_all(column)?;
+            }
+            std::fs::write(path, encode_quantized_mesh(&mesh, coord))?;
+        }
+        tiles += coords.len() as u64;
+        let (first, last) = (&coords[0], &coords[coords.len() - 1]);
+        available.push(vec![AvailableRange {
+            start_x: first.x,
+            start_y: first.y,
+            end_x: last.x,
+            end_y: last.y,
+        }]);
+    }
+
+    let layer = TerrainLayerInfo {
+        tilejson: "2.1.0",
+        name: "TileTopia uploaded DEM",
+        description: "Quantized mesh tiled from a DEM upload",
+        version: "1.0.0",
+        format: "quantized-mesh-1.0",
+        projection: "EPSG:4326",
+        scheme: "tms",
+        tiles: vec![format!("{TILE_TEMPLATE}?v={{version}}")],
+        minzoom: 0,
+        maxzoom: deepest_level,
+        bounds: dem.bounds,
+        available,
+    };
+    std::fs::write(dir.join(LAYER_JSON), serde_json::to_vec(&layer)?)?;
+    Ok(tiles)
+}
+
+fn deepest_level(dem: &tiletopia_ingest::Heightmap) -> u32 {
+    let [west, south, east, north] = dem.bounds;
+    let dem_spacing =
+        ((east - west) / (dem.width - 1) as f64).max((north - south) / (dem.height - 1) as f64);
+    (0..MAX_BUNDLE_LEVEL)
+        .find(|&level| {
+            let tile_span = 180.0 / 2f64.powi(level as i32);
+            tile_span / (terrain_grid_size(level) - 1) as f64 <= dem_spacing
+        })
+        .unwrap_or(MAX_BUNDLE_LEVEL)
+}
+
+pub(crate) fn cache_headers(policy: CachePolicy) -> HeaderMap {
     let mut headers = HeaderMap::new();
     if let Ok(value) = HeaderValue::from_str(&policy.cache_control_header()) {
         headers.insert(header::CACHE_CONTROL, value);
@@ -296,6 +450,29 @@ fn cache_headers(policy: CachePolicy) -> HeaderMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dem_with_spacing(spacing_degrees: f64) -> tiletopia_ingest::Heightmap {
+        tiletopia_ingest::Heightmap {
+            width: 3,
+            height: 3,
+            elevations: vec![0.0; 9],
+            bounds: [
+                10.0,
+                45.0,
+                10.0 + 2.0 * spacing_degrees,
+                45.0 + 2.0 * spacing_degrees,
+            ],
+            nodata: None,
+        }
+    }
+
+    #[test]
+    fn deepest_level_matches_the_dem_spacing() {
+        // one arc-second SRTM needs level 14 of 65 by 65 tiles: 180 / 2^14 / 64 is under 1 / 3600
+        assert_eq!(deepest_level(&dem_with_spacing(1.0 / 3600.0)), 14);
+        assert_eq!(deepest_level(&dem_with_spacing(45.0)), 0);
+        assert_eq!(deepest_level(&dem_with_spacing(1e-9)), MAX_BUNDLE_LEVEL);
+    }
 
     #[test]
     fn bundle_names_refuse_traversal() {

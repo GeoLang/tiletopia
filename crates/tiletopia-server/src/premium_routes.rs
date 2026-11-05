@@ -11,6 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use platform_webhook::{PrivateHosts, WebhookUrl, WebhookUrlError, check_webhook_registration};
 use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -20,7 +21,7 @@ use crate::{
     audit::AuditedResource,
     cog, elevation,
     export::{EXPORT_FORMATS, ExportFormat, ExportJob, ExportStatus},
-    geoprocessing, geostatistics, indoor, metering, scheduler, stac, static_map,
+    geoprocessing, geostatistics, scheduler, stac, static_map,
     terrain_api::Refusal,
     users, webhooks,
 };
@@ -279,32 +280,6 @@ async fn get_usage(
     Ok(Json(serde_json::json!({ "usage": usage })))
 }
 
-/// Routes for metering and billing.
-pub fn metering_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/metering/summary", get(metering_summary))
-        .route("/api/v1/metering/pricing", get(pricing_tiers))
-}
-
-async fn metering_summary(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let store = &state.metering_store;
-    let now = chrono::Utc::now();
-    let period_start = now - chrono::Duration::days(30);
-    let tenant_id = Uuid::nil(); // demo
-    let summary = store.get_summary(tenant_id, period_start, now).await;
-    Json(serde_json::json!(summary))
-}
-
-async fn pricing_tiers() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "tiers": [
-            metering::PricingTier::free(),
-            metering::PricingTier::pro(),
-            metering::PricingTier::enterprise()
-        ]
-    }))
-}
-
 /// Webhook subscriptions and their delivery history.
 ///
 /// Creating, changing and deleting one is a write, so it takes the Edit tier
@@ -351,8 +326,9 @@ fn active_by_default() -> bool {
 /// The request as the fields a subscription is built from, or the refusal. An
 /// unknown event name is named back to the caller, never dropped: a subscription
 /// that silently wants fewer events than it asked for is worse than a refusal.
-fn parse_webhook_request(
+async fn parse_webhook_request(
     request: &WebhookSubscriptionRequest,
+    private_hosts: PrivateHosts,
 ) -> Result<(String, Vec<webhooks::WebhookEvent>), Refusal> {
     let url = request.url.trim();
     if url.chars().count() > MAX_WEBHOOK_URL_CHARS {
@@ -360,23 +336,17 @@ fn parse_webhook_request(
             "url must be at most {MAX_WEBHOOK_URL_CHARS} characters"
         )));
     }
-    // absolute http(s) only: a relative target has nothing to send to, and any
-    // other scheme would ask reqwest for something it does not speak. Userinfo
-    // is refused so a subscription cannot smuggle credentials into the request
-    // this server makes.
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|error| bad_json_request(format!("url is not a URL: {error}")))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(bad_json_request(format!(
-            "url scheme '{}' is not http or https",
-            parsed.scheme()
-        )));
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
+    let refuse_url = |error: WebhookUrlError| bad_json_request(error.to_string());
+    let parsed = WebhookUrl::parse(url).map_err(refuse_url)?;
+    // userinfo in the url puts credentials into the request this server makes
+    if !parsed.as_url().username().is_empty() || parsed.as_url().password().is_some() {
         return Err(bad_json_request(
             "url must not carry a username or password".into(),
         ));
     }
+    check_webhook_registration(&parsed, private_hosts)
+        .await
+        .map_err(refuse_url)?;
 
     if request.events.is_empty() {
         return Err(bad_json_request(
@@ -459,7 +429,7 @@ async fn create_webhook(
     let created_by = users::claims_from_headers(&headers)
         .map_err(|status| Refusal::from(status.into_response()))?
         .sub;
-    let (url, events) = parse_webhook_request(&request)?;
+    let (url, events) = parse_webhook_request(&request, state.webhooks.private_hosts()).await?;
 
     let subscription = webhooks::WebhookSubscription {
         id: Uuid::new_v4(),
@@ -495,7 +465,7 @@ async fn update_webhook(
     Json(request): Json<WebhookSubscriptionRequest>,
 ) -> Result<Json<serde_json::Value>, Refusal> {
     let mut subscription = writable_subscription(&state, id, &headers).await?;
-    let (url, events) = parse_webhook_request(&request)?;
+    let (url, events) = parse_webhook_request(&request, state.webhooks.private_hosts()).await?;
 
     state
         .db
@@ -658,6 +628,8 @@ async fn create_export(
 ) -> Result<(StatusCode, Extension<AuditedResource>, Json<ExportJob>), StatusCode> {
     let tenant_id = tenant_from_headers(&headers)?;
     let format = ExportFormat::from_id(&req.format).ok_or(StatusCode::BAD_REQUEST)?;
+    let claims = users::claims_from_headers(&headers)?;
+    crate::viewable_asset(&state, req.asset_id, &claims).await?;
     let job = state
         .export_engine
         .create_export(tenant_id, req.asset_id, format, req.bounds)
@@ -871,11 +843,25 @@ async fn create_scheduled_job(
     Refusal,
 > {
     // behind require_editor, so a valid token is always present
-    let created_by = users::claims_from_headers(&headers)
-        .map_err(|status| Refusal::from(status.into_response()))?
-        .sub;
+    let claims = users::claims_from_headers(&headers)
+        .map_err(|status| Refusal::from(status.into_response()))?;
 
     let (name, action, schedule) = parse_scheduled_job_request(&request)?;
+    if let scheduler::ScheduledAction::RetileAsset { asset_id } = &action {
+        state
+            .db
+            .get_asset(*asset_id)
+            .await
+            .map_err(|error| {
+                tracing::error!("reading asset {asset_id} for a scheduled job failed: {error}");
+                refuse_as_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "reading the asset failed".into(),
+                )
+            })?
+            .filter(|asset| crate::may_modify_asset(&claims, asset.owner_id.as_deref()))
+            .ok_or_else(|| refuse_as_json(StatusCode::NOT_FOUND, format!("no asset {asset_id}")))?;
+    }
     let first_run = schedule
         .first_run(chrono::Utc::now())
         .map_err(bad_json_request)?;
@@ -886,7 +872,7 @@ async fn create_scheduled_job(
         action,
         schedule,
         enabled: request.enabled,
-        created_by,
+        created_by: claims.sub,
         created_at: chrono::Utc::now(),
         next_run: Some(first_run),
         last_run: None,
@@ -990,41 +976,6 @@ async fn scheduler_action_kinds() -> Json<serde_json::Value> {
 
 // ─── Gap-closing feature routes ─────────────────────────────────────────────
 
-/// Routes for photogrammetry pipeline.
-pub fn photogrammetry_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/api/v1/photogrammetry/projects",
-            get(list_photogrammetry_projects),
-        )
-        .route("/api/v1/photogrammetry/presets", get(quality_presets))
-}
-
-async fn list_photogrammetry_projects(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    let engine = &state.photogrammetry_engine;
-    let projects = engine.list_projects(None).await;
-    Json(serde_json::json!({ "projects": projects }))
-}
-
-async fn quality_presets() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "presets": ["Draft", "Medium", "High", "Ultra"]
-    }))
-}
-
-/// Routes for BIM 4D scheduling.
-pub fn bim4d_routes() -> Router<Arc<AppState>> {
-    Router::new().route("/api/v1/bim4d/projects", get(list_bim4d_projects))
-}
-
-async fn list_bim4d_projects(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let engine = &state.bim4d_engine;
-    let projects = engine.list_projects().await;
-    Json(serde_json::json!({ "projects": projects }))
-}
-
 /// Routes for STAC catalog. The root is this server's own, the collection list
 /// and item search are proxies of the configured upstream.
 pub fn stac_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
@@ -1091,16 +1042,6 @@ async fn stac_search(Query(params): Query<StacSearchQuery>) -> Response {
         stac::search(&api, &params).await
     };
     stac_answer("search", searched.await)
-}
-
-/// Routes for indoor mapping.
-pub fn indoor_routes() -> Router<Arc<AppState>> {
-    Router::new().route("/api/v1/indoor/buildings", get(list_buildings))
-}
-
-async fn list_buildings() -> Json<serde_json::Value> {
-    let buildings = indoor::demo_buildings();
-    Json(serde_json::json!({ "buildings": buildings }))
 }
 
 /// Routes for Cloud Optimized GeoTIFF.
@@ -1542,6 +1483,40 @@ async fn query_entity_links_by_position(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_subscription_to_a_private_address_is_refused_unless_allowed() {
+        let request = |url: &str| WebhookSubscriptionRequest {
+            url: url.to_string(),
+            events: vec!["asset.deleted".to_string()],
+            active: true,
+        };
+        for url in [
+            "http://127.0.0.1:9000/hook",
+            "http://10.0.0.7/hook",
+            "http://169.254.169.254/latest/meta-data/",
+        ] {
+            assert!(
+                parse_webhook_request(&request(url), PrivateHosts::Refused)
+                    .await
+                    .is_err(),
+                "{url}"
+            );
+        }
+        assert!(
+            parse_webhook_request(&request("http://93.184.216.34/hook"), PrivateHosts::Refused)
+                .await
+                .is_ok()
+        );
+        assert!(
+            parse_webhook_request(
+                &request("http://127.0.0.1:9000/hook"),
+                PrivateHosts::AllowedForTestReceiver
+            )
+            .await
+            .is_ok()
+        );
+    }
 
     /// POST a body to the real geostatistics route table and read the answer.
     async fn interpolate(body: serde_json::Value) -> (StatusCode, String) {

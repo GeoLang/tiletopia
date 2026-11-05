@@ -437,20 +437,31 @@ async fn add_dataset(
         Extension<AuditedResource>,
         Json<serde_json::Value>,
     ),
-    axum::http::StatusCode,
+    (axum::http::StatusCode, String),
 > {
     // the route sits behind require_editor, so a valid token is always present
-    let owner_id = crate::users::claims_from_headers(&headers)?.sub;
+    let owner_id = crate::users::claims_from_headers(&headers)
+        .map_err(|status| (status, String::new()))?
+        .sub;
 
-    let dataset = state
-        .catalog
-        .get(&dataset_id)
-        .cloned()
-        .ok_or(axum::http::StatusCode::NOT_FOUND)?;
+    let dataset = state.catalog.get(&dataset_id).cloned().ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            format!("no catalog dataset {dataset_id}"),
+        )
+    })?;
 
     let asset_type = match dataset.category {
         DatasetCategory::Terrain => crate::AssetType::Terrain,
-        DatasetCategory::Imagery => crate::AssetType::Imagery,
+        DatasetCategory::Imagery => {
+            return Err((
+                axum::http::StatusCode::NOT_IMPLEMENTED,
+                format!(
+                    "{dataset_id}: catalog imagery is served from {}, and copying it into an asset is not implemented",
+                    dataset.url
+                ),
+            ));
+        }
         DatasetCategory::PointCloud => crate::AssetType::PointCloud,
         DatasetCategory::Buildings => crate::AssetType::Model,
         _ => crate::AssetType::Model,
@@ -475,11 +486,12 @@ async fn add_dataset(
         owner_id: Some(owner_id),
     };
 
-    state
-        .db
-        .create_asset(&asset)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.db.create_asset(&asset).await.map_err(|_| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "could not store the asset".to_string(),
+        )
+    })?;
 
     let job_id = uuid::Uuid::new_v4();
     let job = crate::db::JobRecord {
@@ -496,13 +508,17 @@ async fn add_dataset(
         points_processed: 0,
         tiles_written: 0,
         placement: crate::db::ModelPlacement::default(),
+        mesh_compression: tiletopia_core::glb_writer::MeshCompression::None,
+        texture_compression: Default::default(),
+        photogrammetry_preset: Default::default(),
     };
 
-    state
-        .db
-        .create_job(&job)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.db.create_job(&job).await.map_err(|_| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "could not queue the job".to_string(),
+        )
+    })?;
 
     Ok((
         axum::http::StatusCode::CREATED,

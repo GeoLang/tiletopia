@@ -11,7 +11,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
     let mut reader = Reader::from_str(&data);
 
     let mut meshes: Vec<MeshData> = Vec::new();
-    let mut all_positions: Vec<[f32; 3]> = Vec::new();
+    let mut all_positions: Vec<[f64; 3]> = Vec::new();
     let mut all_indices: Vec<u32> = Vec::new();
     let mut in_pos_list = false;
     let mut current_text = String::new();
@@ -45,9 +45,9 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
 
                         for i in 0..num_pts {
                             all_positions.push([
-                                coords[i * 3] as f32,
-                                coords[i * 3 + 1] as f32,
-                                coords[i * 3 + 2] as f32,
+                                coords[i * 3],
+                                coords[i * 3 + 1],
+                                coords[i * 3 + 2],
                             ]);
                         }
 
@@ -84,6 +84,8 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
                 .to_string(),
             material: None,
             asset_id: None,
+            class: None,
+            storey: None,
         });
     }
 
@@ -150,6 +152,19 @@ mod tests {
         assert_eq!(meshes[0].indices.len(), 9);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn projected_coordinates_keep_their_fractional_metres() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("far.gml");
+        let citygml = r#"<CityModel xmlns:gml="http://www.opengis.net/gml"><gml:posList>
+            500000.125 5800000.375 12.5 500001.125 5800000.375 12.5 500001.125 5800001.375 12.5
+        </gml:posList></CityModel>"#;
+        std::fs::write(&path, citygml).unwrap();
+
+        let meshes = read(&path).unwrap();
+        assert_eq!(meshes[0].positions[0], [500000.125, 5800000.375, 12.5]);
     }
 
     #[test]

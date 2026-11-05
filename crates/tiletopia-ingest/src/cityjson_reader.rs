@@ -61,13 +61,13 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
         ([1.0, 1.0, 1.0], [0.0, 0.0, 0.0])
     };
 
-    let transformed: Vec<[f32; 3]> = vertices
+    let transformed: Vec<[f64; 3]> = vertices
         .iter()
         .map(|v| {
             [
-                (v[0] * scale[0] + translate[0]) as f32,
-                (v[1] * scale[1] + translate[1]) as f32,
-                (v[2] * scale[2] + translate[2]) as f32,
+                v[0] * scale[0] + translate[0],
+                v[1] * scale[1] + translate[1],
+                v[2] * scale[2] + translate[2],
             ]
         })
         .collect();
@@ -106,6 +106,8 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
                 name: name.clone(),
                 material: None,
                 asset_id: None,
+                class: None,
+                storey: None,
             });
         }
     }
@@ -123,8 +125,8 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
 /// Recursively collect boundary indices and fan-triangulate polygons.
 fn collect_triangles(
     value: &[serde_json::Value],
-    all_verts: &[[f32; 3]],
-    positions: &mut Vec<[f32; 3]>,
+    all_verts: &[[f64; 3]],
+    positions: &mut Vec<[f64; 3]>,
     indices: &mut Vec<u32>,
 ) {
     // CityJSON boundaries can be nested: Solid → Shell → Surface → Ring → indices

@@ -10,13 +10,17 @@ tiletopia-core = { path = "../tiletopia-core", default-features = false }
 tiletopia-terrain = { path = "../tiletopia-terrain" }
 tiletopia-store = { path = "../tiletopia-store" }
 tiletopia-ingest = { path = "../tiletopia-ingest" }
+ifc-lite-processing = { workspace = true }
 geo = { workspace = true }
+topoi-core = { workspace = true }
 nubis-core = { workspace = true }
 terrano-core = { workspace = true }
 geoplumb = { workspace = true }
+platform-auth = { workspace = true }
+platform-webhook = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -32,26 +36,30 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 bytes = { workspace = true }
 # the COG reader is synchronous, so its range requests go through the blocking
-# client on a blocking thread
-reqwest = { workspace = true, features = ["blocking"] }
+# client on a blocking thread. multipart carries photos to NodeODM
+reqwest = { workspace = true, features = ["blocking", "multipart"] }
 image = { workspace = true }
 rand = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
+percent-encoding = { workspace = true }
 argon2 = { workspace = true }
-geo-types = { workspace = true }
 tiff = { workspace = true }
+png = { workspace = true }
+quick-xml = { workspace = true }
 sqlx = { workspace = true }
 gltf = { workspace = true }
-petgraph = { workspace = true }
 cron = { workspace = true }
 las = { workspace = true, features = ["laz"] }
-zip = { version = "8", default-features = false }
+# photo set uploads are deflated zips
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+kamadak-exif = "0.6"
 wasmtime = { workspace = true, optional = true }
 martin-core = { workspace = true, optional = true }
 martin-tile-utils = { workspace = true, optional = true }
 tilejson = { workspace = true, optional = true }
 object_store = { workspace = true, optional = true }
+grokj2k-sys = { workspace = true, optional = true }
 
 # the tileset builder caps what tippecanoe may map and write, between fork
 # and exec
@@ -62,6 +70,7 @@ libc = { workspace = true }
 default = []
 wasm-plugins = ["wasmtime"]
 martin = ["martin-core", "martin-tile-utils", "tilejson", "object_store"]
+jp2 = ["grokj2k-sys"]
 
 [dev-dependencies]
 terrano-core = { workspace = true }
@@ -70,11 +79,11 @@ tokio-tungstenite = "0.29"
 futures = { workspace = true }
 tempfile = "3"
 flate2 = "1"
+ktx2 = { workspace = true }
 # martin-core enables pmtiles with tilejson and object-store only, so the
 # writer that builds the test fixtures is not reachable without this
 pmtiles = { version = "0.24", default-features = false, features = ["write"] }
 tiletopia-store = { path = "../tiletopia-store" }
-quick-xml = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 sqlx = { workspace = true }

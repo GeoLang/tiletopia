@@ -1,20 +1,32 @@
 //! Mesh tiling pipeline — spatial subdivision, LOD generation, and 3D Tiles output for meshes.
 
 use crate::bounding_volume::Aabb;
-use crate::compression::simplify_mesh;
+use crate::compression::{reorder_vertices_for_meshopt, simplify_mesh};
 use crate::glb_writer::{
-    self, GlbMesh, MetadataProperty, MetadataValues, TextureData, TileMetadata,
+    self, EdgeVisibility, GlbMesh, InstancedMesh, MeshCompression, MetadataProperty,
+    MetadataValues, TextureData, TileMetadata,
 };
 use crate::{BoundingVolume, Refine, Tile, TileContent, Tileset, TilesetAsset};
+use basisu_c_sys::BasisTextureFormat;
+use basisu_c_sys::common::BU_COMP_FLAGS_GEN_MIPS_CLAMP;
+use basisu_c_sys::extra::{
+    BasisuEncoder, BasisuEncoderParams, SourceImage, SourceImageFormat, basisu_encoder_init,
+    types::Extent3d,
+};
 use image::GenericImageView;
-use std::io;
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::{self, Write};
+use std::ops::Range;
 use std::path::Path;
 
 /// Input mesh data (mirrors `tiletopia_ingest::MeshData`), carrying the one
 /// material the GLB writer takes per mesh.
 #[derive(Debug, Clone)]
 pub struct MeshData {
-    pub positions: Vec<[f32; 3]>,
+    pub positions: Vec<[f64; 3]>,
     pub normals: Vec<[f32; 3]>,
     /// glTF UV space. Empty, or one per position.
     pub texcoords: Vec<[f32; 2]>,
@@ -23,6 +35,8 @@ pub struct MeshData {
     /// The source element's stable identity, written into the tile as the
     /// `asset_id` feature property.
     pub asset_id: Option<String>,
+    pub class: Option<String>,
+    pub storey: Option<String>,
     pub base_color_factor: Option<[f32; 4]>,
     pub texture: Option<TextureData>,
 }
@@ -30,12 +44,26 @@ pub struct MeshData {
 /// The `EXT_structural_metadata` class and property the tiler writes asset ids
 /// under. The viewer joins a picked feature on this property.
 const ASSET_CLASS_NAME: &str = "asset";
-const ASSET_ID_PROPERTY: &str = "asset_id";
+const FEATURE_COLUMN_NAMES: [&str; 3] = ["asset_id", "class", "storey"];
+
+impl MeshData {
+    fn feature_columns(&self) -> [&Option<String>; FEATURE_COLUMN_NAMES.len()] {
+        [&self.asset_id, &self.class, &self.storey]
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextureCompression {
+    #[default]
+    None,
+    Ktx2,
+}
 
 /// Configuration for the mesh tiling pipeline.
 #[derive(Debug, Clone)]
 pub struct MeshTilingConfig {
-    /// Maximum triangles per leaf tile.
+    /// Maximum triangles per tile.
     pub max_triangles_per_tile: usize,
     /// Maximum octree depth.
     pub max_depth: u32,
@@ -49,6 +77,9 @@ pub struct MeshTilingConfig {
     /// Whether the input is z-up and the written glTF has to be rotated to
     /// y-up. Bounding volumes stay in the z-up frame the tile transform names.
     pub content_y_up: bool,
+    pub mesh_compression: MeshCompression,
+    pub texture_compression: TextureCompression,
+    pub cad_edges: bool,
 }
 
 impl Default for MeshTilingConfig {
@@ -60,13 +91,16 @@ impl Default for MeshTilingConfig {
             min_geometric_error: 0.1,
             root_transform: None,
             content_y_up: false,
+            mesh_compression: MeshCompression::None,
+            texture_compression: TextureCompression::None,
+            cad_edges: false,
         }
     }
 }
 
 /// Rotate z-up vectors into the y-up glTF tile content 3D Tiles expects. The
 /// runtime rotates them back about x by π/2, so the two cancel.
-fn z_up_to_y_up(vectors: &mut [[f32; 3]]) {
+fn z_up_to_y_up<T: Copy + std::ops::Neg<Output = T>>(vectors: &mut [[T; 3]]) {
     for vector in vectors {
         *vector = [vector[0], vector[2], -vector[1]];
     }
@@ -80,102 +114,12 @@ pub struct MeshTilingStats {
     pub max_depth_reached: u32,
 }
 
-/// A node in the mesh tile tree.
-pub enum MeshTileNode {
-    Leaf {
-        bounds: Aabb,
-        mesh: GlbMesh,
-        depth: u32,
-    },
-    Internal {
-        bounds: Aabb,
-        children: Vec<Box<MeshTileNode>>,
-        /// Simplified mesh for this LOD level.
-        lod_mesh: GlbMesh,
-        depth: u32,
-    },
-}
-
-impl MeshTileNode {
-    fn bounds(&self) -> &Aabb {
-        match self {
-            MeshTileNode::Leaf { bounds, .. } => bounds,
-            MeshTileNode::Internal { bounds, .. } => bounds,
-        }
-    }
-
-    fn depth(&self) -> u32 {
-        match self {
-            MeshTileNode::Leaf { depth, .. } => *depth,
-            MeshTileNode::Internal { depth, .. } => *depth,
-        }
-    }
-}
-
-/// Build a mesh tile tree from a set of input meshes. Meshes that share a
-/// material are tiled together; each further material gets its own subtree,
-/// because a tile's GLB carries one material.
-pub fn build_mesh_tree(meshes: &[MeshData], config: &MeshTilingConfig) -> MeshTileNode {
-    let groups = group_by_material(meshes);
-
-    let Some((first, rest)) = groups.split_first() else {
-        return MeshTileNode::Leaf {
-            bounds: Aabb::empty(),
-            mesh: empty_glb_mesh(),
-            depth: 0,
-        };
-    };
-
-    if rest.is_empty() {
-        return build_recursive(
-            first,
-            &first.indices,
-            compute_aabb(&first.positions),
-            0,
-            config,
-        );
-    }
-
-    let mut bounds = Aabb::empty();
-    let mut children = Vec::with_capacity(groups.len());
-    for group in &groups {
-        let group_bounds = compute_aabb(&group.positions);
-        bounds.expand_point(group_bounds.min);
-        bounds.expand_point(group_bounds.max);
-        children.push(Box::new(build_recursive(
-            group,
-            &group.indices,
-            group_bounds,
-            1,
-            config,
-        )));
-    }
-
-    MeshTileNode::Internal {
-        bounds,
-        children,
-        lod_mesh: empty_glb_mesh(),
-        depth: 0,
-    }
-}
-
-/// Write mesh tiles (GLB files + tileset.json) to disk.
-pub fn write_mesh_tileset(
-    root: &MeshTileNode,
-    output_dir: &Path,
-    config: &MeshTilingConfig,
-) -> io::Result<()> {
-    std::fs::create_dir_all(output_dir)?;
-    let tiles_dir = output_dir.join("tiles");
-    std::fs::create_dir_all(&tiles_dir)?;
-
-    write_node_glbs(root, &tiles_dir, &mut NodePath::new())?;
-
-    let tileset = generate_mesh_tileset(root, config.root_transform);
-    let json = serde_json::to_string_pretty(&tileset).map_err(io::Error::other)?;
-    std::fs::write(output_dir.join("tileset.json"), json)?;
-
-    Ok(())
+struct WrittenMeshTile {
+    bounds: Aabb,
+    geometric_error: f64,
+    content_uri: Option<String>,
+    content_triangle_count: usize,
+    children: Vec<WrittenMeshTile>,
 }
 
 /// Full pipeline: build tree from meshes and write tiles to disk.
@@ -184,16 +128,105 @@ pub fn tile_meshes(
     output_dir: &Path,
     config: &MeshTilingConfig,
 ) -> io::Result<MeshTilingStats> {
-    let root = build_mesh_tree(meshes, config);
-    write_mesh_tileset(&root, output_dir, config)?;
+    let tiles_dir = output_dir.join("tiles");
+    std::fs::create_dir_all(&tiles_dir)?;
+    let root = write_mesh_tiles(meshes, &tiles_dir, config)?;
+
+    let tileset = generate_mesh_tileset(&root, config);
+    let mut tileset_file =
+        io::BufWriter::new(std::fs::File::create(output_dir.join("tileset.json"))?);
+    serde_json::to_writer_pretty(&mut tileset_file, &tileset).map_err(io::Error::other)?;
+    tileset_file.flush()?;
 
     let mut stats = MeshTilingStats {
         total_triangles: 0,
         tile_count: 0,
         max_depth_reached: 0,
     };
-    collect_stats(&root, &mut stats);
+    collect_stats(&root, 0, &mut stats);
     Ok(stats)
+}
+
+fn material_groups(meshes: &[MeshData], config: &MeshTilingConfig) -> Vec<MaterialGroup> {
+    let mut groups = group_by_material(meshes);
+    if config.texture_compression == TextureCompression::Ktx2 {
+        // jpeg crops lose detail before the ktx2 encoder runs
+        for group in &mut groups {
+            group.texture = group.texture.as_ref().map(lossless_texture);
+        }
+    }
+    groups
+}
+
+fn write_mesh_tiles(
+    meshes: &[MeshData],
+    tiles_dir: &Path,
+    config: &MeshTilingConfig,
+) -> io::Result<WrittenMeshTile> {
+    let groups = material_groups(meshes, config);
+    let tilers: Vec<GroupTiler> = groups
+        .iter()
+        .map(|group| {
+            let mut group_bounds = compute_aabb(&group.positions);
+            let group_center = group_bounds.center();
+            for element in &group.elements {
+                group_bounds.expand_point(element.bounds.min);
+                group_bounds.expand_point(element.bounds.max);
+            }
+            GroupTiler {
+                group,
+                group_bounds,
+                simplification_positions: group
+                    .positions
+                    .iter()
+                    .map(|&position| offset_from(position, group_center))
+                    .collect(),
+                tiles_dir,
+                config,
+            }
+        })
+        .collect();
+    let mut path = NodePath::new();
+
+    match tilers.as_slice() {
+        [] => Ok(WrittenMeshTile {
+            bounds: Aabb::empty(),
+            geometric_error: 0.0,
+            content_uri: None,
+            content_triangle_count: 0,
+            children: Vec::new(),
+        }),
+        [tiler] => tiler.tile(
+            tiler.whole_element_parts(),
+            tiler.group_bounds,
+            0,
+            &mut path,
+        ),
+        tilers => {
+            // glb_writer writes one material per tile
+            let mut bounds = Aabb::empty();
+            let mut children = Vec::with_capacity(tilers.len());
+            for (index, tiler) in tilers.iter().enumerate() {
+                bounds.expand_point(tiler.group_bounds.min);
+                bounds.expand_point(tiler.group_bounds.max);
+                path.push(index as u8);
+                children.push(tiler.tile(
+                    tiler.whole_element_parts(),
+                    tiler.group_bounds,
+                    1,
+                    &mut path,
+                )?);
+                path.pop();
+            }
+            Ok(WrittenMeshTile {
+                bounds,
+                geometric_error: geometric_error_for(&bounds),
+                content_uri: None,
+                content_triangle_count: 0,
+                children,
+            })
+        }
+    }
 }
 
 // ── internals ───────────────────────────────────────────────────────────────
@@ -201,22 +234,46 @@ pub fn tile_meshes(
 /// The meshes painted with one material, merged into one vertex and index
 /// array.
 struct MaterialGroup {
-    positions: Vec<[f32; 3]>,
+    positions: Vec<[f64; 3]>,
     normals: Vec<[f32; 3]>,
     texcoords: Vec<[f32; 2]>,
     indices: Vec<u32>,
-    /// One per position, indexing `asset_ids`. Empty when no source mesh
-    /// carried an asset id.
     feature_ids: Vec<u32>,
-    /// One per feature, in feature id order.
-    asset_ids: Vec<String>,
+    feature_rows: Vec<[String; FEATURE_COLUMN_NAMES.len()]>,
     base_color_factor: Option<[f32; 4]>,
     texture: Option<TextureData>,
+    elements: Vec<GroupElement>,
+}
+
+// a tile's part list and one child's list both hold a part while the tile splits, and parent content sorts references to them
+pub const TILER_BYTES_PER_MESH: u64 = (std::mem::size_of::<MeshData>()
+    + std::mem::size_of::<GroupElement>()
+    + 2 * std::mem::size_of::<TilePart<'static>>()
+    + std::mem::size_of::<&TilePart<'static>>()
+    + std::mem::size_of::<(u64, Vec<(usize, [[f64; 3]; 3])>)>()
+    + std::mem::size_of::<(usize, [[f64; 3]; 3])>()
+    + std::mem::size_of::<[String; FEATURE_COLUMN_NAMES.len()]>())
+    as u64;
+
+struct GroupElement {
+    indices: Range<usize>,
+    vertices: Range<u32>,
+    bounds: Aabb,
+    repeated_geometry: Option<RepeatedGeometry>,
+}
+
+#[derive(Clone, Copy)]
+struct RepeatedGeometry {
+    first_occurrence: usize,
+    instance_rotation: [f32; 4],
+    instance_translation: [f64; 3],
 }
 
 fn group_by_material(meshes: &[MeshData]) -> Vec<MaterialGroup> {
     let mut groups: Vec<MaterialGroup> = Vec::new();
-    let any_asset_id = meshes.iter().any(|mesh| mesh.asset_id.is_some());
+    let any_feature_column = meshes
+        .iter()
+        .any(|mesh| mesh.feature_columns().iter().any(|value| value.is_some()));
 
     for mesh in meshes {
         if mesh.positions.is_empty() {
@@ -231,9 +288,10 @@ fn group_by_material(meshes: &[MeshData]) -> Vec<MaterialGroup> {
                     texcoords: Vec::new(),
                     indices: Vec::new(),
                     feature_ids: Vec::new(),
-                    asset_ids: Vec::new(),
+                    feature_rows: Vec::new(),
                     base_color_factor: mesh.base_color_factor,
                     texture: mesh.texture.clone(),
+                    elements: Vec::new(),
                 });
                 groups.last_mut().expect("just pushed")
             }
@@ -247,17 +305,27 @@ fn group_by_material(meshes: &[MeshData]) -> Vec<MaterialGroup> {
         if group.texcoords.len() == base as usize && mesh.texcoords.len() == mesh.positions.len() {
             group.texcoords.extend_from_slice(&mesh.texcoords);
         }
-        if any_asset_id {
-            let feature_id = group.asset_ids.len() as u32;
+        if any_feature_column {
+            let feature_id = group.feature_rows.len() as u32;
             group
                 .feature_ids
                 .extend(std::iter::repeat_n(feature_id, mesh.positions.len()));
-            group
-                .asset_ids
-                .push(mesh.asset_id.clone().unwrap_or_default());
+            group.feature_rows.push(
+                mesh.feature_columns()
+                    .map(|value| value.clone().unwrap_or_default()),
+            );
         }
         group.positions.extend_from_slice(&mesh.positions);
+        let first_index = group.indices.len();
         group.indices.extend(mesh.indices.iter().map(|i| i + base));
+        if !mesh.indices.is_empty() {
+            group.elements.push(GroupElement {
+                bounds: aabb_from_indices(&group.positions, &group.indices[first_index..]),
+                indices: first_index..group.indices.len(),
+                vertices: base..group.positions.len() as u32,
+                repeated_geometry: None,
+            });
+        }
     }
 
     for group in &mut groups {
@@ -271,12 +339,292 @@ fn group_by_material(meshes: &[MeshData]) -> Vec<MaterialGroup> {
             tracing::warn!("mesh has a texture but no UVs, tiling it untextured");
             group.texture = None;
         }
+        if group.texcoords.is_empty() {
+            find_repeated_geometry(group);
+        }
     }
 
     groups
 }
 
+fn subtract(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+}
+
+fn scaled(vector: [f64; 3], factor: f64) -> [f64; 3] {
+    vector.map(|component| component * factor)
+}
+
+fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+
+fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
+}
+
+const REPEATED_GEOMETRY_TOLERANCE_METRES: f64 = 1e-3;
+const NORMAL_TOLERANCE: f64 = 1e-2;
+const IDENTITY_ROTATION: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+fn rigid_frame(positions: &[[f64; 3]]) -> Option<[[f64; 3]; 3]> {
+    let least_length_squared = REPEATED_GEOMETRY_TOLERANCE_METRES.powi(2);
+    let origin = positions[0];
+    let from_origin = |position: &[f64; 3]| subtract(*position, origin);
+    let farthest_squared = positions
+        .iter()
+        .map(|position| dot(from_origin(position), from_origin(position)))
+        .fold(0.0, f64::max);
+    if farthest_squared <= least_length_squared {
+        return None;
+    }
+    // symmetric shapes tie for the farthest vertex, and floating point noise breaks the tie differently per copy
+    let first_axis = positions
+        .iter()
+        .map(from_origin)
+        .find(|offset| dot(*offset, *offset) >= farthest_squared / 4.0)?;
+    let first_axis = scaled(first_axis, dot(first_axis, first_axis).sqrt().recip());
+
+    let off_axis = |position: &[f64; 3]| {
+        let offset = from_origin(position);
+        subtract(offset, scaled(first_axis, dot(offset, first_axis)))
+    };
+    let widest_squared = positions
+        .iter()
+        .map(|position| dot(off_axis(position), off_axis(position)))
+        .fold(0.0, f64::max);
+    if widest_squared <= least_length_squared {
+        return None;
+    }
+    let second_axis = positions
+        .iter()
+        .map(off_axis)
+        .find(|offset| dot(*offset, *offset) >= widest_squared / 4.0)?;
+    let second_axis = scaled(second_axis, dot(second_axis, second_axis).sqrt().recip());
+    Some([first_axis, second_axis, cross(first_axis, second_axis)])
+}
+
+fn rotation_between_frames(from: &[[f64; 3]; 3], to: &[[f64; 3]; 3]) -> [f32; 4] {
+    let element = |row: usize, column: usize| -> f64 {
+        (0..3).map(|axis| to[axis][row] * from[axis][column]).sum()
+    };
+    let (m00, m01, m02) = (element(0, 0), element(0, 1), element(0, 2));
+    let (m10, m11, m12) = (element(1, 0), element(1, 1), element(1, 2));
+    let (m20, m21, m22) = (element(2, 0), element(2, 1), element(2, 2));
+
+    let trace = m00 + m11 + m22;
+    let [x, y, z, w] = if trace > 0.0 {
+        let scale = (trace + 1.0).sqrt() * 2.0;
+        [
+            (m21 - m12) / scale,
+            (m02 - m20) / scale,
+            (m10 - m01) / scale,
+            scale / 4.0,
+        ]
+    } else if m00 > m11 && m00 > m22 {
+        let scale = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
+        [
+            scale / 4.0,
+            (m01 + m10) / scale,
+            (m02 + m20) / scale,
+            (m21 - m12) / scale,
+        ]
+    } else if m11 > m22 {
+        let scale = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
+        [
+            (m01 + m10) / scale,
+            scale / 4.0,
+            (m12 + m21) / scale,
+            (m02 - m20) / scale,
+        ]
+    } else {
+        let scale = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
+        [
+            (m02 + m20) / scale,
+            (m12 + m21) / scale,
+            scale / 4.0,
+            (m10 - m01) / scale,
+        ]
+    };
+    [x as f32, y as f32, z as f32, w as f32]
+}
+
+fn rotated(rotation: [f32; 4], vector: [f64; 3]) -> [f64; 3] {
+    let vector_part = [
+        f64::from(rotation[0]),
+        f64::from(rotation[1]),
+        f64::from(rotation[2]),
+    ];
+    let scalar_part = f64::from(rotation[3]);
+    let first_turn = cross(vector_part, vector);
+    let second_turn = cross(vector_part, first_turn);
+    std::array::from_fn(|axis| {
+        vector[axis] + 2.0 * (scalar_part * first_turn[axis] + second_turn[axis])
+    })
+}
+
+const SHAPE_KEY_STEP_METRES: f64 = 0.01;
+
+fn geometry_key(group: &MaterialGroup, element: &GroupElement) -> u64 {
+    let positions = group.element_positions(element);
+    let vertex_count = positions.len() as f64;
+    let mut centroid = [0.0_f64; 3];
+    for position in positions {
+        centroid = std::array::from_fn(|axis| centroid[axis] + position[axis] / vertex_count);
+    }
+    let distance = |from: [f64; 3], to: [f64; 3]| {
+        let offset = subtract(from, to);
+        dot(offset, offset).sqrt()
+    };
+    let mean_from_first_vertex = positions
+        .iter()
+        .map(|position| distance(*position, positions[0]))
+        .sum::<f64>()
+        / vertex_count;
+    let mean_from_centroid = positions
+        .iter()
+        .map(|position| distance(*position, centroid))
+        .sum::<f64>()
+        / vertex_count;
+
+    let mut hasher = DefaultHasher::new();
+    positions.len().hash(&mut hasher);
+    for index in &group.indices[element.indices.clone()] {
+        (index - element.vertices.start).hash(&mut hasher);
+    }
+    // f32 source vertices differ per copy, and rounding each one lands copies on different keys
+    for measure in [mean_from_first_vertex, mean_from_centroid] {
+        ((measure / SHAPE_KEY_STEP_METRES).round() as i64).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn instance_placement(
+    group: &MaterialGroup,
+    first_occurrence: usize,
+    element: &GroupElement,
+    instance_rotation: [f32; 4],
+) -> Option<RepeatedGeometry> {
+    let first = &group.elements[first_occurrence];
+    let first_positions = group.element_positions(first);
+    let positions = group.element_positions(element);
+    let first_center = first.bounds.center();
+    let instance_translation = subtract(
+        positions[0],
+        rotated(
+            instance_rotation,
+            subtract(first_positions[0], first_center),
+        ),
+    );
+
+    let positions_match =
+        first_positions
+            .iter()
+            .zip(positions)
+            .all(|(first_position, position)| {
+                let placed = rotated(instance_rotation, subtract(*first_position, first_center));
+                let offset = subtract(subtract(*position, instance_translation), placed);
+                offset
+                    .iter()
+                    .all(|component| component.abs() <= REPEATED_GEOMETRY_TOLERANCE_METRES)
+            });
+    if !positions_match {
+        return None;
+    }
+
+    if !group.normals.is_empty() {
+        let first_normals =
+            &group.normals[first.vertices.start as usize..first.vertices.end as usize];
+        let normals =
+            &group.normals[element.vertices.start as usize..element.vertices.end as usize];
+        let normals_match = first_normals
+            .iter()
+            .zip(normals)
+            .all(|(first_normal, normal)| {
+                let placed = rotated(instance_rotation, first_normal.map(f64::from));
+                let offset = subtract(normal.map(f64::from), placed);
+                offset
+                    .iter()
+                    .all(|component| component.abs() <= NORMAL_TOLERANCE)
+            });
+        if !normals_match {
+            return None;
+        }
+    }
+
+    Some(RepeatedGeometry {
+        first_occurrence,
+        instance_rotation,
+        instance_translation,
+    })
+}
+
+type ElementWithFrame = (usize, [[f64; 3]; 3]);
+
+fn find_repeated_geometry(group: &mut MaterialGroup) {
+    let mut first_occurrences: HashMap<u64, Vec<ElementWithFrame>> = HashMap::new();
+    for element_index in 0..group.elements.len() {
+        let element = &group.elements[element_index];
+        let Some(frame) = rigid_frame(group.element_positions(element)) else {
+            continue;
+        };
+        let candidates = first_occurrences
+            .entry(geometry_key(group, element))
+            .or_default();
+        let matched = candidates
+            .iter()
+            .find_map(|(first_occurrence, first_frame)| {
+                let first = &group.elements[*first_occurrence];
+                let same_triangles = first.vertices.len() == element.vertices.len()
+                    && group.indices[first.indices.clone()]
+                        .iter()
+                        .map(|index| index - first.vertices.start)
+                        .eq(group.indices[element.indices.clone()]
+                            .iter()
+                            .map(|index| index - element.vertices.start));
+                if !same_triangles {
+                    return None;
+                }
+                instance_placement(group, *first_occurrence, element, IDENTITY_ROTATION).or_else(
+                    || {
+                        let rotation = rotation_between_frames(first_frame, &frame);
+                        instance_placement(group, *first_occurrence, element, rotation)
+                    },
+                )
+            });
+        let repeated_geometry = match matched {
+            Some(repeated_geometry) => {
+                let bounds = &mut group.elements[element_index].bounds;
+                bounds.min = bounds
+                    .min
+                    .map(|value| value - REPEATED_GEOMETRY_TOLERANCE_METRES);
+                bounds.max = bounds
+                    .max
+                    .map(|value| value + REPEATED_GEOMETRY_TOLERANCE_METRES);
+                repeated_geometry
+            }
+            None => {
+                candidates.push((element_index, frame));
+                RepeatedGeometry {
+                    first_occurrence: element_index,
+                    instance_rotation: IDENTITY_ROTATION,
+                    instance_translation: element.bounds.center(),
+                }
+            }
+        };
+        group.elements[element_index].repeated_geometry = Some(repeated_geometry);
+    }
+}
+
 impl MaterialGroup {
+    fn element_positions(&self, element: &GroupElement) -> &[[f64; 3]] {
+        &self.positions[element.vertices.start as usize..element.vertices.end as usize]
+    }
+
     fn takes(&self, mesh: &MeshData) -> bool {
         if self.base_color_factor != mesh.base_color_factor {
             return false;
@@ -289,157 +637,798 @@ impl MaterialGroup {
     }
 }
 
-fn compute_aabb(positions: &[[f32; 3]]) -> Aabb {
+fn compute_aabb(positions: &[[f64; 3]]) -> Aabb {
     let mut aabb = Aabb::empty();
     for p in positions {
-        aabb.expand_point([p[0] as f64, p[1] as f64, p[2] as f64]);
+        aabb.expand_point(*p);
     }
     aabb
 }
 
-fn build_recursive(
-    group: &MaterialGroup,
-    indices: &[u32],
+fn offset_from(position: [f64; 3], origin: [f64; 3]) -> [f32; 3] {
+    [
+        (position[0] - origin[0]) as f32,
+        (position[1] - origin[1]) as f32,
+        (position[2] - origin[2]) as f32,
+    ]
+}
+
+struct GroupTiler<'a> {
+    group: &'a MaterialGroup,
+    group_bounds: Aabb,
+    // meshopt::simplify takes f32 positions, spaced 6 cm apart at 1000 km from zero
+    simplification_positions: Vec<[f32; 3]>,
+    tiles_dir: &'a Path,
+    config: &'a MeshTilingConfig,
+}
+
+#[derive(Clone)]
+struct TilePart<'a> {
+    whole_element: Option<usize>,
+    indices: Cow<'a, [u32]>,
     bounds: Aabb,
-    depth: u32,
-    config: &MeshTilingConfig,
-) -> MeshTileNode {
-    let positions = &group.positions;
-    let tri_count = indices.len() / 3;
+}
 
-    if tri_count <= config.max_triangles_per_tile || depth >= config.max_depth {
-        return MeshTileNode::Leaf {
-            bounds,
-            mesh: make_glb_mesh(group, indices, config),
-            depth,
-        };
+impl TilePart<'_> {
+    fn triangle_count(&self) -> usize {
+        self.indices.len() / 3
     }
+}
 
-    // Find longest axis and split along its median.
-    let he = bounds.half_extents();
-    let axis = if he[0] >= he[1] && he[0] >= he[2] {
-        0
-    } else if he[1] >= he[2] {
-        1
-    } else {
-        2
-    };
+fn total_triangles(parts: &[TilePart<'_>]) -> usize {
+    parts.iter().map(TilePart::triangle_count).sum()
+}
 
-    let center = bounds.center();
-    let split = center[axis];
+fn parts_bounds(parts: &[TilePart<'_>]) -> Aabb {
+    let mut bounds = Aabb::empty();
+    for part in parts {
+        bounds.expand_point(part.bounds.min);
+        bounds.expand_point(part.bounds.max);
+    }
+    bounds
+}
 
-    // Classify triangles by centroid position along the split axis.
-    let mut left_idx = Vec::new();
-    let mut right_idx = Vec::new();
+fn split_parts_by_triangle_count<'a>(
+    parts: &[TilePart<'a>],
+    axis: usize,
+) -> (Vec<TilePart<'a>>, Vec<TilePart<'a>>) {
+    let half_of_the_triangles = total_triangles(parts) / 2;
+    let mut by_center: Vec<&TilePart<'a>> = parts.iter().collect();
+    by_center
+        .sort_by(|left, right| left.bounds.center()[axis].total_cmp(&right.bounds.center()[axis]));
 
-    for tri in indices.as_chunks::<3>().0 {
-        let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-        let centroid = (positions[i0][axis] + positions[i1][axis] + positions[i2][axis]) / 3.0;
-        if (centroid as f64) < split {
-            left_idx.extend_from_slice(tri);
+    let mut near = Vec::new();
+    let mut far = Vec::new();
+    let mut near_triangles = 0;
+    for (position, part) in by_center.iter().enumerate() {
+        let is_last = position + 1 == by_center.len();
+        if near.is_empty() || (near_triangles < half_of_the_triangles && !is_last) {
+            near_triangles += part.triangle_count();
+            near.push((*part).clone());
         } else {
-            right_idx.extend_from_slice(tri);
+            far.push((*part).clone());
+        }
+    }
+    (near, far)
+}
+
+// each instanced mesh adds one draw call and about 1 KB of glTF JSON
+const LEAST_BYTES_SAVED_BY_AN_INSTANCED_MESH: usize = 4096;
+// a VEC3 translation, a VEC4 rotation and a SCALAR feature id, all FLOAT
+const MOST_BYTES_PER_INSTANCE: usize = 32;
+
+struct InstancedElements<'p> {
+    first_occurrence: usize,
+    elements: Vec<usize>,
+    first_element_indices: &'p [u32],
+}
+
+impl InstancedElements<'_> {
+    fn saves_bytes(&self, group: &MaterialGroup) -> bool {
+        let mut used_vertices = self.first_element_indices.to_vec();
+        used_vertices.sort_unstable();
+        used_vertices.dedup();
+        let bytes_per_vertex = 12
+            + if group.normals.is_empty() { 0 } else { 12 }
+            + if group.feature_ids.is_empty() { 0 } else { 4 };
+        let geometry_bytes =
+            used_vertices.len() * bytes_per_vertex + self.first_element_indices.len() * 4;
+        let instance_count = self.elements.len();
+        (instance_count - 1) * geometry_bytes
+            >= instance_count * MOST_BYTES_PER_INSTANCE + LEAST_BYTES_SAVED_BY_AN_INSTANCED_MESH
+    }
+}
+
+fn split_instanced_parts<'p>(
+    group: &MaterialGroup,
+    parts: &'p [TilePart<'_>],
+) -> (Vec<u32>, Vec<InstancedElements<'p>>) {
+    let mut direct_indices = Vec::new();
+    let mut by_first_occurrence: BTreeMap<usize, InstancedElements<'p>> = BTreeMap::new();
+    for part in parts {
+        let repeated = part.whole_element.and_then(|element| {
+            let repeated = group.elements[element].repeated_geometry?;
+            Some((element, repeated))
+        });
+        match repeated {
+            Some((element, repeated)) => {
+                by_first_occurrence
+                    .entry(repeated.first_occurrence)
+                    .or_insert_with(|| InstancedElements {
+                        first_occurrence: repeated.first_occurrence,
+                        elements: Vec::new(),
+                        first_element_indices: &part.indices,
+                    })
+                    .elements
+                    .push(element);
+            }
+            None => direct_indices.extend_from_slice(&part.indices),
         }
     }
 
-    // Degenerate split — everything fell to one side.
-    if left_idx.is_empty() || right_idx.is_empty() {
-        return MeshTileNode::Leaf {
-            bounds,
-            mesh: make_glb_mesh(group, indices, config),
-            depth,
-        };
+    let mut instanced = Vec::new();
+    for instanced_elements in by_first_occurrence.into_values() {
+        if instanced_elements.saves_bytes(group) {
+            instanced.push(instanced_elements);
+            continue;
+        }
+        let first_start = group.elements[instanced_elements.elements[0]]
+            .vertices
+            .start;
+        for &element in &instanced_elements.elements {
+            let start = group.elements[element].vertices.start;
+            direct_indices.extend(
+                instanced_elements
+                    .first_element_indices
+                    .iter()
+                    .map(|index| index - first_start + start),
+            );
+        }
+    }
+    (direct_indices, instanced)
+}
+
+impl<'a> GroupTiler<'a> {
+    fn whole_element_parts(&self) -> Vec<TilePart<'a>> {
+        let group: &'a MaterialGroup = self.group;
+        group
+            .elements
+            .iter()
+            .enumerate()
+            .map(|(element_index, element)| TilePart {
+                whole_element: Some(element_index),
+                indices: Cow::Borrowed(&group.indices[element.indices.clone()]),
+                bounds: element.bounds,
+            })
+            .collect()
     }
 
-    let left_bounds = aabb_from_indices(positions, &left_idx);
-    let right_bounds = aabb_from_indices(positions, &right_idx);
+    fn tile(
+        &self,
+        parts: Vec<TilePart<'a>>,
+        bounds: Aabb,
+        depth: u32,
+        path: &mut NodePath,
+    ) -> io::Result<WrittenMeshTile> {
+        let tri_count = total_triangles(&parts);
 
-    let left = build_recursive(group, &left_idx, left_bounds, depth + 1, config);
-    let right = build_recursive(group, &right_idx, right_bounds, depth + 1, config);
+        if tri_count <= self.config.max_triangles_per_tile || depth >= self.config.max_depth {
+            return self.leaf(&parts, bounds, path);
+        }
 
-    // LOD mesh for this internal node — simplified version of the full mesh at this level.
-    // meshopt keeps the vertex array as it is, so texcoords still pair up.
-    let lod_indices = simplify_mesh(positions, indices, config.simplification_ratio);
-    let lod_mesh = make_glb_mesh(group, &lod_indices, config);
+        // Find longest axis and split along its median.
+        let he = bounds.half_extents();
+        let axis = if he[0] >= he[1] && he[0] >= he[2] {
+            0
+        } else if he[1] >= he[2] {
+            1
+        } else {
+            2
+        };
 
-    MeshTileNode::Internal {
-        bounds,
-        children: vec![Box::new(left), Box::new(right)],
-        lod_mesh,
-        depth,
+        let (near, far) = self.split_parts(&parts, axis, bounds.center()[axis]);
+
+        // Degenerate split: one part whose triangles all fall to one side.
+        if near.is_empty() || far.is_empty() {
+            return self.leaf(&parts, bounds, path);
+        }
+
+        let (content_uri, content_triangle_count) = {
+            let lod_parts = self.parent_content_parts(&parts, tri_count);
+            (
+                self.write_content(&lod_parts, path)?,
+                total_triangles(&lod_parts),
+            )
+        };
+        drop(parts);
+
+        let mut children = Vec::with_capacity(2);
+        for (index, half) in [near, far].into_iter().enumerate() {
+            let half_bounds = parts_bounds(&half);
+            path.push(index as u8);
+            children.push(self.tile(half, half_bounds, depth + 1, path)?);
+            path.pop();
+        }
+
+        Ok(WrittenMeshTile {
+            bounds,
+            geometric_error: geometric_error_for(&bounds),
+            content_uri,
+            content_triangle_count,
+            children,
+        })
+    }
+
+    fn split_parts(
+        &self,
+        parts: &[TilePart<'a>],
+        axis: usize,
+        split: f64,
+    ) -> (Vec<TilePart<'a>>, Vec<TilePart<'a>>) {
+        let mut near = Vec::new();
+        let mut far = Vec::new();
+        for part in parts {
+            if part.triangle_count() <= self.config.max_triangles_per_tile {
+                if part.bounds.center()[axis] < split {
+                    near.push(part.clone());
+                } else {
+                    far.push(part.clone());
+                }
+                continue;
+            }
+
+            // Classify triangles by centroid position along the split axis.
+            let positions = &self.group.positions;
+            let mut near_indices = Vec::new();
+            let mut far_indices = Vec::new();
+            for tri in part.indices.as_chunks::<3>().0 {
+                let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+                let centroid =
+                    (positions[i0][axis] + positions[i1][axis] + positions[i2][axis]) / 3.0;
+                if centroid < split {
+                    near_indices.extend_from_slice(tri);
+                } else {
+                    far_indices.extend_from_slice(tri);
+                }
+            }
+            if near_indices.is_empty() {
+                far.push(part.clone());
+            } else if far_indices.is_empty() {
+                near.push(part.clone());
+            } else {
+                for (side, indices) in [(&mut near, near_indices), (&mut far, far_indices)] {
+                    side.push(TilePart {
+                        whole_element: None,
+                        bounds: aabb_from_indices(positions, &indices),
+                        indices: Cow::Owned(indices),
+                    });
+                }
+            }
+        }
+        if near.is_empty() || far.is_empty() {
+            return split_parts_by_triangle_count(parts, axis);
+        }
+        (near, far)
+    }
+
+    fn parent_content_parts(&self, parts: &[TilePart<'a>], tri_count: usize) -> Vec<TilePart<'a>> {
+        let triangle_budget = self.config.max_triangles_per_tile;
+        let ratio = self
+            .config
+            .simplification_ratio
+            .min(triangle_budget as f32 / tri_count as f32);
+
+        let mut largest_first: Vec<&TilePart<'a>> = parts.iter().collect();
+        largest_first.sort_by(|left, right| {
+            geometric_error_for(&right.bounds).total_cmp(&geometric_error_for(&left.bounds))
+        });
+
+        let mut simplified_first_occurrences = HashMap::new();
+        let mut kept: Vec<TilePart<'a>> = Vec::new();
+        let mut kept_triangles = 0;
+        for part in largest_first {
+            if !kept.is_empty() && kept_triangles >= triangle_budget {
+                break;
+            }
+            let mut indices =
+                self.simplified_indices(part, ratio, &mut simplified_first_occurrences);
+            if indices.is_empty() {
+                indices = part.indices.to_vec();
+            }
+            kept_triangles += indices.len() / 3;
+            kept.push(TilePart {
+                whole_element: part.whole_element,
+                indices: Cow::Owned(indices),
+                bounds: part.bounds,
+            });
+        }
+        kept
+    }
+
+    fn simplified_indices(
+        &self,
+        part: &TilePart<'a>,
+        ratio: f32,
+        simplified_first_occurrences: &mut HashMap<usize, Vec<u32>>,
+    ) -> Vec<u32> {
+        let elements = &self.group.elements;
+        let repeated = part.whole_element.and_then(|element_index| {
+            let element = &elements[element_index];
+            element
+                .repeated_geometry
+                .map(|repeated| (element, repeated))
+        });
+        // simplify_mesh's error limit is a fraction of the side it gets, and the group's side collapses small elements to nothing
+        let Some((element, repeated)) = repeated else {
+            return simplify_mesh(
+                &self.simplification_positions,
+                &part.indices,
+                ratio,
+                part.bounds.max_extent() as f32,
+            );
+        };
+
+        let first = &elements[repeated.first_occurrence];
+        let first_indices = simplified_first_occurrences
+            .entry(repeated.first_occurrence)
+            .or_insert_with(|| {
+                simplify_mesh(
+                    &self.simplification_positions,
+                    &self.group.indices[first.indices.clone()],
+                    ratio,
+                    first.bounds.max_extent() as f32,
+                )
+            });
+        first_indices
+            .iter()
+            .map(|index| index - first.vertices.start + element.vertices.start)
+            .collect()
+    }
+
+    fn leaf(
+        &self,
+        parts: &[TilePart<'a>],
+        bounds: Aabb,
+        path: &NodePath,
+    ) -> io::Result<WrittenMeshTile> {
+        Ok(WrittenMeshTile {
+            bounds,
+            geometric_error: 0.0,
+            content_uri: self.write_content(parts, path)?,
+            content_triangle_count: total_triangles(parts),
+            children: Vec::new(),
+        })
+    }
+
+    fn write_content(&self, parts: &[TilePart<'a>], path: &NodePath) -> io::Result<Option<String>> {
+        if total_triangles(parts) == 0 {
+            return Ok(None);
+        }
+        let (direct_indices, instanced) = split_instanced_parts(self.group, parts);
+        let mut mesh = make_glb_mesh(self.group, &direct_indices, &instanced, self.config);
+        if self.config.texture_compression == TextureCompression::Ktx2 {
+            mesh.texture = mesh.texture.as_ref().map(ktx2_texture).transpose()?;
+        }
+        let filename = path.to_filename();
+        glb_writer::write_compressed_glb_file(
+            &mesh,
+            self.config.mesh_compression,
+            &self.tiles_dir.join(&filename),
+        )?;
+        Ok(Some(format!("tiles/{filename}")))
     }
 }
 
-fn aabb_from_indices(positions: &[[f32; 3]], indices: &[u32]) -> Aabb {
+fn aabb_from_indices(positions: &[[f64; 3]], indices: &[u32]) -> Aabb {
     let mut aabb = Aabb::empty();
     for &i in indices {
-        let p = positions[i as usize];
-        aabb.expand_point([p[0] as f64, p[1] as f64, p[2] as f64]);
+        aabb.expand_point(positions[i as usize]);
     }
     aabb
 }
 
-fn make_glb_mesh(group: &MaterialGroup, indices: &[u32], config: &MeshTilingConfig) -> GlbMesh {
-    let mut positions = group.positions.clone();
-    let mut normals = (!group.normals.is_empty()).then(|| group.normals.clone());
+fn values_at<T: Copy>(values: &[T], vertices: &[u32]) -> Vec<T> {
+    vertices
+        .iter()
+        .map(|&vertex| values[vertex as usize])
+        .collect()
+}
+
+fn tile_feature_id(tile_features: &[u32], group_feature_id: u32) -> u32 {
+    tile_features
+        .binary_search(&group_feature_id)
+        .expect("every feature id is in the tile's feature list") as u32
+}
+
+fn tile_feature_table(
+    group: &MaterialGroup,
+    used_vertices: &[u32],
+    instanced: &[InstancedElements<'_>],
+) -> Option<(Vec<u32>, TileMetadata)> {
+    if group.feature_ids.is_empty() {
+        return None;
+    }
+    let mut tile_features = values_at(&group.feature_ids, used_vertices);
+    for instanced_elements in instanced {
+        tile_features.extend(
+            instanced_elements
+                .elements
+                .iter()
+                .map(|&element| group.feature_ids[group.elements[element].vertices.start as usize]),
+        );
+    }
+    tile_features.sort_unstable();
+    tile_features.dedup();
+
+    let properties: Vec<MetadataProperty> = FEATURE_COLUMN_NAMES
+        .iter()
+        .enumerate()
+        .filter_map(|(column, name)| {
+            let values: Vec<String> = tile_features
+                .iter()
+                .map(|&feature| group.feature_rows[feature as usize][column].clone())
+                .collect();
+            // gltf-validator refuses a bufferView of zero bytes, which an all-empty string column needs
+            let has_a_value = values.iter().any(|value| !value.is_empty());
+            has_a_value.then(|| MetadataProperty {
+                name: name.to_string(),
+                values: MetadataValues::String(values),
+            })
+        })
+        .collect();
+    if properties.is_empty() {
+        return None;
+    }
+
+    Some((
+        tile_features,
+        TileMetadata {
+            class_name: ASSET_CLASS_NAME.to_string(),
+            properties,
+        },
+    ))
+}
+
+fn instanced_mesh(
+    group: &MaterialGroup,
+    instanced: &InstancedElements<'_>,
+    tile_features: Option<&[u32]>,
+    config: &MeshTilingConfig,
+) -> InstancedMesh {
+    let first = &group.elements[instanced.first_occurrence];
+    let first_listed_start = group.elements[instanced.elements[0]].vertices.start;
+    let relative_indices: Vec<u32> = instanced
+        .first_element_indices
+        .iter()
+        .map(|index| index - first_listed_start)
+        .collect();
+    let mut used_vertices = relative_indices.clone();
+    used_vertices.sort_unstable();
+    used_vertices.dedup();
+    let indices: Vec<u32> = relative_indices
+        .iter()
+        .map(|index| {
+            used_vertices
+                .binary_search(index)
+                .expect("every index is in the used vertex list") as u32
+        })
+        .collect();
+    let first_vertices: Vec<u32> = used_vertices
+        .iter()
+        .map(|vertex| vertex + first.vertices.start)
+        .collect();
+
+    let first_center = first.bounds.center();
+    let mut positions: Vec<[f32; 3]> = first_vertices
+        .iter()
+        .map(|&vertex| offset_from(group.positions[vertex as usize], first_center))
+        .collect();
+    let mut normals =
+        (!group.normals.is_empty()).then(|| values_at(&group.normals, &first_vertices));
+
+    let placements: Vec<RepeatedGeometry> = instanced
+        .elements
+        .iter()
+        .map(|&element| {
+            group.elements[element]
+                .repeated_geometry
+                .expect("every instanced element has a placement")
+        })
+        .collect();
+    let translations: Vec<[f64; 3]> = placements
+        .iter()
+        .map(|placement| placement.instance_translation)
+        .collect();
+    let mut node_translation = compute_aabb(&translations).center();
+    let mut instance_translations: Vec<[f32; 3]> = translations
+        .iter()
+        .map(|&translation| offset_from(translation, node_translation))
+        .collect();
+    let mut instance_rotations = placements
+        .iter()
+        .any(|placement| placement.instance_rotation != IDENTITY_ROTATION)
+        .then(|| -> Vec<[f32; 4]> {
+            placements
+                .iter()
+                .map(|placement| placement.instance_rotation)
+                .collect()
+        });
+
     if config.content_y_up {
         z_up_to_y_up(&mut positions);
+        z_up_to_y_up(std::slice::from_mut(&mut node_translation));
+        z_up_to_y_up(&mut instance_translations);
+        if let Some(normals) = &mut normals {
+            z_up_to_y_up(normals);
+        }
+        if let Some(rotations) = &mut instance_rotations {
+            // a quaternion's vector part turns with the frame and its scalar part does not
+            for rotation in rotations {
+                *rotation = [rotation[0], rotation[2], -rotation[1], rotation[3]];
+            }
+        }
+    }
+
+    let instance_feature_ids = tile_features.map(|tile_features| {
+        instanced
+            .elements
+            .iter()
+            .map(|&element| {
+                let vertex = group.elements[element].vertices.start as usize;
+                tile_feature_id(tile_features, group.feature_ids[vertex])
+            })
+            .collect()
+    });
+
+    InstancedMesh {
+        positions,
+        normals,
+        indices,
+        node_translation,
+        instance_translations,
+        instance_rotations,
+        instance_feature_ids,
+    }
+}
+
+fn direct_glb_mesh(
+    group: &MaterialGroup,
+    indices: &[u32],
+    used_vertices: &[u32],
+    tile_features: Option<&[u32]>,
+    config: &MeshTilingConfig,
+) -> GlbMesh {
+    if indices.is_empty() {
+        return GlbMesh {
+            positions: Vec::new(),
+            normals: None,
+            indices: None,
+            colors: None,
+            texcoords: None,
+            metadata: None,
+            feature_ids: None,
+            texture: None,
+            base_color_factor: group.base_color_factor,
+            node_translation: None,
+            instanced_meshes: Vec::new(),
+            edge_visibility: None,
+        };
+    }
+
+    let tile_indices: Vec<u32> = indices
+        .iter()
+        .map(|index| {
+            used_vertices
+                .binary_search(index)
+                .expect("every index is in the used vertex list") as u32
+        })
+        .collect();
+
+    let mut node_translation = aabb_from_indices(&group.positions, used_vertices).center();
+    let mut positions: Vec<[f32; 3]> = used_vertices
+        .iter()
+        .map(|&vertex| offset_from(group.positions[vertex as usize], node_translation))
+        .collect();
+    let mut normals = (!group.normals.is_empty()).then(|| values_at(&group.normals, used_vertices));
+    if config.content_y_up {
+        z_up_to_y_up(&mut positions);
+        z_up_to_y_up(std::slice::from_mut(&mut node_translation));
         if let Some(normals) = &mut normals {
             z_up_to_y_up(normals);
         }
     }
 
+    let texcoords =
+        (!group.texcoords.is_empty()).then(|| values_at(&group.texcoords, used_vertices));
     // a tile holding part of a textured mesh carries only the part of the
     // texture its triangles reach
     let split = group
         .texture
         .as_ref()
         .filter(|_| indices.len() < group.indices.len())
-        .map(|texture| split_texture(texture, &group.texcoords, indices));
+        .map(|texture| {
+            let texcoords = texcoords
+                .as_ref()
+                .expect("group_by_material drops a texture without texcoords");
+            split_texture(texture, texcoords, &tile_indices)
+        });
     let (texture, texcoords) = match split {
         Some((texture, texcoords)) => (Some(texture), Some(texcoords)),
-        None => (
-            group.texture.clone(),
-            (!group.texcoords.is_empty()).then(|| group.texcoords.clone()),
-        ),
+        None => (group.texture.clone(), texcoords),
     };
 
-    // every tile of a group carries the whole group's vertex array, so the
-    // property table covers every feature the tile can name
-    let feature_ids = (!group.feature_ids.is_empty()).then(|| group.feature_ids.clone());
-    let metadata = feature_ids.is_some().then(|| TileMetadata {
-        class_name: ASSET_CLASS_NAME.to_string(),
-        properties: vec![MetadataProperty {
-            name: ASSET_ID_PROPERTY.to_string(),
-            values: MetadataValues::String(group.asset_ids.clone()),
-        }],
+    let feature_ids = tile_features.map(|tile_features| {
+        used_vertices
+            .iter()
+            .map(|&vertex| tile_feature_id(tile_features, group.feature_ids[vertex as usize]))
+            .collect()
     });
 
     GlbMesh {
         positions,
         normals,
-        indices: Some(indices.to_vec()),
+        indices: Some(tile_indices),
         colors: None,
         texcoords,
-        metadata,
+        metadata: None,
         feature_ids,
         texture,
         base_color_factor: group.base_color_factor,
+        node_translation: Some(node_translation),
+        instanced_meshes: Vec::new(),
+        edge_visibility: None,
     }
 }
 
-fn empty_glb_mesh() -> GlbMesh {
-    GlbMesh {
-        positions: Vec::new(),
-        normals: None,
-        indices: None,
-        colors: None,
-        texcoords: None,
-        metadata: None,
-        feature_ids: None,
-        texture: None,
-        base_color_factor: None,
+const HIDDEN_EDGE: u8 = 0;
+const SILHOUETTE_EDGE: u8 = 1;
+const HARD_EDGE: u8 = 2;
+const REPEATED_HARD_EDGE: u8 = 3;
+const COPLANAR_MAX_FOLD_DEGREES: f64 = 1.0;
+const SMOOTH_MAX_FOLD_DEGREES: f64 = 30.0;
+
+fn face_normal(positions: &[[f32; 3]], corners: &[u32; 3]) -> Option<[f64; 3]> {
+    let &[first, second, third] = corners;
+    let position = |corner: u32| positions[corner as usize].map(f64::from);
+    let normal = cross(
+        subtract(position(second), position(first)),
+        subtract(position(third), position(first)),
+    );
+    let length = dot(normal, normal).sqrt();
+    (length > 0.0).then(|| scaled(normal, 1.0 / length))
+}
+
+fn edge_kind(adjacent_faces: &[usize], face_normals: &[Option<[f64; 3]>]) -> u8 {
+    let &[first, second] = adjacent_faces else {
+        return HARD_EDGE;
+    };
+    let normal = |face: usize| face_normals[face].expect("only faces with a normal border an edge");
+    let cosine = dot(normal(first), normal(second));
+    if cosine >= COPLANAR_MAX_FOLD_DEGREES.to_radians().cos() {
+        HIDDEN_EDGE
+    } else if cosine >= SMOOTH_MAX_FOLD_DEGREES.to_radians().cos() {
+        SILHOUETTE_EDGE
+    } else {
+        HARD_EDGE
     }
+}
+
+fn packed_edge_values(values: &[u8]) -> Vec<u8> {
+    let mut packed = vec![0; values.len().div_ceil(4)];
+    for (edge, &value) in values.iter().enumerate() {
+        packed[edge / 4] |= value << ((edge % 4) * 2);
+    }
+    packed
+}
+
+fn edge_visibility(mesh: &GlbMesh) -> Option<EdgeVisibility> {
+    let indices = mesh.indices.as_deref()?;
+    // f32 negative zero has other bits than positive zero
+    let position_bits =
+        |vertex: usize| mesh.positions[vertex].map(|component| (component + 0.0).to_bits());
+    let feature = |vertex: usize| mesh.feature_ids.as_ref().map_or(0, |ids| ids[vertex]);
+    let mut welded_ids: HashMap<([u32; 3], u32), u32> = HashMap::new();
+    let welded_vertices: Vec<u32> = (0..mesh.positions.len())
+        .map(|vertex| {
+            let next_id = welded_ids.len() as u32;
+            *welded_ids
+                .entry((position_bits(vertex), feature(vertex)))
+                .or_insert(next_id)
+        })
+        .collect();
+    let welded_edge = |(start, end): (u32, u32)| {
+        let start = welded_vertices[start as usize];
+        let end = welded_vertices[end as usize];
+        (start.min(end), start.max(end))
+    };
+    let corner_pairs = |corners: &[u32; 3]| {
+        [
+            (corners[0], corners[1]),
+            (corners[1], corners[2]),
+            (corners[2], corners[0]),
+        ]
+    };
+
+    let triangles = indices.as_chunks::<3>().0;
+    let face_normals: Vec<Option<[f64; 3]>> = triangles
+        .iter()
+        .map(|corners| face_normal(&mesh.positions, corners))
+        .collect();
+    let mut adjacent_faces: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (face, corners) in triangles.iter().enumerate() {
+        if face_normals[face].is_none() {
+            continue;
+        }
+        for pair in corner_pairs(corners) {
+            adjacent_faces
+                .entry(welded_edge(pair))
+                .or_default()
+                .push(face);
+        }
+    }
+
+    let mut values = Vec::with_capacity(indices.len());
+    let mut silhouette_normals = Vec::new();
+    let mut encoded_edges = HashSet::new();
+    for (face, corners) in triangles.iter().enumerate() {
+        if face_normals[face].is_none() {
+            values.extend([HIDDEN_EDGE; 3]);
+            continue;
+        }
+        for pair in corner_pairs(corners) {
+            let edge = welded_edge(pair);
+            let faces = &adjacent_faces[&edge];
+            let first_occurrence = encoded_edges.insert(edge);
+            let value = match (edge_kind(faces, &face_normals), first_occurrence) {
+                (HARD_EDGE, true) => HARD_EDGE,
+                (HARD_EDGE, false) => REPEATED_HARD_EDGE,
+                (SILHOUETTE_EDGE, true) => {
+                    silhouette_normals.extend(faces.iter().map(|&adjacent| {
+                        face_normals[adjacent]
+                            .expect("only faces with a normal border an edge")
+                            .map(|component| component as f32)
+                    }));
+                    SILHOUETTE_EDGE
+                }
+                _ => HIDDEN_EDGE,
+            };
+            values.push(value);
+        }
+    }
+
+    let any_drawn_edge = values.iter().any(|&value| value != HIDDEN_EDGE);
+    any_drawn_edge.then(|| EdgeVisibility {
+        visibility: packed_edge_values(&values),
+        silhouette_normals,
+    })
+}
+
+fn make_glb_mesh(
+    group: &MaterialGroup,
+    indices: &[u32],
+    instanced: &[InstancedElements<'_>],
+    config: &MeshTilingConfig,
+) -> GlbMesh {
+    let mut used_vertices = indices.to_vec();
+    used_vertices.sort_unstable();
+    used_vertices.dedup();
+
+    let (tile_features, metadata) = tile_feature_table(group, &used_vertices, instanced).unzip();
+    let tile_features = tile_features.as_deref();
+
+    let mut mesh = direct_glb_mesh(group, indices, &used_vertices, tile_features, config);
+    mesh.metadata = metadata;
+    mesh.instanced_meshes = instanced
+        .iter()
+        .map(|elements| instanced_mesh(group, elements, tile_features, config))
+        .collect();
+    if config.mesh_compression == MeshCompression::Meshopt {
+        reorder_vertices_for_meshopt(&mut mesh);
+    }
+    if config.cad_edges {
+        mesh.edge_visibility = edge_visibility(&mesh);
+    }
+    mesh
 }
 
 // ── tree traversal helpers ──────────────────────────────────────────────────
@@ -472,41 +1461,31 @@ impl NodePath {
     }
 }
 
-fn write_node_glbs(node: &MeshTileNode, tiles_dir: &Path, path: &mut NodePath) -> io::Result<()> {
-    let filename = path.to_filename();
-    match node {
-        MeshTileNode::Leaf { mesh, .. } => {
-            if !mesh.positions.is_empty() {
-                glb_writer::write_glb_file(mesh, &tiles_dir.join(&filename))?;
-            }
-        }
-        MeshTileNode::Internal {
-            children, lod_mesh, ..
-        } => {
-            if !lod_mesh.positions.is_empty() {
-                glb_writer::write_glb_file(lod_mesh, &tiles_dir.join(&filename))?;
-            }
-            for (i, child) in children.iter().enumerate() {
-                path.push(i as u8);
-                write_node_glbs(child, tiles_dir, path)?;
-                path.pop();
-            }
-        }
-    }
-    Ok(())
-}
-
 fn geometric_error_for(bounds: &Aabb) -> f64 {
     let h = bounds.half_extents();
     (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]).sqrt()
 }
 
-fn generate_mesh_tileset(root: &MeshTileNode, root_transform: Option<[f64; 16]>) -> Tileset {
-    let mut root_tile = generate_tile(root, "tiles/", &mut NodePath::new());
-    root_tile.transform = root_transform;
+fn y_up_bounds_to_z_up_box(bounds: &Aabb) -> [f64; 12] {
+    // 3d tiles runtimes map glTF (x, y, z) to (x, -z, y)
+    let rotated = Aabb::new(
+        [bounds.min[0], -bounds.max[2], bounds.min[1]],
+        [bounds.max[0], -bounds.min[2], bounds.max[1]],
+    );
+    rotated.to_3dtiles_box()
+}
+
+fn generate_mesh_tileset(root: &WrittenMeshTile, config: &MeshTilingConfig) -> Tileset {
+    let tileset_box: fn(&Aabb) -> [f64; 12] = if config.content_y_up {
+        Aabb::to_3dtiles_box
+    } else {
+        y_up_bounds_to_z_up_box
+    };
+    let mut root_tile = generate_tile(root, tileset_box);
+    root_tile.transform = config.root_transform;
     // the tileset's own error has to be above zero or a viewer never visits
     // the root, and a single-tile root is a leaf whose error is zero
-    let geometric_error = geometric_error_for(root.bounds());
+    let geometric_error = geometric_error_for(&root.bounds);
     Tileset {
         asset: TilesetAsset {
             version: "1.1".to_string(),
@@ -518,73 +1497,85 @@ fn generate_mesh_tileset(root: &MeshTileNode, root_transform: Option<[f64; 16]>)
     }
 }
 
-fn generate_tile(node: &MeshTileNode, base_url: &str, path: &mut NodePath) -> Tile {
-    let bounds = node.bounds();
-    let bounding_volume = BoundingVolume::Box {
-        r#box: bounds.to_3dtiles_box(),
-    };
-
-    match node {
-        MeshTileNode::Leaf { mesh, .. } => {
-            let content = if mesh.positions.is_empty() {
-                None
-            } else {
-                Some(TileContent {
-                    uri: format!("{base_url}{}", path.to_filename()),
-                })
-            };
-            Tile {
-                bounding_volume,
-                geometric_error: 0.0,
-                content,
-                children: Vec::new(),
-                refine: Some(Refine::Replace),
-                transform: None,
-            }
-        }
-        MeshTileNode::Internal {
-            children, lod_mesh, ..
-        } => {
-            let content = if lod_mesh.positions.is_empty() {
-                None
-            } else {
-                Some(TileContent {
-                    uri: format!("{base_url}{}", path.to_filename()),
-                })
-            };
-
-            let mut child_tiles = Vec::new();
-            for (i, child) in children.iter().enumerate() {
-                path.push(i as u8);
-                child_tiles.push(generate_tile(child, base_url, path));
-                path.pop();
-            }
-
-            Tile {
-                bounding_volume,
-                geometric_error: geometric_error_for(bounds),
-                content,
-                children: child_tiles,
-                refine: Some(Refine::Replace),
-                transform: None,
-            }
-        }
+fn generate_tile(node: &WrittenMeshTile, tileset_box: fn(&Aabb) -> [f64; 12]) -> Tile {
+    Tile {
+        bounding_volume: BoundingVolume::Box {
+            r#box: tileset_box(&node.bounds),
+        },
+        geometric_error: node.geometric_error,
+        content: node.content_uri.clone().map(|uri| TileContent { uri }),
+        children: node
+            .children
+            .iter()
+            .map(|child| generate_tile(child, tileset_box))
+            .collect(),
+        refine: Some(Refine::Replace),
+        transform: None,
     }
 }
 
-fn collect_stats(node: &MeshTileNode, stats: &mut MeshTilingStats) {
+fn collect_stats(node: &WrittenMeshTile, depth: u32, stats: &mut MeshTilingStats) {
     stats.tile_count += 1;
-    stats.max_depth_reached = stats.max_depth_reached.max(node.depth());
-    match node {
-        MeshTileNode::Leaf { mesh, .. } => {
-            stats.total_triangles += mesh.indices.as_ref().map_or(0, |i| i.len() / 3);
-        }
-        MeshTileNode::Internal { children, .. } => {
-            for child in children {
-                collect_stats(child, stats);
-            }
-        }
+    stats.max_depth_reached = stats.max_depth_reached.max(depth);
+    if node.children.is_empty() {
+        stats.total_triangles += node.content_triangle_count;
     }
+    for child in &node.children {
+        collect_stats(child, depth + 1, stats);
+    }
+}
+
+fn lossless_texture(texture: &TextureData) -> TextureData {
+    if texture.mime_type == "image/png" {
+        return texture.clone();
+    }
+    let image =
+        image::load_from_memory(&texture.image_data).expect("texture image should be decodable");
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .expect("texture encode");
+    TextureData {
+        image_data: buf.into_inner(),
+        mime_type: "image/png".to_string(),
+        width: texture.width,
+        height: texture.height,
+    }
+}
+
+fn ktx2_texture(texture: &TextureData) -> io::Result<TextureData> {
+    let image = image::load_from_memory(&texture.image_data).map_err(io::Error::other)?;
+    // KHR_texture_basisu images must have a width and height that are multiples of 4
+    let width = image.width().next_multiple_of(4);
+    let height = image.height().next_multiple_of(4);
+    let pixels = image
+        .resize_exact(width, height, image::imageops::FilterType::Triangle)
+        .into_rgba8();
+
+    basisu_encoder_init();
+    let mut encoder = BasisuEncoder::new();
+    encoder
+        .set_image(SourceImage {
+            data: pixels.as_raw(),
+            format: SourceImageFormat::Rgba8,
+            size: Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        })
+        .map_err(io::Error::other)?;
+    // KHR_texture_basisu images under a mipmap sampler should carry a full mip pyramid
+    let params = BasisuEncoderParams::new_with_srgb_defaults(BasisTextureFormat::Etc1s)
+        .with_flags(BU_COMP_FLAGS_GEN_MIPS_CLAMP);
+    let image_data = encoder.compress(params).map_err(io::Error::other)?;
+
+    Ok(TextureData {
+        image_data,
+        mime_type: glb_writer::KTX2_MIME_TYPE.to_string(),
+        width,
+        height,
+    })
 }
 
 /// Remap texcoords and extract texture sub-region for a subset of triangles.
@@ -685,6 +1676,8 @@ mod tests {
             indices,
             name: "cube".into(),
             asset_id: None,
+            class: None,
+            storey: None,
             base_color_factor: None,
             texture: None,
         }
@@ -698,7 +1691,7 @@ mod tests {
 
         for y in 0..=n {
             for x in 0..=n {
-                positions.push([x as f32, y as f32, 0.0]);
+                positions.push([x as f64, y as f64, 0.0]);
                 normals.push([0.0, 0.0, 1.0]);
             }
         }
@@ -720,19 +1713,83 @@ mod tests {
             indices,
             name: "grid".into(),
             asset_id: None,
+            class: None,
+            storey: None,
             base_color_factor: None,
             texture: None,
         }
     }
 
+    struct WrittenTileset {
+        dir: std::path::PathBuf,
+        tileset: Tileset,
+    }
+
+    impl Drop for WrittenTileset {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    impl WrittenTileset {
+        fn glb(&self, tile: &Tile) -> (serde_json::Value, Vec<Vec<u8>>) {
+            let content = tile.content.as_ref().expect("the tile has content");
+            read_glb(&self.dir.join(&content.uri))
+        }
+    }
+
+    fn write_tileset(meshes: &[MeshData], config: &MeshTilingConfig) -> WrittenTileset {
+        let dir = std::env::temp_dir().join(format!("mesh_tiler_{}", uuid::Uuid::new_v4()));
+        tile_meshes(meshes, &dir, config).expect("tile_meshes failed");
+        let tileset =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("tileset.json")).unwrap())
+                .expect("a parseable tileset.json");
+        WrittenTileset { dir, tileset }
+    }
+
+    fn leaf_tiles(tile: &Tile) -> Vec<&Tile> {
+        if tile.children.is_empty() {
+            return vec![tile];
+        }
+        tile.children.iter().flat_map(leaf_tiles).collect()
+    }
+
+    fn accessor_values<T: bytemuck::Pod>(
+        json: &serde_json::Value,
+        views: &[Vec<u8>],
+        accessor: u64,
+    ) -> Vec<T> {
+        let view = json["accessors"][accessor as usize]["bufferView"]
+            .as_u64()
+            .expect("an accessor with a buffer view") as usize;
+        bytemuck::pod_collect_to_vec(views[view].as_slice())
+    }
+
+    fn attribute_values<T: bytemuck::Pod>(
+        json: &serde_json::Value,
+        views: &[Vec<u8>],
+        attribute: &str,
+    ) -> Option<Vec<T>> {
+        let accessor = json["meshes"][0]["primitives"][0]["attributes"][attribute].as_u64()?;
+        Some(accessor_values(json, views, accessor))
+    }
+
+    fn index_values(json: &serde_json::Value, views: &[Vec<u8>]) -> Vec<u32> {
+        let accessor = json["meshes"][0]["primitives"][0]["indices"]
+            .as_u64()
+            .expect("an indices accessor");
+        accessor_values(json, views, accessor)
+    }
+
     #[test]
     fn small_mesh_produces_leaf() {
-        let config = MeshTilingConfig::default();
-        let tree = build_mesh_tree(&[cube_mesh()], &config);
+        let written = write_tileset(&[cube_mesh()], &MeshTilingConfig::default());
+        let root = &written.tileset.root;
         assert!(
-            matches!(tree, MeshTileNode::Leaf { .. }),
+            root.children.is_empty(),
             "cube with 12 triangles should be a leaf"
         );
+        assert_eq!(root.content.as_ref().unwrap().uri, "tiles/root.glb");
     }
 
     #[test]
@@ -742,9 +1799,9 @@ mod tests {
             ..Default::default()
         };
         // 256×256 grid = 131072 triangles — well above the 100 limit.
-        let tree = build_mesh_tree(&[grid_mesh(256)], &config);
+        let written = write_tileset(&[grid_mesh(256)], &config);
         assert!(
-            matches!(tree, MeshTileNode::Internal { .. }),
+            !written.tileset.root.children.is_empty(),
             "large mesh should be subdivided"
         );
     }
@@ -755,8 +1812,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let config = MeshTilingConfig::default();
-        let tree = build_mesh_tree(&[cube_mesh()], &config);
-        write_mesh_tileset(&tree, &dir, &config).expect("write_mesh_tileset failed");
+        tile_meshes(&[cube_mesh()], &dir, &config).expect("tile_meshes failed");
 
         assert!(dir.join("tileset.json").exists());
         assert!(dir.join("tiles/root.glb").exists());
@@ -775,18 +1831,20 @@ mod tests {
             ..Default::default()
         };
         let mesh = grid_mesh(64); // 8192 triangles
-        let tree = build_mesh_tree(&[mesh], &config);
+        let written = write_tileset(&[mesh], &config);
+        let root = &written.tileset.root;
+        assert!(
+            !root.children.is_empty(),
+            "expected a split of the 8192-triangle mesh with max 100"
+        );
 
-        if let MeshTileNode::Internal { lod_mesh, .. } = &tree {
-            let lod_tris = lod_mesh.indices.as_ref().map_or(0, |i| i.len() / 3);
-            // LOD should have fewer triangles than the original 8192.
-            assert!(
-                lod_tris < 8192,
-                "LOD mesh should have fewer triangles, got {lod_tris}"
-            );
-        } else {
-            panic!("expected Internal node for 8192-triangle mesh with max 100");
-        }
+        let (json, views) = written.glb(root);
+        let lod_tris = index_values(&json, &views).len() / 3;
+        // LOD should have fewer triangles than the original 8192.
+        assert!(
+            lod_tris < 8192,
+            "LOD mesh should have fewer triangles, got {lod_tris}"
+        );
     }
 
     #[test]
@@ -806,6 +1864,42 @@ mod tests {
                 .unwrap();
         assert!(json["geometricError"].as_f64().unwrap() > 0.0);
         assert_eq!(json["root"]["geometricError"].as_f64().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn each_leaf_glb_carries_only_the_vertices_its_triangles_reference() {
+        let mesh = grid_mesh(32);
+        let input_vertex_count = mesh.positions.len();
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 100,
+            ..Default::default()
+        };
+        let written = write_tileset(std::slice::from_ref(&mesh), &config);
+        let leaves = leaf_tiles(&written.tileset.root);
+        assert!(
+            leaves.len() > 4,
+            "the grid should split into several leaves"
+        );
+
+        let mut written_vertex_count = 0;
+        for leaf in leaves {
+            let (json, views) = written.glb(leaf);
+            let position_accessor = json["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
+                .as_u64()
+                .unwrap() as usize;
+            let position_count = json["accessors"][position_accessor]["count"]
+                .as_u64()
+                .unwrap() as usize;
+            let mut referenced = index_values(&json, &views);
+            referenced.sort_unstable();
+            referenced.dedup();
+            assert_eq!(position_count, referenced.len(), "{:?}", leaf.content);
+            written_vertex_count += position_count;
+        }
+        assert!(
+            written_vertex_count <= 2 * input_vertex_count,
+            "{written_vertex_count} vertices written for {input_vertex_count} input vertices"
+        );
     }
 
     #[test]
@@ -836,6 +1930,8 @@ mod tests {
             indices: vec![0, 1, 2],
             name: "slab".into(),
             asset_id: None,
+            class: None,
+            storey: None,
             base_color_factor: None,
             texture: None,
         };
@@ -856,9 +1952,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn gltf_y_up_content_gets_its_bounding_volume_turned_to_z_up() {
+        // 4 wide in x, 2 tall in glTF y, 6 deep in glTF z
+        let mesh = MeshData {
+            positions: vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 2.0, 6.0]],
+            normals: vec![[0.0, 1.0, 0.0]; 3],
+            texcoords: Vec::new(),
+            indices: vec![0, 1, 2],
+            name: "slab".into(),
+            asset_id: None,
+            class: None,
+            storey: None,
+            base_color_factor: None,
+            texture: None,
+        };
+        let written = write_tileset(&[mesh], &MeshTilingConfig::default());
+
+        let BoundingVolume::Box { r#box } = written.tileset.root.bounding_volume.clone() else {
+            panic!("mesh tiles get a box");
+        };
+        #[rustfmt::skip]
+        let expected = [
+            2.0, -3.0, 1.0,
+            2.0, 0.0, 0.0,
+            0.0, 3.0, 0.0,
+            0.0, 0.0, 1.0,
+        ];
+        assert_eq!(r#box, expected);
+    }
+
     /// One triangle per asset, far enough apart that the split puts them in
     /// different leaves.
-    fn triangle_at(x: f32, asset_id: Option<&str>) -> MeshData {
+    fn triangle_at(x: f64, asset_id: Option<&str>) -> MeshData {
         MeshData {
             positions: vec![[x, 0.0, 0.0], [x + 1.0, 0.0, 0.0], [x, 1.0, 0.0]],
             normals: Vec::new(),
@@ -866,35 +1992,40 @@ mod tests {
             indices: vec![0, 1, 2],
             name: "triangle".into(),
             asset_id: asset_id.map(str::to_string),
+            class: None,
+            storey: None,
             base_color_factor: None,
             texture: None,
         }
     }
 
-    fn collect_leaves<'a>(node: &'a MeshTileNode, found: &mut Vec<&'a GlbMesh>) {
-        match node {
-            MeshTileNode::Leaf { mesh, .. } => found.push(mesh),
-            MeshTileNode::Internal { children, .. } => {
-                for child in children {
-                    collect_leaves(child, found);
-                }
-            }
-        }
-    }
-
-    /// The feature ids a leaf's triangles actually reach.
-    fn referenced_feature_ids(mesh: &GlbMesh) -> Vec<u32> {
-        let feature_ids = mesh.feature_ids.as_ref().expect("feature ids on the leaf");
-        let mut reached: Vec<u32> = mesh
-            .indices
-            .as_ref()
-            .expect("indices on the leaf")
+    fn referenced_feature_ids(json: &serde_json::Value, views: &[Vec<u8>]) -> Vec<u32> {
+        let feature_ids: Vec<f32> =
+            attribute_values(json, views, "_FEATURE_ID_0").expect("feature ids on the tile");
+        let mut reached: Vec<u32> = index_values(json, views)
             .iter()
-            .map(|index| feature_ids[*index as usize])
+            .map(|index| feature_ids[*index as usize] as u32)
             .collect();
         reached.sort_unstable();
         reached.dedup();
         reached
+    }
+
+    fn asset_ids(json: &serde_json::Value, views: &[Vec<u8>]) -> Vec<String> {
+        let table = &json["extensions"]["EXT_structural_metadata"]["propertyTables"][0];
+        assert_eq!(table["class"], "asset");
+        let property = &table["properties"]["asset_id"];
+        let values = &views[property["values"].as_u64().expect("asset_id values") as usize];
+        let offsets_view = property["stringOffsets"]
+            .as_u64()
+            .expect("asset_id string offsets") as usize;
+        let offsets: Vec<u32> = bytemuck::pod_collect_to_vec(views[offsets_view].as_slice());
+        offsets
+            .windows(2)
+            .map(|pair| {
+                String::from_utf8(values[pair[0] as usize..pair[1] as usize].to_vec()).unwrap()
+            })
+            .collect()
     }
 
     #[test]
@@ -908,58 +2039,65 @@ mod tests {
             ..Default::default()
         };
 
-        let tree = build_mesh_tree(&meshes, &config);
-        let mut leaves = Vec::new();
-        collect_leaves(&tree, &mut leaves);
+        let written = write_tileset(&meshes, &config);
+        let leaves: Vec<_> = leaf_tiles(&written.tileset.root)
+            .into_iter()
+            .map(|leaf| written.glb(leaf))
+            .collect();
         assert_eq!(leaves.len(), 2, "the two triangles should split apart");
 
         let reached: Vec<Vec<u32>> = leaves
             .iter()
-            .map(|mesh| referenced_feature_ids(mesh))
+            .map(|(json, views)| referenced_feature_ids(json, views))
             .collect();
-        assert_eq!(reached, vec![vec![0], vec![1]]);
+        assert_eq!(reached, vec![vec![0], vec![0]]);
 
-        for leaf in &leaves {
-            let metadata = leaf.metadata.as_ref().expect("a property table");
-            assert_eq!(metadata.class_name, "asset");
-            let MetadataValues::String(asset_ids) = &metadata.properties[0].values else {
-                panic!("asset_id should be a string property");
-            };
-            assert_eq!(metadata.properties[0].name, "asset_id");
-            assert_eq!(asset_ids, &["asset-a".to_string(), "asset-b".to_string()]);
-        }
+        let tables: Vec<Vec<String>> = leaves
+            .iter()
+            .map(|(json, views)| asset_ids(json, views))
+            .collect();
+        assert_eq!(tables, [["asset-a"], ["asset-b"]]);
     }
 
     #[test]
-    fn a_mesh_without_an_asset_id_still_gets_a_feature_id() {
+    fn a_mesh_without_an_asset_id_gets_an_empty_row_beside_one_that_has_it() {
+        let meshes = [triangle_at(0.0, Some("asset-a")), triangle_at(10.0, None)];
+
+        let written = write_tileset(&meshes, &MeshTilingConfig::default());
+        let (json, views) = written.glb(&written.tileset.root);
+
+        assert_eq!(asset_ids(&json, &views), ["asset-a", ""]);
+        assert_eq!(referenced_feature_ids(&json, &views), vec![0, 1]);
+    }
+
+    #[test]
+    fn a_tile_holding_only_a_mesh_without_values_carries_no_feature_table() {
         let meshes = [triangle_at(0.0, Some("asset-a")), triangle_at(10.0, None)];
         let config = MeshTilingConfig {
             max_triangles_per_tile: 1,
             ..Default::default()
         };
 
-        let tree = build_mesh_tree(&meshes, &config);
-        let mut leaves = Vec::new();
-        collect_leaves(&tree, &mut leaves);
+        let written = write_tileset(&meshes, &config);
+        let (json, views) = written.glb(leaf_tiles(&written.tileset.root)[1]);
 
-        let metadata = leaves[1].metadata.as_ref().expect("a property table");
-        let MetadataValues::String(asset_ids) = &metadata.properties[0].values else {
-            panic!("asset_id should be a string property");
-        };
-        assert_eq!(asset_ids, &["asset-a".to_string(), String::new()]);
-        assert_eq!(referenced_feature_ids(leaves[1]), vec![1]);
+        assert!(attribute_values::<f32>(&json, &views, "_FEATURE_ID_0").is_none());
+        assert!(json["extensions"].get("EXT_structural_metadata").is_none());
+        assert!(
+            json["meshes"][0]["primitives"][0]
+                .get("extensions")
+                .is_none()
+        );
     }
 
     #[test]
     fn tiles_without_any_asset_id_carry_no_feature_ids() {
-        let config = MeshTilingConfig::default();
-        let tree = build_mesh_tree(&[cube_mesh()], &config);
-        let mut leaves = Vec::new();
-        collect_leaves(&tree, &mut leaves);
+        let written = write_tileset(&[cube_mesh()], &MeshTilingConfig::default());
 
-        for leaf in leaves {
-            assert!(leaf.feature_ids.is_none());
-            assert!(leaf.metadata.is_none());
+        for leaf in leaf_tiles(&written.tileset.root) {
+            let (json, views) = written.glb(leaf);
+            assert!(attribute_values::<f32>(&json, &views, "_FEATURE_ID_0").is_none());
+            assert!(json["extensions"].get("EXT_structural_metadata").is_none());
         }
     }
 
@@ -975,8 +2113,7 @@ mod tests {
             root_transform: Some(transform),
             ..Default::default()
         };
-        let tree = build_mesh_tree(&[cube_mesh()], &config);
-        write_mesh_tileset(&tree, &dir, &config).expect("write_mesh_tileset failed");
+        tile_meshes(&[cube_mesh()], &dir, &config).expect("tile_meshes failed");
 
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("tileset.json")).unwrap())
@@ -987,7 +2124,7 @@ mod tests {
         assert_eq!(written[14].as_f64().unwrap(), 300.0);
 
         let plain = MeshTilingConfig::default();
-        write_mesh_tileset(&tree, &dir, &plain).expect("write_mesh_tileset failed");
+        tile_meshes(&[cube_mesh()], &dir, &plain).expect("tile_meshes failed");
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("tileset.json")).unwrap())
                 .unwrap();
@@ -1068,7 +2205,7 @@ mod tests {
         mesh.texcoords = mesh
             .positions
             .iter()
-            .map(|p| [p[0] / n as f32, p[1] / n as f32])
+            .map(|p| [(p[0] / n as f64) as f32, (p[1] / n as f64) as f32])
             .collect();
         mesh.texture = Some(texture);
         mesh
@@ -1106,20 +2243,6 @@ mod tests {
         views[view].clone()
     }
 
-    fn leaf_textures(node: &MeshTileNode, found: &mut Vec<(u32, u32)>) {
-        match node {
-            MeshTileNode::Leaf { mesh, .. } => {
-                let texture = mesh.texture.as_ref().expect("a leaf texture");
-                found.push((texture.width, texture.height));
-            }
-            MeshTileNode::Internal { children, .. } => {
-                for child in children {
-                    leaf_textures(child, found);
-                }
-            }
-        }
-    }
-
     #[test]
     fn a_textured_mesh_reaches_the_tile_glb() {
         let dir = std::env::temp_dir().join("tiletopia_mesh_textured_tile_test");
@@ -1146,10 +2269,16 @@ mod tests {
             ..Default::default()
         };
         let mesh = textured_grid_mesh(32, make_test_texture(128, 128));
-        let tree = build_mesh_tree(&[mesh], &config);
+        let written = write_tileset(&[mesh], &config);
 
-        let mut sizes = Vec::new();
-        leaf_textures(&tree, &mut sizes);
+        let sizes: Vec<(u32, u32)> = leaf_tiles(&written.tileset.root)
+            .into_iter()
+            .map(|leaf| {
+                let (json, views) = written.glb(leaf);
+                let image = image::load_from_memory(&texture_bytes(&json, &views)).unwrap();
+                (image.width(), image.height())
+            })
+            .collect();
         assert!(sizes.len() > 1, "the mesh should have been split");
         for (width, height) in &sizes {
             assert!(
@@ -1166,22 +2295,22 @@ mod tests {
             ..Default::default()
         };
         let mesh = textured_grid_mesh(16, make_test_texture(64, 64));
-        let tree = build_mesh_tree(&[mesh], &config);
+        let written = write_tileset(&[mesh], &config);
 
-        let MeshTileNode::Internal { children, .. } = &tree else {
-            panic!("expected a split");
-        };
-        let (MeshTileNode::Leaf { mesh, .. } | MeshTileNode::Internal { lod_mesh: mesh, .. }) =
-            &**children.first().unwrap();
-        let texture = mesh.texture.as_ref().expect("a texture");
-        image::load_from_memory(&texture.image_data).expect("a decodable crop");
+        let first_child = written
+            .tileset
+            .root
+            .children
+            .first()
+            .expect("expected a split");
+        let (json, views) = written.glb(first_child);
+        image::load_from_memory(&texture_bytes(&json, &views)).expect("a decodable crop");
 
-        let texcoords = mesh.texcoords.as_ref().expect("texcoords");
-        assert_eq!(texcoords.len(), mesh.positions.len());
-        let used: Vec<[f32; 2]> = mesh
-            .indices
-            .as_ref()
-            .unwrap()
+        let texcoords: Vec<[f32; 2]> =
+            attribute_values(&json, &views, "TEXCOORD_0").expect("texcoords");
+        let positions: Vec<[f32; 3]> = attribute_values(&json, &views, "POSITION").unwrap();
+        assert_eq!(texcoords.len(), positions.len());
+        let used: Vec<[f32; 2]> = index_values(&json, &views)
             .iter()
             .map(|&i| texcoords[i as usize])
             .collect();
@@ -1239,13 +2368,18 @@ mod tests {
         let texture = make_test_texture(8, 8);
         let first = textured_grid_mesh(2, texture.clone());
         let second = textured_grid_mesh(2, texture);
-        let tree = build_mesh_tree(&[first, second], &MeshTilingConfig::default());
+        let written = write_tileset(&[first, second], &MeshTilingConfig::default());
+        let root = &written.tileset.root;
+        assert!(
+            root.children.is_empty(),
+            "one material should give one subtree"
+        );
 
-        let MeshTileNode::Leaf { mesh, .. } = &tree else {
-            panic!("one material should give one subtree");
-        };
-        assert_eq!(mesh.positions.len(), 18);
-        assert_eq!(mesh.texcoords.as_ref().unwrap().len(), 18);
+        let (json, views) = written.glb(root);
+        let positions: Vec<[f32; 3]> = attribute_values(&json, &views, "POSITION").unwrap();
+        let texcoords: Vec<[f32; 2]> = attribute_values(&json, &views, "TEXCOORD_0").unwrap();
+        assert_eq!(positions.len(), 18);
+        assert_eq!(texcoords.len(), 18);
     }
 
     #[test]
@@ -1255,15 +2389,17 @@ mod tests {
             ..Default::default()
         };
         let mesh = textured_grid_mesh(32, make_test_texture(64, 64));
-        let tree = build_mesh_tree(&[mesh], &config);
+        let written = write_tileset(&[mesh], &config);
+        let root = &written.tileset.root;
+        assert!(!root.children.is_empty(), "expected a split");
 
-        let MeshTileNode::Internal { lod_mesh, .. } = &tree else {
-            panic!("expected a split");
-        };
-        let texcoords = lod_mesh.texcoords.as_ref().expect("texcoords");
-        assert_eq!(texcoords.len(), lod_mesh.positions.len());
-        let highest = lod_mesh.indices.as_ref().unwrap().iter().max().unwrap();
-        assert!((*highest as usize) < texcoords.len());
+        let (json, views) = written.glb(root);
+        let texcoords: Vec<[f32; 2]> =
+            attribute_values(&json, &views, "TEXCOORD_0").expect("texcoords");
+        let positions: Vec<[f32; 3]> = attribute_values(&json, &views, "POSITION").unwrap();
+        assert_eq!(texcoords.len(), positions.len());
+        let highest = index_values(&json, &views).into_iter().max().unwrap();
+        assert!((highest as usize) < texcoords.len());
     }
 
     #[test]
@@ -1288,13 +2424,13 @@ mod tests {
     fn a_texture_without_uvs_is_dropped() {
         let mut mesh = cube_mesh();
         mesh.texture = Some(make_test_texture(4, 4));
-        let tree = build_mesh_tree(&[mesh], &MeshTilingConfig::default());
+        let written = write_tileset(&[mesh], &MeshTilingConfig::default());
+        let root = &written.tileset.root;
+        assert!(root.children.is_empty(), "expected a leaf");
 
-        let MeshTileNode::Leaf { mesh, .. } = &tree else {
-            panic!("expected a leaf");
-        };
-        assert!(mesh.texture.is_none());
-        assert!(mesh.texcoords.is_none());
+        let (json, views) = written.glb(root);
+        assert!(json.get("images").is_none());
+        assert!(attribute_values::<[f32; 2]>(&json, &views, "TEXCOORD_0").is_none());
     }
 
     #[test]
@@ -1310,6 +2446,9 @@ mod tests {
             feature_ids: None,
             texture: Some(tex),
             base_color_factor: None,
+            node_translation: None,
+            instanced_meshes: Vec::new(),
+            edge_visibility: None,
         };
 
         let mut buf = Vec::new();
@@ -1321,5 +2460,1023 @@ mod tests {
         assert!(json["images"].is_array());
         assert!(json["materials"].is_array());
         assert_eq!(json["meshes"][0]["primitives"][0]["material"], 0);
+    }
+
+    fn ktx2_tile_textures(dir: &Path) -> Vec<Vec<u8>> {
+        std::fs::read_dir(dir.join("tiles"))
+            .unwrap()
+            .map(|entry| {
+                let (json, views) = read_glb(&entry.unwrap().path());
+                assert_eq!(json["images"][0]["mimeType"], "image/ktx2");
+                assert_eq!(
+                    json["extensionsRequired"],
+                    serde_json::json!(["KHR_texture_basisu"])
+                );
+                assert!(
+                    json["extensionsUsed"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!("KHR_texture_basisu"))
+                );
+                let texture = &json["textures"][0];
+                assert!(texture.get("source").is_none());
+                let source = texture["extensions"]["KHR_texture_basisu"]["source"]
+                    .as_u64()
+                    .unwrap() as usize;
+                let view = json["images"][source]["bufferView"].as_u64().unwrap() as usize;
+                views[view].clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ktx2_tiles_declare_khr_texture_basisu_and_hold_basislz_etc1s() {
+        let dir = std::env::temp_dir().join(format!("ktx2_tiles_{}", uuid::Uuid::new_v4()));
+        let mesh = textured_grid_mesh(16, make_test_texture(70, 50));
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 64,
+            texture_compression: TextureCompression::Ktx2,
+            ..Default::default()
+        };
+        tile_meshes(&[mesh], &dir, &config).expect("tile_meshes failed");
+
+        let textures = ktx2_tile_textures(&dir);
+        assert!(textures.len() > 1, "the mesh should have been split");
+        let mut crops = 0;
+        for texture in &textures {
+            let reader = ktx2::Reader::new(texture).expect("a parseable KTX2");
+            let header = reader.header();
+            assert_eq!(
+                header.supercompression_scheme,
+                Some(ktx2::SupercompressionScheme::BasisLZ)
+            );
+            assert_eq!(header.format, None);
+            assert_eq!(reader.color_model(), Some(ktx2::ColorModel::ETC1S));
+            assert_eq!(
+                reader.transfer_function(),
+                Some(ktx2::TransferFunction::SRGB)
+            );
+            assert_eq!(reader.color_primaries(), Some(ktx2::ColorPrimaries::BT709));
+            assert_eq!(header.pixel_width % 4, 0);
+            assert_eq!(header.pixel_height % 4, 0);
+            let largest_side = header.pixel_width.max(header.pixel_height);
+            assert_eq!(header.level_count, largest_side.ilog2() + 1);
+            if header.pixel_width < 72 || header.pixel_height < 52 {
+                crops += 1;
+            }
+        }
+        assert!(crops > 0, "split tiles should carry cropped textures");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ktx2_tiles_keep_a_table_of_only_their_own_elements() {
+        let texture = make_test_texture(64, 64);
+        let mut first = textured_grid_mesh(16, texture.clone());
+        first.asset_id = Some("first".into());
+        let mut second = textured_grid_mesh(16, texture);
+        second.asset_id = Some("second".into());
+        for position in &mut second.positions {
+            position[0] += 100.0;
+        }
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 512,
+            texture_compression: TextureCompression::Ktx2,
+            ..Default::default()
+        };
+
+        let written = write_tileset(&[first, second], &config);
+        let leaves = leaf_tiles(&written.tileset.root);
+        assert_eq!(leaves.len(), 2, "one leaf per element");
+        for (leaf, expected) in leaves.into_iter().zip(["first", "second"]) {
+            let (json, views) = written.glb(leaf);
+            assert_eq!(json["images"][0]["mimeType"], "image/ktx2");
+            assert_eq!(asset_ids(&json, &views), [expected]);
+            assert_eq!(referenced_feature_ids(&json, &views), vec![0]);
+        }
+    }
+
+    #[test]
+    fn ktx2_scales_a_texture_up_to_multiples_of_four_and_keeps_its_pixels_upright() {
+        let source = image::RgbaImage::from_fn(70, 50, |_, y| {
+            let shade = if y < 25 { 20 } else { 230 };
+            image::Rgba([shade, shade, shade, 255])
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        source.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let texture = TextureData {
+            image_data: png.into_inner(),
+            mime_type: "image/png".to_string(),
+            width: 70,
+            height: 50,
+        };
+
+        let compressed = ktx2_texture(&texture).unwrap();
+        assert_eq!((compressed.width, compressed.height), (72, 52));
+        let header = ktx2::Reader::new(&compressed.image_data).unwrap().header();
+        assert_eq!((header.pixel_width, header.pixel_height), (72, 52));
+
+        basisu_c_sys::extra::basisu_transcoder_init();
+        let transcoder = basisu_c_sys::extra::BasisuTranscoder::new(
+            &compressed.image_data,
+            basisu_c_sys::extra::SupportedTextureCompression::empty(),
+            basisu_c_sys::extra::ChannelType::Auto,
+        )
+        .unwrap();
+        let decoded = transcoder
+            .transcode(Some(basisu_c_sys::TranscodeTargetFormat::RGBA32), None)
+            .unwrap();
+        let red_at = |row: usize| decoded.data[row * 72 * 4];
+        assert!(red_at(0) < 60, "the dark half should stay on top");
+        assert!(
+            red_at(51) > 190,
+            "the bright half should stay at the bottom"
+        );
+    }
+
+    #[test]
+    fn ktx2_keeps_a_jpeg_source_out_of_the_crops() {
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::RgbImage::from_pixel(32, 32, image::Rgb([10, 20, 30]))
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .unwrap();
+        let texture = TextureData {
+            image_data: jpeg.into_inner(),
+            mime_type: "image/jpeg".to_string(),
+            width: 32,
+            height: 32,
+        };
+        let config = MeshTilingConfig {
+            texture_compression: TextureCompression::Ktx2,
+            ..Default::default()
+        };
+        let groups = material_groups(&[textured_grid_mesh(16, texture)], &config);
+        let group = &groups[0];
+        let first_half = &group.indices[..group.indices.len() / 2];
+        let crop = make_glb_mesh(group, first_half, &[], &config)
+            .texture
+            .expect("a cropped texture");
+        assert_eq!(crop.mime_type, "image/png");
+        assert_eq!(
+            image::guess_format(&crop.image_data).unwrap(),
+            image::ImageFormat::Png
+        );
+    }
+
+    const DOOR_VERTEX_COUNT: usize = 81;
+    const DOOR_TRIANGLE_COUNT: usize = 128;
+
+    fn door(asset_id: &str) -> MeshData {
+        let mut door = grid_mesh(8);
+        for position in &mut door.positions {
+            *position = [
+                position[0] * 0.25,
+                position[1] * 0.125,
+                0.05 * position[0] * position[1] / 64.0,
+            ];
+        }
+        door.asset_id = Some(asset_id.to_string());
+        door
+    }
+
+    fn moved_by(mut mesh: MeshData, offset: [f64; 3]) -> MeshData {
+        for position in &mut mesh.positions {
+            *position = std::array::from_fn(|axis| position[axis] + offset[axis]);
+        }
+        mesh
+    }
+
+    fn numbered_doors(count: usize) -> Vec<MeshData> {
+        (0..count)
+            .map(|number| {
+                moved_by(
+                    door(&format!("door-{number}")),
+                    [number as f64 * 3.0, 0.0, 0.0],
+                )
+            })
+            .collect()
+    }
+
+    fn instanced_nodes(json: &serde_json::Value) -> Vec<&serde_json::Value> {
+        json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["extensions"]["EXT_mesh_gpu_instancing"].is_object())
+            .collect()
+    }
+
+    fn instance_attribute<T: bytemuck::Pod>(
+        json: &serde_json::Value,
+        views: &[Vec<u8>],
+        node: &serde_json::Value,
+        attribute: &str,
+    ) -> Option<Vec<T>> {
+        let attributes = &node["extensions"]["EXT_mesh_gpu_instancing"]["attributes"];
+        let accessor = attributes[attribute].as_u64()?;
+        Some(accessor_values(json, views, accessor))
+    }
+
+    fn node_mesh_attribute<T: bytemuck::Pod>(
+        json: &serde_json::Value,
+        views: &[Vec<u8>],
+        node: &serde_json::Value,
+        attribute: &str,
+    ) -> Vec<T> {
+        let mesh = node["mesh"].as_u64().unwrap() as usize;
+        let accessor = json["meshes"][mesh]["primitives"][0]["attributes"][attribute]
+            .as_u64()
+            .expect("the node's mesh has the attribute");
+        accessor_values(json, views, accessor)
+    }
+
+    fn node_translation(node: &serde_json::Value) -> [f64; 3] {
+        std::array::from_fn(|axis| node["translation"][axis].as_f64().unwrap())
+    }
+
+    fn turned_by_quaternion(rotation: [f32; 4], vector: [f32; 3]) -> [f64; 3] {
+        let [x, y, z, w] = rotation.map(f64::from);
+        let [first, second, third] = vector.map(f64::from);
+        [
+            (1.0 - 2.0 * (y * y + z * z)) * first
+                + 2.0 * (x * y - z * w) * second
+                + 2.0 * (x * z + y * w) * third,
+            2.0 * (x * y + z * w) * first
+                + (1.0 - 2.0 * (x * x + z * z)) * second
+                + 2.0 * (y * z - x * w) * third,
+            2.0 * (x * z - y * w) * first
+                + 2.0 * (y * z + x * w) * second
+                + (1.0 - 2.0 * (x * x + y * y)) * third,
+        ]
+    }
+
+    fn assert_instances_land_on_their_sources(
+        json: &serde_json::Value,
+        views: &[Vec<u8>],
+        node: &serde_json::Value,
+        sources: &[MeshData],
+        content_y_up: bool,
+    ) {
+        let rows = asset_ids(json, views);
+        let local_positions: Vec<[f32; 3]> = node_mesh_attribute(json, views, node, "POSITION");
+        let translations: Vec<[f32; 3]> =
+            instance_attribute(json, views, node, "TRANSLATION").expect("translations");
+        let rotations: Option<Vec<[f32; 4]>> = instance_attribute(json, views, node, "ROTATION");
+        let feature_ids: Vec<f32> =
+            instance_attribute(json, views, node, "_FEATURE_ID_0").expect("feature ids");
+        assert_eq!(translations.len(), feature_ids.len());
+        let node_translation = node_translation(node);
+
+        for (instance, feature_id) in feature_ids.iter().enumerate() {
+            let row = &rows[*feature_id as usize];
+            let source = sources
+                .iter()
+                .find(|mesh| mesh.asset_id.as_ref() == Some(row))
+                .expect("a row naming a source mesh");
+            assert_eq!(local_positions.len(), source.positions.len());
+            for (local, expected) in local_positions.iter().zip(&source.positions) {
+                let turned = match &rotations {
+                    Some(rotations) => turned_by_quaternion(rotations[instance], *local),
+                    None => local.map(f64::from),
+                };
+                let placed: [f64; 3] = std::array::from_fn(|axis| {
+                    node_translation[axis] + f64::from(translations[instance][axis]) + turned[axis]
+                });
+                let expected = if content_y_up {
+                    [expected[0], expected[2], -expected[1]]
+                } else {
+                    *expected
+                };
+                for axis in 0..3 {
+                    assert!(
+                        (placed[axis] - expected[axis]).abs() < 2e-3,
+                        "{row}: {placed:?} should be at {expected:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_meshes_write_one_geometry_with_one_instance_and_feature_id_each() {
+        let mut meshes = numbered_doors(6);
+        meshes.push(triangle_at(-20.0, Some("wall")));
+
+        let written = write_tileset(&meshes, &MeshTilingConfig::default());
+        let (json, views) = written.glb(&written.tileset.root);
+
+        assert_eq!(json["meshes"].as_array().unwrap().len(), 2);
+        let nodes = instanced_nodes(&json);
+        assert_eq!(nodes.len(), 1);
+        let node = nodes[0];
+        let positions: Vec<[f32; 3]> = node_mesh_attribute(&json, &views, node, "POSITION");
+        assert_eq!(positions.len(), DOOR_VERTEX_COUNT);
+        let translations: Vec<[f32; 3]> =
+            instance_attribute(&json, &views, node, "TRANSLATION").unwrap();
+        assert_eq!(translations.len(), 6);
+        assert!(
+            node["extensions"]["EXT_mesh_gpu_instancing"]["attributes"]
+                .get("ROTATION")
+                .is_none()
+        );
+        assert_instances_land_on_their_sources(&json, &views, node, &meshes, false);
+
+        let rows = asset_ids(&json, &views);
+        assert_eq!(rows.len(), 7);
+        let feature_ids: Vec<f32> =
+            instance_attribute(&json, &views, node, "_FEATURE_ID_0").unwrap();
+        let mut instance_rows: Vec<&str> = feature_ids
+            .iter()
+            .map(|feature_id| rows[*feature_id as usize].as_str())
+            .collect();
+        instance_rows.sort_unstable();
+        assert_eq!(
+            instance_rows,
+            ["door-0", "door-1", "door-2", "door-3", "door-4", "door-5"]
+        );
+        let wall_feature = referenced_feature_ids(&json, &views);
+        assert_eq!(wall_feature.len(), 1);
+        assert_eq!(rows[wall_feature[0] as usize], "wall");
+
+        // 3d-tiles-validator reads these fields in ExtInstanceFeaturesValidator and FeatureIdAccessorValidator
+        let feature_id = &node["extensions"]["EXT_instance_features"]["featureIds"][0];
+        assert_eq!(feature_id["featureCount"], 7);
+        assert_eq!(feature_id["attribute"], 0);
+        assert_eq!(feature_id["propertyTable"], 0);
+        let accessor = node["extensions"]["EXT_mesh_gpu_instancing"]["attributes"]["_FEATURE_ID_0"]
+            .as_u64()
+            .unwrap() as usize;
+        assert_eq!(json["accessors"][accessor]["type"], "SCALAR");
+        assert!(json["accessors"][accessor].get("normalized").is_none());
+        let names = |field: &str| json[field].as_array().expect(field).clone();
+        assert!(
+            names("extensionsRequired").contains(&serde_json::json!("EXT_mesh_gpu_instancing"))
+        );
+        assert!(names("extensionsUsed").contains(&serde_json::json!("EXT_mesh_gpu_instancing")));
+        assert!(names("extensionsUsed").contains(&serde_json::json!("EXT_instance_features")));
+        assert!(!names("extensionsRequired").contains(&serde_json::json!("EXT_instance_features")));
+
+        let bytes = std::fs::read(written.dir.join("tiles/root.glb")).unwrap();
+        let glb = gltf::Glb::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["buffers"][0]["byteLength"].as_u64().unwrap() as usize,
+            glb.bin.unwrap().len()
+        );
+    }
+
+    #[test]
+    fn a_tile_of_only_repeated_meshes_has_no_empty_direct_mesh() {
+        let meshes = numbered_doors(6);
+        let written = write_tileset(&meshes, &MeshTilingConfig::default());
+        let (json, views) = written.glb(&written.tileset.root);
+
+        assert_eq!(json["meshes"].as_array().unwrap().len(), 1);
+        assert_eq!(json["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(json["scenes"][0]["nodes"], serde_json::json!([0]));
+        assert_instances_land_on_their_sources(&json, &views, &json["nodes"][0], &meshes, false);
+    }
+
+    #[test]
+    fn rotated_copies_share_a_geometry_through_instance_rotations() {
+        let meshes: Vec<MeshData> = (0..4)
+            .map(|number| {
+                let mut turned = door(&format!("door-{number}"));
+                for position in &mut turned.positions {
+                    let [x, y, z] = *position;
+                    *position = match number {
+                        0 => [x, y, z],
+                        1 => [-y, x, z],
+                        2 => [-x, -y, z],
+                        _ => [y, -x, z],
+                    };
+                }
+                moved_by(turned, [number as f64 * 5.0, 2.0, 1.0])
+            })
+            .collect();
+
+        for content_y_up in [false, true] {
+            let config = MeshTilingConfig {
+                content_y_up,
+                ..Default::default()
+            };
+            let written = write_tileset(&meshes, &config);
+            let (json, views) = written.glb(&written.tileset.root);
+            let nodes = instanced_nodes(&json);
+            assert_eq!(nodes.len(), 1);
+            let rotations: Vec<[f32; 4]> =
+                instance_attribute(&json, &views, nodes[0], "ROTATION").expect("rotations");
+            assert_eq!(rotations.len(), 4);
+            for rotation in rotations {
+                let length: f32 = rotation.iter().map(|value| value * value).sum();
+                assert!((length.sqrt() - 1.0).abs() < 1e-5, "{rotation:?}");
+            }
+            assert_instances_land_on_their_sources(&json, &views, nodes[0], &meshes, content_y_up);
+        }
+    }
+
+    #[test]
+    fn mirrored_copies_and_copies_with_other_normals_get_their_own_geometry() {
+        let mut meshes = Vec::new();
+        for number in 0..4 {
+            let offset = [number as f64 * 3.0, 0.0, 0.0];
+            meshes.push(moved_by(door(&format!("plain-{number}")), offset));
+
+            let mut mirrored = door(&format!("mirrored-{number}"));
+            for position in &mut mirrored.positions {
+                position[0] = -position[0];
+            }
+            meshes.push(moved_by(mirrored, [offset[0], 10.0, 0.0]));
+
+            let mut facing_down = door(&format!("down-{number}"));
+            facing_down.normals = vec![[0.0, 0.0, -1.0]; facing_down.positions.len()];
+            meshes.push(moved_by(facing_down, [offset[0], 20.0, 0.0]));
+        }
+
+        let written = write_tileset(&meshes, &MeshTilingConfig::default());
+        let (json, views) = written.glb(&written.tileset.root);
+        let nodes = instanced_nodes(&json);
+        assert_eq!(nodes.len(), 3);
+
+        let rows = asset_ids(&json, &views);
+        for node in nodes {
+            let feature_ids: Vec<f32> =
+                instance_attribute(&json, &views, node, "_FEATURE_ID_0").unwrap();
+            assert_eq!(feature_ids.len(), 4);
+            let names: Vec<&str> = feature_ids
+                .iter()
+                .map(|feature_id| rows[*feature_id as usize].split('-').next().unwrap())
+                .collect();
+            assert!(names.iter().all(|name| *name == names[0]), "{names:?}");
+
+            let normals: Vec<[f32; 3]> = node_mesh_attribute(&json, &views, node, "NORMAL");
+            assert_eq!(normals[0][2] < 0.0, names[0] == "down");
+            assert_instances_land_on_their_sources(&json, &views, node, &meshes, false);
+        }
+    }
+
+    fn small_cube_at(x: f64, y: f64, size: f64, asset_id: &str) -> MeshData {
+        let mut cube = cube_mesh();
+        for position in &mut cube.positions {
+            *position = [
+                position[0] * size + x,
+                position[1] * size + y,
+                position[2] * size,
+            ];
+        }
+        cube.asset_id = Some(asset_id.to_string());
+        cube
+    }
+
+    #[test]
+    fn repeats_too_small_to_pay_for_a_draw_call_stay_in_the_merged_mesh() {
+        let meshes = [
+            small_cube_at(0.0, 0.0, 1.0, "first"),
+            small_cube_at(5.0, 0.0, 1.0, "second"),
+        ];
+        let written = write_tileset(&meshes, &MeshTilingConfig::default());
+        let (json, views) = written.glb(&written.tileset.root);
+
+        assert!(instanced_nodes(&json).is_empty());
+        assert!(json.get("extensionsRequired").is_none());
+        assert_eq!(referenced_feature_ids(&json, &views), vec![0, 1]);
+    }
+
+    fn triangles_per_row(json: &serde_json::Value, views: &[Vec<u8>]) -> Vec<(String, usize)> {
+        let feature_ids: Vec<f32> =
+            attribute_values(json, views, "_FEATURE_ID_0").expect("feature ids");
+        let rows = asset_ids(json, views);
+        rows.iter()
+            .enumerate()
+            .map(|(row, name)| {
+                let triangles = index_values(json, views)
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .filter(|triangle| feature_ids[triangle[0] as usize] as usize == row)
+                    .count();
+                (name.clone(), triangles)
+            })
+            .collect()
+    }
+
+    fn assert_every_vertex_is_inside_the_tile_box(
+        json: &serde_json::Value,
+        views: &[Vec<u8>],
+        tile: &Tile,
+    ) {
+        let BoundingVolume::Box { r#box } = tile.bounding_volume.clone() else {
+            panic!("mesh tiles get a box");
+        };
+        let translation = node_translation(&json["nodes"][0]);
+        let locals: Vec<[f32; 3]> = attribute_values(json, views, "POSITION").unwrap();
+        for local in locals {
+            let gltf: [f64; 3] =
+                std::array::from_fn(|axis| translation[axis] + f64::from(local[axis]));
+            // 3d tiles runtimes map glTF (x, y, z) to (x, -z, y)
+            let tile_frame = [gltf[0], -gltf[2], gltf[1]];
+            for axis in 0..3 {
+                let half_extent = r#box[3 + axis * 4];
+                assert!(
+                    (tile_frame[axis] - r#box[axis]).abs() <= half_extent + 1e-5,
+                    "{tile_frame:?} is outside {:?}",
+                    r#box
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn elements_that_fit_stay_whole_in_one_leaf_inside_its_box() {
+        // the middle cube straddles the root's split plane at x = 7
+        let meshes: Vec<MeshData> = (0..15)
+            .map(|number| small_cube_at(f64::from(number), 0.0, 1.0, &format!("cube-{number}")))
+            .collect();
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 36,
+            content_y_up: true,
+            ..Default::default()
+        };
+        let written = write_tileset(&meshes, &config);
+
+        let mut leaves_listing: BTreeMap<String, usize> = BTreeMap::new();
+        for leaf in leaf_tiles(&written.tileset.root) {
+            let (json, views) = written.glb(leaf);
+            assert!(index_values(&json, &views).len() / 3 <= 36);
+            assert_every_vertex_is_inside_the_tile_box(&json, &views, leaf);
+            for (name, triangles) in triangles_per_row(&json, &views) {
+                assert_eq!(triangles, 12, "{name} should be whole");
+                *leaves_listing.entry(name).or_default() += 1;
+            }
+        }
+        assert_eq!(leaves_listing.len(), 15);
+        assert!(
+            leaves_listing.values().all(|count| *count == 1),
+            "{leaves_listing:?}"
+        );
+    }
+
+    #[test]
+    fn an_element_over_the_tile_budget_splits_and_the_small_ones_beside_it_stay_whole() {
+        let mut slab = grid_mesh(32);
+        slab.asset_id = Some("slab".to_string());
+        let mut meshes = vec![slab];
+        for number in 0..5 {
+            meshes.push(small_cube_at(
+                f64::from(number) * 7.0,
+                16.0,
+                1.0,
+                &format!("cube-{number}"),
+            ));
+        }
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 100,
+            ..Default::default()
+        };
+        let written = write_tileset(&meshes, &config);
+
+        let mut leaves_listing: BTreeMap<String, usize> = BTreeMap::new();
+        let mut triangles_by_name: BTreeMap<String, usize> = BTreeMap::new();
+        for leaf in leaf_tiles(&written.tileset.root) {
+            let (json, views) = written.glb(leaf);
+            assert!(index_values(&json, &views).len() / 3 <= 100);
+            for (name, triangles) in triangles_per_row(&json, &views) {
+                *leaves_listing.entry(name.clone()).or_default() += 1;
+                *triangles_by_name.entry(name).or_default() += triangles;
+            }
+        }
+        assert!(leaves_listing["slab"] > 1, "{leaves_listing:?}");
+        assert_eq!(triangles_by_name["slab"], 2 * 32 * 32);
+        for number in 0..5 {
+            let name = format!("cube-{number}");
+            assert_eq!(leaves_listing[&name], 1, "{leaves_listing:?}");
+            assert_eq!(triangles_by_name[&name], 12);
+        }
+    }
+
+    #[test]
+    fn a_parent_keeps_small_elements_whole_beside_a_large_simplified_one() {
+        let mut terrain = grid_mesh(64);
+        for position in &mut terrain.positions {
+            position[2] = 2.0 * (position[0] * 0.8).sin() * (position[1] * 0.8).sin();
+        }
+        terrain.asset_id = Some("terrain".to_string());
+        let meshes = [
+            terrain,
+            small_cube_at(70.0, 0.0, 0.1, "first"),
+            small_cube_at(70.0, 5.0, 0.1, "second"),
+        ];
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 6000,
+            ..Default::default()
+        };
+        let written = write_tileset(&meshes, &config);
+        assert!(!written.tileset.root.children.is_empty());
+
+        let (json, views) = written.glb(&written.tileset.root);
+        let triangles: BTreeMap<String, usize> =
+            triangles_per_row(&json, &views).into_iter().collect();
+        assert_eq!(triangles["first"], 12);
+        assert_eq!(triangles["second"], 12);
+        assert!(
+            triangles["terrain"] < 2 * 64 * 64,
+            "the large element should be simplified: {triangles:?}"
+        );
+    }
+
+    #[test]
+    fn a_parent_holds_at_most_the_tile_budget_and_drops_the_smallest_elements_first() {
+        let mut meshes = Vec::new();
+        for number in 0..30 {
+            meshes.push(small_cube_at(
+                f64::from(number) * 4.0,
+                0.0,
+                1.0,
+                &format!("large-{number}"),
+            ));
+            meshes.push(small_cube_at(
+                f64::from(number) * 4.0,
+                2.0,
+                0.1,
+                &format!("small-{number}"),
+            ));
+        }
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 240,
+            ..Default::default()
+        };
+        let written = write_tileset(&meshes, &config);
+
+        let (json, views) = written.glb(&written.tileset.root);
+        let rows = asset_ids(&json, &views);
+        assert!(
+            rows.iter().all(|name| name.starts_with("large-")),
+            "{rows:?}"
+        );
+        // twenty 12 triangle cubes reach the 240 triangle budget
+        assert_eq!(rows.len(), 20);
+    }
+
+    #[test]
+    fn a_parent_draws_one_simplified_geometry_for_its_repeated_elements() {
+        let meshes = numbered_doors(40);
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 2000,
+            ..Default::default()
+        };
+        let dir = std::env::temp_dir().join(format!("mesh_tiler_{}", uuid::Uuid::new_v4()));
+        let stats = tile_meshes(&meshes, &dir, &config).expect("tile_meshes failed");
+        assert_eq!(stats.total_triangles, 40 * DOOR_TRIANGLE_COUNT);
+
+        let (json, views) = read_glb(&dir.join("tiles/root.glb"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let nodes = instanced_nodes(&json);
+        assert_eq!(nodes.len(), 1);
+        let positions: Vec<[f32; 3]> = node_mesh_attribute(&json, &views, nodes[0], "POSITION");
+        assert!(
+            positions.len() < DOOR_VERTEX_COUNT,
+            "the geometry should be simplified, it has {} vertices",
+            positions.len()
+        );
+        let feature_ids: Vec<f32> =
+            instance_attribute(&json, &views, nodes[0], "_FEATURE_ID_0").unwrap();
+        assert!(feature_ids.len() > 1);
+        let rows = asset_ids(&json, &views);
+        let mut named: Vec<&String> = feature_ids
+            .iter()
+            .map(|feature_id| &rows[*feature_id as usize])
+            .collect();
+        named.sort_unstable();
+        named.dedup();
+        assert_eq!(named.len(), feature_ids.len());
+    }
+
+    #[test]
+    fn no_texture_compression_leaves_the_tile_texture_as_it_was() {
+        let dir = std::env::temp_dir().join(format!("plain_tiles_{}", uuid::Uuid::new_v4()));
+        let texture = make_test_texture(70, 50);
+        let source_bytes = texture.image_data.clone();
+        let mesh = textured_grid_mesh(2, texture);
+        tile_meshes(&[mesh], &dir, &MeshTilingConfig::default()).expect("tile_meshes failed");
+
+        let (json, views) = read_glb(&dir.join("tiles/root.glb"));
+        assert_eq!(json["images"][0]["mimeType"], "image/png");
+        assert!(json.get("extensionsRequired").is_none());
+        assert!(json["textures"][0].get("extensions").is_none());
+        assert_eq!(texture_bytes(&json, &views), source_bytes);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn packed_edge_values_match_the_extension_readme_examples() {
+        // EXT_mesh_primitive_edge_visibility README, "Shared silhouette edge" and "Shared hard edge"
+        assert_eq!(packed_edge_values(&[2, 0, 1, 0, 2, 0]), [18, 2]);
+        assert_eq!(packed_edge_values(&[2, 0, 2, 3, 2, 0]), [226, 2]);
+    }
+
+    fn indexed_glb_mesh(
+        positions: Vec<[f32; 3]>,
+        indices: Vec<u32>,
+        feature_ids: Vec<u32>,
+    ) -> GlbMesh {
+        GlbMesh {
+            positions,
+            normals: None,
+            indices: Some(indices),
+            colors: None,
+            texcoords: None,
+            metadata: None,
+            feature_ids: Some(feature_ids),
+            texture: None,
+            base_color_factor: None,
+            node_translation: None,
+            instanced_meshes: Vec::new(),
+            edge_visibility: None,
+        }
+    }
+
+    #[test]
+    fn a_shared_edge_between_two_elements_is_drawn_on_both_and_inside_one_is_hidden() {
+        let corners = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let indices: Vec<u32> = (0..6).collect();
+
+        let one_element = indexed_glb_mesh(corners.clone(), indices.clone(), vec![0; 6]);
+        let edges = edge_visibility(&one_element).expect("drawn edges");
+        // [2, 2, 0, 0, 2, 2]: the diagonal both triangles share is hidden
+        assert_eq!(edges.visibility, [10, 10]);
+        assert!(edges.silhouette_normals.is_empty());
+
+        let two_elements = indexed_glb_mesh(corners, indices, vec![0, 0, 0, 1, 1, 1]);
+        let edges = edge_visibility(&two_elements).expect("drawn edges");
+        // [2, 2, 2, 2, 2, 2]: each element outlines its own triangle
+        assert_eq!(edges.visibility, [170, 10]);
+    }
+
+    #[test]
+    fn a_shallow_fold_is_a_silhouette_carrying_both_face_normals() {
+        let lift = 0.125;
+        let mesh = indexed_glb_mesh(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, lift],
+            ],
+            vec![0, 1, 2, 0, 2, 3],
+            vec![0; 4],
+        );
+        let edges = edge_visibility(&mesh).expect("drawn edges");
+
+        // [2, 2, 1, 0, 2, 2]: the fold of about 10 degrees is encoded once as a silhouette
+        assert_eq!(edges.visibility, [26, 10]);
+        let length = (1.0f32 + 2.0 * lift * lift).sqrt();
+        let expected = [
+            [0.0, 0.0, 1.0],
+            [lift / length, -lift / length, 1.0 / length],
+        ];
+        assert_eq!(edges.silhouette_normals.len(), 2);
+        for (normal, expected) in edges.silhouette_normals.iter().zip(expected) {
+            for axis in 0..3 {
+                assert!(
+                    (normal[axis] - expected[axis]).abs() < 1e-6,
+                    "{normal:?} should be {expected:?}"
+                );
+            }
+        }
+    }
+
+    fn face_split_box(asset_id: &str) -> MeshData {
+        let cube = cube_mesh();
+        MeshData {
+            positions: cube
+                .indices
+                .iter()
+                .map(|&index| cube.positions[index as usize])
+                .collect(),
+            normals: Vec::new(),
+            indices: (0..cube.indices.len() as u32).collect(),
+            asset_id: Some(asset_id.to_string()),
+            ..cube
+        }
+    }
+
+    fn edge_visibility_extension(json: &serde_json::Value) -> &serde_json::Value {
+        &json["meshes"][0]["primitives"][0]["extensions"]["EXT_mesh_primitive_edge_visibility"]
+    }
+
+    fn bin_slice<'a>(bin: &'a [u8], location: &serde_json::Value) -> &'a [u8] {
+        let offset = location["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let length = location["byteLength"].as_u64().unwrap() as usize;
+        &bin[offset..offset + length]
+    }
+
+    fn accessor_view<'a>(
+        json: &'a serde_json::Value,
+        accessor: &serde_json::Value,
+    ) -> &'a serde_json::Value {
+        let accessor = accessor.as_u64().expect("an accessor index") as usize;
+        let view = json["accessors"][accessor]["bufferView"]
+            .as_u64()
+            .expect("an accessor with a buffer view");
+        &json["bufferViews"][view as usize]
+    }
+
+    fn decoded_positions_and_indices(
+        tile: &[u8],
+        json: &serde_json::Value,
+        bin: &[u8],
+        compression: MeshCompression,
+    ) -> (Vec<[f32; 3]>, Vec<u32>) {
+        let primitive = &json["meshes"][0]["primitives"][0];
+        match compression {
+            MeshCompression::None => (
+                bytemuck::pod_collect_to_vec(bin_slice(
+                    bin,
+                    accessor_view(json, &primitive["attributes"]["POSITION"]),
+                )),
+                bytemuck::pod_collect_to_vec(bin_slice(
+                    bin,
+                    accessor_view(json, &primitive["indices"]),
+                )),
+            ),
+            MeshCompression::Meshopt => {
+                let stream = |accessor: &serde_json::Value| {
+                    &accessor_view(json, accessor)["extensions"]["EXT_meshopt_compression"]
+                };
+                let count = |stream: &serde_json::Value| stream["count"].as_u64().unwrap() as usize;
+                let positions = stream(&primitive["attributes"]["POSITION"]);
+                let indices = stream(&primitive["indices"]);
+                assert_eq!(indices["mode"], "INDICES");
+                (
+                    meshopt::decode_vertex_buffer(bin_slice(bin, positions), count(positions))
+                        .expect("meshopt decodes the positions"),
+                    meshopt::decode_index_sequence(bin_slice(bin, indices), count(indices))
+                        .expect("meshopt decodes the indices"),
+                )
+            }
+            MeshCompression::Draco => {
+                let geometry = draco_gltf::parse(tile, draco_gltf::ValidationProfile::Gltf20)
+                    .expect("draco-gltf parses the tile")
+                    .read_primitive(draco_gltf::PrimitiveIndex::new(
+                        draco_gltf::MeshIndex::from(0usize),
+                        0,
+                    ))
+                    .expect("draco-gltf decodes the primitive");
+                let positions = geometry
+                    .attributes()
+                    .iter()
+                    .find(|attribute| attribute.semantic() == "POSITION")
+                    .expect("decoded positions");
+                (
+                    bytemuck::pod_collect_to_vec(positions.bytes()),
+                    bytemuck::pod_collect_to_vec(
+                        geometry.indices().expect("decoded indices").bytes(),
+                    ),
+                )
+            }
+        }
+    }
+
+    #[test]
+    fn cad_edges_of_every_compression_draw_each_box_edge_once_and_hide_the_face_diagonals() {
+        let welded_box = MeshData {
+            asset_id: Some("box".to_string()),
+            ..cube_mesh()
+        };
+        for mesh_compression in [
+            MeshCompression::None,
+            MeshCompression::Meshopt,
+            MeshCompression::Draco,
+        ] {
+            for fixture in [face_split_box("box"), welded_box.clone()] {
+                let config = MeshTilingConfig {
+                    cad_edges: true,
+                    mesh_compression,
+                    ..Default::default()
+                };
+                let written = write_tileset(&[fixture], &config);
+                let tile = std::fs::read(written.dir.join("tiles/root.glb")).unwrap();
+                let glb = gltf::Glb::from_slice(&tile).expect("a parseable GLB");
+                let json: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+                let bin = glb.bin.unwrap_or_default();
+
+                let extensions = &json["meshes"][0]["primitives"][0]["extensions"];
+                assert!(extensions["EXT_mesh_features"].is_object());
+                let extension = edge_visibility_extension(&json);
+                assert!(extension.get("silhouetteNormals").is_none());
+                let visibility = &extension["visibility"];
+                // 12 triangles hold 36 edges at 2 bits each
+                assert_eq!(
+                    json["accessors"][visibility.as_u64().unwrap() as usize]["count"],
+                    9
+                );
+                let packed = bin_slice(&bin, accessor_view(&json, visibility));
+                let (positions, indices) =
+                    decoded_positions_and_indices(&tile, &json, &bin, mesh_compression);
+
+                let corner = |vertex: u32| {
+                    positions[vertex as usize].map(|component| (component * 2.0).round() as i32)
+                };
+                let mut values_by_edge: BTreeMap<[[i32; 3]; 2], Vec<u8>> = BTreeMap::new();
+                let corner_pairs = indices.as_chunks::<3>().0.iter().flat_map(|corners| {
+                    [
+                        (corners[0], corners[1]),
+                        (corners[1], corners[2]),
+                        (corners[2], corners[0]),
+                    ]
+                });
+                for (edge, (start, end)) in corner_pairs.enumerate() {
+                    let value = (packed[edge / 4] >> ((edge % 4) * 2)) & 3;
+                    let mut ends = [corner(start), corner(end)];
+                    ends.sort_unstable();
+                    values_by_edge.entry(ends).or_default().push(value);
+                }
+
+                let (box_edges, diagonals): (Vec<_>, Vec<_>) =
+                    values_by_edge.into_iter().partition(|(ends, _)| {
+                        (0..3)
+                            .filter(|&axis| ends[0][axis] != ends[1][axis])
+                            .count()
+                            == 1
+                    });
+                assert_eq!(box_edges.len(), 12, "{mesh_compression:?}");
+                assert_eq!(diagonals.len(), 6, "{mesh_compression:?}");
+                for (ends, mut values) in box_edges {
+                    values.sort_unstable();
+                    assert_eq!(values, [2, 3], "{mesh_compression:?} box edge {ends:?}");
+                }
+                for (ends, values) in diagonals {
+                    assert_eq!(
+                        values,
+                        [0, 0],
+                        "{mesh_compression:?} face diagonal {ends:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cad_edges_reach_tiles_of_every_compression_only_when_the_tileset_asks_for_them() {
+        for (cad_edges, mesh_compression, expected) in [
+            (false, MeshCompression::None, false),
+            (false, MeshCompression::Meshopt, false),
+            (false, MeshCompression::Draco, false),
+            (true, MeshCompression::None, true),
+            (true, MeshCompression::Meshopt, true),
+            (true, MeshCompression::Draco, true),
+        ] {
+            let config = MeshTilingConfig {
+                cad_edges,
+                mesh_compression,
+                ..Default::default()
+            };
+            let written = write_tileset(&[face_split_box("box")], &config);
+            let bytes = std::fs::read(written.dir.join("tiles/root.glb")).unwrap();
+            let glb = gltf::Glb::from_slice(&bytes).unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+
+            let declared = json["extensionsUsed"].as_array().is_some_and(|names| {
+                names.contains(&serde_json::json!("EXT_mesh_primitive_edge_visibility"))
+            });
+            assert_eq!(declared, expected, "{cad_edges} {mesh_compression:?}");
+            assert_eq!(
+                edge_visibility_extension(&json).is_object(),
+                expected,
+                "{cad_edges} {mesh_compression:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cad_edges_skip_instanced_geometry() {
+        let mut meshes = numbered_doors(6);
+        meshes.push(triangle_at(-20.0, Some("wall")));
+        let config = MeshTilingConfig {
+            cad_edges: true,
+            ..Default::default()
+        };
+        let written = write_tileset(&meshes, &config);
+        let (json, _) = written.glb(&written.tileset.root);
+
+        let nodes = instanced_nodes(&json);
+        assert_eq!(nodes.len(), 1);
+        let instanced_mesh_index = nodes[0]["mesh"].as_u64().unwrap() as usize;
+        assert_ne!(instanced_mesh_index, 0);
+        let instanced_primitive = &json["meshes"][instanced_mesh_index]["primitives"][0];
+        assert!(
+            instanced_primitive["extensions"]
+                .get("EXT_mesh_primitive_edge_visibility")
+                .is_none()
+        );
+        assert!(edge_visibility_extension(&json).is_object());
     }
 }

@@ -50,8 +50,7 @@ fn write_textured_obj(dir: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
-/// The image bytes the GLB's material points at, and its UV accessor count.
-fn material_texture(path: &std::path::Path) -> (Vec<u8>, u64) {
+fn material_texture(path: &std::path::Path) -> Vec<u8> {
     let bytes = std::fs::read(path).expect("a written tile");
     let glb = gltf::Glb::from_slice(&bytes).expect("a parseable GLB");
     let json: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
@@ -72,11 +71,16 @@ fn material_texture(path: &std::path::Path) -> (Vec<u8>, u64) {
     let uv_accessor = json["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"]
         .as_u64()
         .expect("a TEXCOORD_0 attribute");
-    let uv_count = json["accessors"][uv_accessor as usize]["count"]
+    let position_accessor = json["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
         .as_u64()
-        .unwrap();
+        .expect("a POSITION attribute");
+    assert_eq!(
+        json["accessors"][uv_accessor as usize]["count"],
+        json["accessors"][position_accessor as usize]["count"],
+        "every vertex keeps a UV"
+    );
 
-    (bin[offset..offset + length].to_vec(), uv_count)
+    bin[offset..offset + length].to_vec()
 }
 
 #[test]
@@ -84,7 +88,7 @@ fn a_textured_obj_tiles_into_textured_glbs() {
     let dir = tempfile::tempdir().unwrap();
     let obj = write_textured_obj(dir.path());
 
-    let meshes: Vec<MeshData> = tiletopia_ingest::read_mesh(&obj)
+    let meshes: Vec<MeshData> = tiletopia_ingest::read_mesh(&obj, u64::MAX)
         .expect("the OBJ should read")
         .into_iter()
         .map(Into::into)
@@ -111,17 +115,12 @@ fn a_textured_obj_tiles_into_textured_glbs() {
 
     let mut cropped = 0;
     for tile in &tiles {
-        let (image_bytes, uv_count) = material_texture(tile);
+        let image_bytes = material_texture(tile);
         let image = image::load_from_memory(&image_bytes).expect("a decodable tile texture");
         assert!(image.width() <= TEXTURE_SIZE && image.height() <= TEXTURE_SIZE);
         if image.width() < TEXTURE_SIZE || image.height() < TEXTURE_SIZE {
             cropped += 1;
         }
-        assert_eq!(
-            uv_count as usize,
-            meshes[0].positions.len(),
-            "every vertex keeps a UV"
-        );
     }
     assert!(cropped > 0, "split tiles should carry a cropped texture");
 }

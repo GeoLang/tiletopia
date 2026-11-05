@@ -17,10 +17,10 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-24.04
+            os: ubuntu-latest
             use_cross: false
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04
+            os: ubuntu-latest
             use_cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
@@ -82,6 +82,16 @@ jobs:
             ghcr.io/geolang/tiletopia:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # buildkit's gha cache keeps only the last build in each scope
+      - uses: docker/build-push-action@v6
+        with:
+          context: sidecars/ids-check
+          push: true
+          tags: |
+            ghcr.io/geolang/tiletopia-ids-check:${{ github.ref_name }}
+            ghcr.io/geolang/tiletopia-ids-check:latest
+          cache-from: type=gha,scope=ids-check
+          cache-to: type=gha,mode=max,scope=ids-check
 
   release:
     needs: [build]

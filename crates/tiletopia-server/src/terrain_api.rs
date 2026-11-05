@@ -81,7 +81,7 @@ async fn terrain_layer_info() -> impl IntoResponse {
 /// full pyramid. Cesium needs it to know how deep it may refine: with no
 /// `available` array it treats depth as unknown and keeps requesting past
 /// maxzoom.
-fn full_availability(max_zoom: u32) -> Vec<Vec<AvailableRange>> {
+pub(crate) fn full_availability(max_zoom: u32) -> Vec<Vec<AvailableRange>> {
     (0..=max_zoom)
         .map(|z| {
             let (x_tiles, y_tiles) = TerrainTileCoord::grid_at_zoom(z);
@@ -113,13 +113,7 @@ async fn serve_terrain_tile(
         .tiles;
 
     // Generate terrain mesh (uses flat elevation if no DEM tiles found)
-    let grid_size = match z {
-        0..=4 => 16,
-        5..=8 => 32,
-        9..=12 => 64,
-        _ => 65, // CesiumJS standard: 65×65 per terrain tile
-    };
-    let mesh = generate_terrain_tile(&coord, &dem_tiles, grid_size);
+    let mesh = generate_terrain_tile(&coord, &dem_tiles, terrain_grid_size(z));
 
     // Encode as quantized mesh
     let qm_bytes = encode_quantized_mesh(&mesh, &coord);
@@ -135,6 +129,15 @@ async fn serve_terrain_tile(
     );
 
     Ok((headers, qm_bytes))
+}
+
+pub(crate) fn terrain_grid_size(zoom: u32) -> u32 {
+    match zoom {
+        0..=4 => 16,
+        5..=8 => 32,
+        9..=12 => 64,
+        _ => 65, // CesiumJS standard: 65×65 per terrain tile
+    }
 }
 
 /// Parse a tile coordinate from the path, where Cesium sends y as `{y}.terrain`.
@@ -175,7 +178,7 @@ impl IntoResponse for Refusal {
 /// Encode a terrain mesh into quantized-mesh format (simplified).
 ///
 /// Quantized-mesh spec: <https://github.com/CesiumGS/quantized-mesh>
-fn encode_quantized_mesh(
+pub(crate) fn encode_quantized_mesh(
     mesh: &tiletopia_terrain::global_dem::TerrainMesh,
     coord: &TerrainTileCoord,
 ) -> Vec<u8> {
@@ -205,7 +208,7 @@ fn encode_quantized_mesh(
     buf.extend_from_slice(&(max_h as f32).to_le_bytes()); // MaximumHeight
 
     // Bounding sphere (center + radius)
-    let radius = haversine_distance(bounds[1], bounds[0], bounds[3], bounds[2]) / 2.0 * 1000.0;
+    let radius = haversine_distance_km(bounds[1], bounds[0], bounds[3], bounds[2]) / 2.0 * 1000.0;
     buf.extend_from_slice(&cx.to_le_bytes()); // BoundingSphereCenterX
     buf.extend_from_slice(&cy.to_le_bytes()); // BoundingSphereCenterY
     buf.extend_from_slice(&cz.to_le_bytes()); // BoundingSphereCenterZ
@@ -355,7 +358,7 @@ fn geodetic_to_ecef(lat_deg: f64, lon_deg: f64, alt_m: f64) -> (f64, f64, f64) {
 }
 
 /// Haversine distance in km between two lat/lon points.
-fn haversine_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+pub(crate) fn haversine_distance_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let r = 6371.0; // Earth radius km
     let dlat = (lat2 - lat1).to_radians();
     let dlon = (lon2 - lon1).to_radians();

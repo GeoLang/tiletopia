@@ -32,7 +32,7 @@ Deploy GeoLang to AWS in under 5 minutes.
 # 1. Deploy infrastructure
 cd deploy/terraform
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars with your settings
+# Edit terraform.tfvars with your settings. ion_base_url is required
 terraform init
 terraform apply
 
@@ -104,6 +104,7 @@ docker compose up
 |----------|-------------|---------|
 | `TILETOPIA_PORT` | Server port | `3000` |
 | `TILETOPIA_DATA_DIR` | Local tile storage path | `/data` |
+| `TILETOPIA_ION_BASE_URL` | Origin clients reach this server at, with no path or trailing slash. Set by the `ion_base_url` Terraform variable. Startup is refused when it is unset or invalid | required |
 | `RUST_LOG` | Log level | `info` |
 | `AWS_REGION` | AWS region | — |
 

@@ -1,22 +1,5 @@
-//! Webhook subscriptions and their delivery.
-//!
-//! A subscription is a row in SQLite: a target URL, the event types it wants,
-//! and an HMAC-SHA256 signing secret. Pending deliveries are in process memory,
-//! so a restart drops whatever has not been delivered and nothing is queued for
-//! an event that happens while the process is down. That queue has a cap, past
-//! which an event is dropped rather than queued.
-//!
-//! The signing secret is stored as it was generated, not as a digest the way
-//! [`crate::api_keys`] stores a key: signing a payload needs the secret itself.
-//! The create response is the only place it is handed back, and nothing
-//! serializes it after that.
-//!
-//! A subscription URL is a request this server makes on a caller's behalf, so an
-//! editor can aim one at an address only this host can reach. Delivery does not
-//! follow redirects, sends only the payload this server built, and never reads
-//! the response body.
-
 use chrono::{DateTime, Utc};
+use platform_webhook::{PrivateHosts, WebhookUrl, pinned_client, signature};
 use serde::{Serialize, Serializer};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -25,7 +8,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::db::Database;
-use crate::users::to_hex;
+use crate::may_view_asset;
+use crate::users::{claims_of_stored_subject, to_hex};
 
 /// Prefix every signing secret carries, so a leaked one is recognizable in a
 /// log or a commit.
@@ -42,9 +26,6 @@ pub const MAX_ATTEMPTS: u32 = 4;
 /// Delay before the second attempt. Each further attempt doubles it, so the
 /// four attempts land at 0, 30, 90 and 210 seconds.
 const RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
-
-/// How long a receiver has to answer before the attempt counts as failed.
-const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How often the worker looks for a delivery that is due.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -173,16 +154,12 @@ pub fn generate_secret() -> String {
     format!("{SECRET_PREFIX}{}", to_hex(&bytes))
 }
 
-/// `sha256=<hex>` of the HMAC-SHA256 of `payload` under `secret`. A receiver
-/// recomputes this over the raw request body.
-pub fn signature(secret: &str, payload: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
-    mac.update(payload);
-    format!("sha256={}", to_hex(&mac.finalize().into_bytes()))
+pub fn private_hosts_from_env() -> PrivateHosts {
+    if std::env::var("TILETOPIA_WEBHOOK_ALLOW_PRIVATE_HOSTS").as_deref() == Ok("true") {
+        PrivateHosts::AllowedForTestReceiver
+    } else {
+        PrivateHosts::Refused
+    }
 }
 
 /// How long to wait before attempt number `attempts + 1`, or `None` when
@@ -197,34 +174,35 @@ fn retry_delay(attempts: u32, base: Duration) -> Option<Duration> {
 /// Queues events for the subscriptions that want them and delivers them.
 pub struct WebhookQueue {
     db: Arc<Database>,
-    client: reqwest::Client,
+    private_hosts: PrivateHosts,
     pending: Mutex<VecDeque<PendingDelivery>>,
     history: Mutex<VecDeque<WebhookDelivery>>,
     retry_base: Duration,
 }
 
 impl WebhookQueue {
-    pub fn new(db: Arc<Database>) -> Self {
-        Self::with_retry_base(db, RETRY_BASE_DELAY)
+    pub fn new(db: Arc<Database>, private_hosts: PrivateHosts) -> Self {
+        Self::with_retry_base(db, RETRY_BASE_DELAY, private_hosts)
     }
 
     /// The same queue with a different delay before the second attempt, which
     /// is what the delivery tests use to exhaust the retries in milliseconds.
-    pub fn with_retry_base(db: Arc<Database>, retry_base: Duration) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(DELIVERY_TIMEOUT)
-            // a receiver must not be able to bounce a signed request at another
-            // host
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("the reqwest client builds with rustls");
+    pub fn with_retry_base(
+        db: Arc<Database>,
+        retry_base: Duration,
+        private_hosts: PrivateHosts,
+    ) -> Self {
         Self {
             db,
-            client,
+            private_hosts,
             pending: Mutex::new(VecDeque::new()),
             history: Mutex::new(VecDeque::new()),
             retry_base,
         }
+    }
+
+    pub fn private_hosts(&self) -> PrivateHosts {
+        self.private_hosts
     }
 
     /// Start the background worker loop.
@@ -237,10 +215,12 @@ impl WebhookQueue {
         })
     }
 
-    /// Queue this event for every active subscription that names it. Reading the
-    /// subscriptions is the only thing that can fail, and it only logs: an event
-    /// is a side effect of work that already happened.
-    pub async fn emit(&self, event: WebhookEvent, data: serde_json::Value) {
+    pub async fn emit(
+        &self,
+        event: WebhookEvent,
+        asset_owner_id: Option<&str>,
+        data: serde_json::Value,
+    ) {
         let subscriptions = match self.db.list_webhook_subscriptions().await {
             Ok(subscriptions) => subscriptions,
             Err(error) => {
@@ -252,6 +232,23 @@ impl WebhookQueue {
             }
         };
 
+        let mut recipients = Vec::new();
+        for subscription in subscriptions
+            .into_iter()
+            .filter(|s| s.active && s.events.contains(&event))
+        {
+            match claims_of_stored_subject(&self.db, &subscription.created_by).await {
+                Ok(claims) if may_view_asset(&claims, asset_owner_id) => {
+                    recipients.push(subscription);
+                }
+                Ok(_) => {}
+                Err(error) => tracing::error!(
+                    "reading the creator of webhook subscription {} failed: {error}",
+                    subscription.id
+                ),
+            }
+        }
+
         let queued_at = Utc::now();
         let body = serde_json::to_vec(&serde_json::json!({
             "event": event.name(),
@@ -261,10 +258,7 @@ impl WebhookQueue {
         .expect("the event payload serializes");
 
         let mut pending = self.pending.lock().await;
-        for subscription in subscriptions
-            .iter()
-            .filter(|s| s.active && s.events.contains(&event))
-        {
+        for subscription in &recipients {
             // a receiver that is down holds its deliveries here for as long as
             // the retries last, so the queue is capped rather than growing with
             // every event the server produces
@@ -313,9 +307,13 @@ impl WebhookQueue {
         }
     }
 
-    async fn attempt(&self, mut delivery: PendingDelivery) {
-        let result = self
-            .client
+    async fn post(&self, delivery: &PendingDelivery) -> Result<reqwest::Response, String> {
+        let url = WebhookUrl::parse(&delivery.url).map_err(|error| error.to_string())?;
+        // clients from pinned_client connect only to the addresses checked for this attempt
+        let client = pinned_client(&url, self.private_hosts)
+            .await
+            .map_err(|error| error.to_string())?;
+        client
             .post(&delivery.url)
             .header("Content-Type", "application/json")
             .header(
@@ -326,7 +324,12 @@ impl WebhookQueue {
             .header(DELIVERY_HEADER, delivery.id.to_string())
             .body(delivery.body.clone())
             .send()
-            .await;
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn attempt(&self, mut delivery: PendingDelivery) {
+        let result = self.post(&delivery).await;
         delivery.attempts += 1;
 
         // the response body is never read, so a receiver cannot make this
@@ -346,7 +349,7 @@ impl WebhookQueue {
                 Some(response.status().as_u16()),
                 format!("receiver answered {}", response.status()),
             ),
-            Err(error) => (None, error.to_string()),
+            Err(error) => (None, error),
         };
         let (response_status, error) = failure;
 

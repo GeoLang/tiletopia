@@ -19,13 +19,13 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build documentation
-        run: cargo doc --features draco,plugin-dylib,ml --workspace --no-deps
+        run: cargo doc --features plugin-dylib,ml --workspace --no-deps
         env:
           RUSTDOCFLAGS: "--cfg docsrs -D warnings"
       # docs/ is the site, rustdoc goes underneath it

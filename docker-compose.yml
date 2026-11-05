@@ -15,11 +15,23 @@ services:
       # local dev only: a known secret is no better than none in production.
       # 32-byte minimum, or the server refuses to start.
       - TILETOPIA_JWT_SECRET=${TILETOPIA_JWT_SECRET:-local-dev-secret-not-for-production}
+      - TILETOPIA_ION_BASE_URL=${TILETOPIA_ION_BASE_URL:-http://localhost:3000}
+      - TILETOPIA_IDS_CHECK_URL=http://ids-check:8000
+      # local dev only: a known token is no better than none in production
+      - TILETOPIA_IDS_CHECK_TOKEN=${TILETOPIA_IDS_CHECK_TOKEN:-local-dev-ids-check-token-not-for-production}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/health"]
       interval: 10s
       timeout: 5s
       retries: 3
+    restart: unless-stopped
+
+  ids-check:
+    build: sidecars/ids-check
+    volumes:
+      - tile-data:/data:ro
+    environment:
+      - IDS_CHECK_TOKEN=${TILETOPIA_IDS_CHECK_TOKEN:-local-dev-ids-check-token-not-for-production}
     restart: unless-stopped
 
 volumes:

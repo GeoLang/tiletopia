@@ -26,8 +26,10 @@ pub const METERS_PER_DEG_LAT: f64 = 111_320.0;
 
 // infrastructure sizes the tiletopia task at 1024 MiB
 const TASK_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
-const CONCURRENT_SRTM_BUILDS: usize = 2;
-const SRTM_BUILD_BUDGET_BYTES: u64 = TASK_MEMORY_BYTES / 3;
+const CONCURRENT_BUILDS: usize = 2;
+// the job worker tiles one job at a time beside two builds, each budgeted a third of the task
+pub(crate) const BUILD_BUDGET_BYTES: u64 = TASK_MEMORY_BYTES / 3;
+pub(crate) const JOB_BUDGET_BYTES: u64 = TASK_MEMORY_BYTES / 3;
 const SRTM1_SAMPLES: u64 = 3601 * 3601;
 // every fetched tile stays in memory as f32 samples until the caller is done
 const SRTM_KEPT_BYTES_PER_TILE: u64 = SRTM1_SAMPLES * 4;
@@ -167,7 +169,7 @@ impl DemGrid {
 /// Store of loaded DEM grids for elevation lookup.
 pub struct DemStore {
     grids: Vec<DemGrid>,
-    srtm_build_slots: Arc<Semaphore>,
+    build_slots: Arc<Semaphore>,
 }
 
 impl Default for DemStore {
@@ -180,8 +182,15 @@ impl DemStore {
     pub fn new() -> Self {
         Self {
             grids: Vec::new(),
-            srtm_build_slots: Arc::new(Semaphore::new(CONCURRENT_SRTM_BUILDS)),
+            build_slots: Arc::new(Semaphore::new(CONCURRENT_BUILDS)),
         }
+    }
+
+    pub(crate) async fn build_slot(&self) -> OwnedSemaphorePermit {
+        Arc::clone(&self.build_slots)
+            .acquire_owned()
+            .await
+            .expect("the build semaphore is never closed")
     }
 
     pub fn grids(&self) -> &[DemGrid] {
@@ -293,12 +302,7 @@ impl ElevationSources {
         let srtm_build_slot = if to_fetch.is_empty() {
             None
         } else {
-            Some(
-                Arc::clone(&self.grids.srtm_build_slots)
-                    .acquire_owned()
-                    .await
-                    .expect("the SRTM build semaphore is never closed"),
-            )
+            Some(self.grids.build_slot().await)
         };
         let mut tiles = Vec::new();
         for (lat, lon) in to_fetch {
@@ -407,7 +411,12 @@ impl ElevationField {
         for &[longitude, latitude] in path {
             let point = self.point(latitude, longitude)?;
             if let Some(previous) = points.last() {
-                total_distance_m += haversine_distance(previous, &point);
+                total_distance_m += crate::terrain_api::haversine_distance_km(
+                    previous.latitude,
+                    previous.longitude,
+                    point.latitude,
+                    point.longitude,
+                ) * 1000.0;
                 let climb = point.elevation_m - previous.elevation_m;
                 if climb > 0.0 {
                     elevation_gain_m += climb;
@@ -473,9 +482,9 @@ pub(crate) fn srtm_tiles_to_fetch(bounds: [f64; 4]) -> Vec<(i32, i32)> {
         bounds[0], bounds[1], bounds[2], bounds[3],
     );
     let build_bytes = srtm_build_bytes(required.len());
-    if build_bytes > SRTM_BUILD_BUDGET_BYTES {
+    if build_bytes > BUILD_BUDGET_BYTES {
         tracing::debug!(
-            "area spans {} SRTM tiles needing {build_bytes} bytes, over the {SRTM_BUILD_BUDGET_BYTES} byte build budget",
+            "area spans {} SRTM tiles needing {build_bytes} bytes, over the {BUILD_BUDGET_BYTES} byte build budget",
             required.len()
         );
         return Vec::new();
@@ -519,18 +528,6 @@ fn staged_tile_from_file(path: &Path, lat: i32, lon: i32) -> std::io::Result<Dem
             format!("{}: not a square f32 DEM grid", path.display()),
         )
     })
-}
-
-/// Haversine distance between two elevation points (in meters).
-fn haversine_distance(a: &ElevationPoint, b: &ElevationPoint) -> f64 {
-    let r = 6_371_000.0; // Earth radius in meters
-    let dlat = (b.latitude - a.latitude).to_radians();
-    let dlon = (b.longitude - a.longitude).to_radians();
-    let lat1 = a.latitude.to_radians();
-    let lat2 = b.latitude.to_radians();
-    let a_val = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
-    let c = 2.0 * a_val.sqrt().asin();
-    r * c
 }
 
 #[cfg(test)]
@@ -684,12 +681,12 @@ mod tests {
     #[test]
     fn the_build_budget_fits_a_corner_tile_and_not_a_zoom_6_tile() {
         // any tile can straddle a degree corner, so four SRTM tiles have to fit
-        assert!(srtm_build_bytes(4) <= SRTM_BUILD_BUDGET_BYTES);
+        assert!(srtm_build_bytes(4) <= BUILD_BUDGET_BYTES);
         assert_eq!(srtm_tiles_to_fetch([7.5, 43.5, 8.5, 44.5]).len(), 4);
         // a zoom 6 terrain tile rounds out to 4 by 4 whole degrees
-        assert!(srtm_build_bytes(16) > SRTM_BUILD_BUDGET_BYTES);
+        assert!(srtm_build_bytes(16) > BUILD_BUDGET_BYTES);
         assert!(srtm_tiles_to_fetch([0.0, 40.0, 4.0, 44.0]).is_empty());
-        assert!(srtm_build_bytes(4) * CONCURRENT_SRTM_BUILDS as u64 <= TASK_MEMORY_BYTES * 2 / 3);
+        assert!(srtm_build_bytes(4) * CONCURRENT_BUILDS as u64 <= TASK_MEMORY_BYTES * 2 / 3);
     }
 
     #[tokio::test]

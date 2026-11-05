@@ -25,15 +25,15 @@ struct SourceFrame {
     x_sign: f32,
     y_sign: f32,
     z_sign: f32,
-    scale: f32,
+    scale: f64,
 }
 
 impl SourceFrame {
-    fn position(&self, v: [f32; 3]) -> [f32; 3] {
+    fn position(&self, v: [f64; 3]) -> [f64; 3] {
         [
-            v[self.x_from] * self.x_sign * self.scale,
-            v[self.y_from] * self.y_sign * self.scale,
-            v[self.z_from] * self.z_sign * self.scale,
+            v[self.x_from] * f64::from(self.x_sign) * self.scale,
+            v[self.y_from] * f64::from(self.y_sign) * self.scale,
+            v[self.z_from] * f64::from(self.z_sign) * self.scale,
         ]
     }
 
@@ -44,6 +44,21 @@ impl SourceFrame {
             v[self.z_from] * self.z_sign,
         ]
     }
+
+    fn is_mirroring(&self) -> bool {
+        let row = |from: usize, sign: f32| {
+            std::array::from_fn(|column| if column == from { f64::from(sign) } else { 0.0 })
+        };
+        Affine {
+            linear: [
+                row(self.x_from, self.x_sign),
+                row(self.y_from, self.y_sign),
+                row(self.z_from, self.z_sign),
+            ],
+            translation: ZERO3,
+        }
+        .is_mirroring()
+    }
 }
 
 const ZERO3: [f64; 3] = [0.0; 3];
@@ -52,32 +67,32 @@ const ROTATION_ORDER_XYZ: [usize; 3] = [0, 1, 2];
 
 /// Column-vector affine map, v' = linear * v + translation.
 #[derive(Clone, Copy)]
-struct Affine {
-    linear: [[f64; 3]; 3],
-    translation: [f64; 3],
+pub(crate) struct Affine {
+    pub(crate) linear: [[f64; 3]; 3],
+    pub(crate) translation: [f64; 3],
 }
 
 impl Affine {
-    const IDENTITY: Self = Self {
+    pub(crate) const IDENTITY: Self = Self {
         linear: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         translation: ZERO3,
     };
 
-    fn translation(translation: [f64; 3]) -> Self {
+    pub(crate) fn translation(translation: [f64; 3]) -> Self {
         Self {
             translation,
             ..Self::IDENTITY
         }
     }
 
-    fn scaling(s: [f64; 3]) -> Self {
+    pub(crate) fn scaling(s: [f64; 3]) -> Self {
         Self {
             linear: [[s[0], 0.0, 0.0], [0.0, s[1], 0.0], [0.0, 0.0, s[2]]],
             ..Self::IDENTITY
         }
     }
 
-    fn rotation_about(axis: usize, degrees: f64) -> Self {
+    pub(crate) fn rotation_about(axis: usize, degrees: f64) -> Self {
         let (sin, cos) = degrees.to_radians().sin_cos();
         let mut linear = Self::IDENTITY.linear;
         let a = (axis + 1) % 3;
@@ -114,7 +129,7 @@ impl Affine {
     }
 
     /// `self * other`: `other` reaches the vector first.
-    fn times(self, other: Self) -> Self {
+    pub(crate) fn times(self, other: Self) -> Self {
         let mut linear = [[0.0; 3]; 3];
         for (row, line) in linear.iter_mut().enumerate() {
             for (col, cell) in line.iter_mut().enumerate() {
@@ -129,7 +144,15 @@ impl Affine {
         }
     }
 
-    fn apply(&self, v: [f64; 3]) -> [f64; 3] {
+    pub(crate) fn is_mirroring(&self) -> bool {
+        let [first, second, third] = self.linear;
+        let determinant = first[0] * (second[1] * third[2] - second[2] * third[1])
+            - first[1] * (second[0] * third[2] - second[2] * third[0])
+            + first[2] * (second[0] * third[1] - second[1] * third[0]);
+        determinant < 0.0
+    }
+
+    pub(crate) fn apply(&self, v: [f64; 3]) -> [f64; 3] {
         let mut out = self.translation;
         for (row, line) in self.linear.iter().enumerate() {
             for (k, cell) in line.iter().enumerate() {
@@ -141,19 +164,18 @@ impl Affine {
 
     /// Normals go through the inverse transpose so a non-uniform scale keeps
     /// them perpendicular. The cofactor matrix is that up to the determinant.
-    fn apply_normal(&self, n: [f64; 3]) -> [f64; 3] {
+    pub(crate) fn apply_normal(&self, n: [f64; 3]) -> [f64; 3] {
         let m = &self.linear;
         let cofactor = |r: usize, c: usize| {
             let (r1, r2) = ((r + 1) % 3, (r + 2) % 3);
             let (c1, c2) = ((c + 1) % 3, (c + 2) % 3);
             m[r1][c1] * m[r2][c2] - m[r1][c2] * m[r2][c1]
         };
-        let determinant: f64 = (0..3).map(|k| m[0][k] * cofactor(0, k)).sum();
         let mut out = [0.0; 3];
         for (row, value) in out.iter_mut().enumerate() {
             *value = (0..3).map(|k| cofactor(row, k) * n[k]).sum();
         }
-        if determinant < 0.0 {
+        if self.is_mirroring() {
             out = out.map(|c| -c);
         }
         let len = (out[0] * out[0] + out[1] * out[1] + out[2] * out[2]).sqrt();
@@ -319,17 +341,24 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
         });
 
         let name = mesh_handle.name().unwrap_or("mesh").to_string();
+        let mirrored = node.is_mirroring() != frame.is_mirroring();
         let mut groups: HashMap<u32, MaterialGroup> = HashMap::new();
 
         for triangle_vertex in triangles.triangle_vertex_indices() {
-            let Some(control_point) = triangles.control_point(triangle_vertex) else {
-                continue;
-            };
-            let Some(control_point_index) = triangles.control_point_index(triangle_vertex) else {
-                continue;
+            let (Some(control_point), Some(control_point_index)) = (
+                triangles.control_point(triangle_vertex),
+                triangles.control_point_index(triangle_vertex),
+            ) else {
+                let polygon = triangles
+                    .polygon_index(triangle_vertex.triangle_index())
+                    .expect("triangulate_each records a polygon for every triangle");
+                return Err(IngestError::ParseError(format!(
+                    "FBX mesh {name:?}: polygon {} names a control point the mesh does not have",
+                    polygon.to_usize()
+                )));
             };
             let placed = node.apply([control_point.x, control_point.y, control_point.z]);
-            let position = frame.position(placed.map(|c| c as f32));
+            let position = frame.position(placed);
             let texcoord = uv
                 .as_ref()
                 .map(|uv| read_uv(uv, &triangles, triangle_vertex));
@@ -355,7 +384,13 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
         let named_per_material = group_indices.len() > 1;
 
         for material_index in group_indices {
-            let group = groups.remove(&material_index).expect("a listed group");
+            let mut group = groups.remove(&material_index).expect("a listed group");
+            // mirroring transforms turn counter-clockwise triangles clockwise
+            if mirrored {
+                for triangle in group.indices.as_chunks_mut::<3>().0 {
+                    triangle.swap(1, 2);
+                }
+            }
             let material = material_handles
                 .get(material_index as usize)
                 .map(|handle| read_material(handle, mesh_dir));
@@ -382,7 +417,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
 /// that agree on both control point and UV.
 #[derive(Default)]
 struct MaterialGroup {
-    positions: Vec<[f32; 3]>,
+    positions: Vec<[f64; 3]>,
     normals: Vec<[f32; 3]>,
     texcoords: Vec<[f32; 2]>,
     indices: Vec<u32>,
@@ -394,7 +429,7 @@ impl MaterialGroup {
     fn push_vertex(
         &mut self,
         control_point_index: u32,
-        position: [f32; 3],
+        position: [f64; 3],
         texcoord: Option<[f32; 2]>,
         normal: Option<[f32; 3]>,
     ) {
@@ -442,12 +477,14 @@ impl MaterialGroup {
             name,
             material,
             asset_id: None,
+            class: None,
+            storey: None,
         }
     }
 }
 
-fn face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
-    let mut normals = vec![[0.0; 3]; positions.len()];
+fn face_normals(positions: &[[f64; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
+    let mut normals = vec![[0.0f64; 3]; positions.len()];
     for &[ia, ib, ic] in indices.as_chunks::<3>().0 {
         let a = positions[ia as usize];
         let b = positions[ib as usize];
@@ -475,6 +512,9 @@ fn face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
         }
     }
     normals
+        .into_iter()
+        .map(|normal| normal.map(|component| component as f32))
+        .collect()
 }
 
 fn read_normal(
@@ -539,12 +579,12 @@ fn source_frame(doc: &Document) -> SourceFrame {
             .get_property(name)
             .and_then(|property| property.load_value(PrimitiveLoader::<i32>::new()).ok())
     };
-    let scale = (properties
+    let scale = properties
         .get_property("UnitScaleFactor")
         .and_then(|property| property.load_value(PrimitiveLoader::<f64>::new()).ok())
         .filter(|value| value.is_finite() && *value > 0.0)
         .unwrap_or(1.0)
-        / CENTIMETRES_PER_METRE) as f32;
+        / CENTIMETRES_PER_METRE;
 
     let Some(up_axis) = read_int("UpAxis") else {
         return SourceFrame { scale, ..identity };
@@ -782,17 +822,20 @@ mod tests {
             }
         }
 
-        /// A square geometry, its model, and the UV layer when asked for.
-        /// Returns the model node.
-        fn square(&mut self, with_uvs: bool) -> NodeId {
+        fn square_vertices_with_polygons(&mut self, polygons: &[i32]) -> NodeId {
             let geometry = self.object("Geometry", GEOMETRY_ID, "square", "Geometry", "Mesh");
-
             let vertices = self.tree.append_new(geometry, "Vertices");
             self.tree
                 .append_attribute(vertices, SQUARE_VERTICES.to_vec());
-            let polygons = self.tree.append_new(geometry, "PolygonVertexIndex");
-            self.tree
-                .append_attribute(polygons, SQUARE_POLYGONS.to_vec());
+            let polygon_node = self.tree.append_new(geometry, "PolygonVertexIndex");
+            self.tree.append_attribute(polygon_node, polygons.to_vec());
+            geometry
+        }
+
+        /// A square geometry, its model, and the UV layer when asked for.
+        /// Returns the model node.
+        fn square(&mut self, with_uvs: bool) -> NodeId {
+            let geometry = self.square_vertices_with_polygons(&SQUARE_POLYGONS);
 
             if with_uvs {
                 let element = self.tree.append_new(geometry, "LayerElementUV");
@@ -896,7 +939,7 @@ mod tests {
 
     const PARENT_ID: i64 = 300;
 
-    fn has_position(meshes: &[MeshData], expected: [f32; 3]) -> bool {
+    fn has_position(meshes: &[MeshData], expected: [f64; 3]) -> bool {
         meshes[0].positions.iter().any(|position| {
             position
                 .iter()
@@ -926,6 +969,86 @@ mod tests {
             "{:?}",
             meshes[0].positions
         );
+    }
+
+    fn assert_first_triangle_faces(mesh: &MeshData, expected: [f64; 3]) {
+        let corner = |slot: usize| mesh.positions[mesh.indices[slot] as usize];
+        let (origin, second, third) = (corner(0), corner(1), corner(2));
+        let edge = |to: [f64; 3]| [0, 1, 2].map(|axis| to[axis] - origin[axis]);
+        let (first_edge, second_edge) = (edge(second), edge(third));
+        let face_normal = [
+            first_edge[1] * second_edge[2] - first_edge[2] * second_edge[1],
+            first_edge[2] * second_edge[0] - first_edge[0] * second_edge[2],
+            first_edge[0] * second_edge[1] - first_edge[1] * second_edge[0],
+        ];
+        let facing: f64 = (0..3).map(|axis| face_normal[axis] * expected[axis]).sum();
+        assert!(facing > 0.0, "{face_normal:?} faces away from {expected:?}");
+    }
+
+    #[test]
+    fn a_mirroring_scale_keeps_triangles_front_facing() {
+        let meshes = read_square(|builder| {
+            let model = builder.square(false);
+            let properties = builder.properties(model);
+            builder.vector(properties, "Lcl Scaling", [-1.0, 1.0, 1.0]);
+        });
+        assert!(
+            has_position(&meshes, [-1.0, 1.0, 2.0]),
+            "{:?}",
+            meshes[0].positions
+        );
+        // the unmirrored square faces (0, -2, 1), which a mirror in x leaves alone
+        assert_first_triangle_faces(&meshes[0], [0.0, -2.0, 1.0]);
+    }
+
+    fn mirror_z_in_the_axis_settings(builder: &mut FbxBuilder) {
+        builder.global_int("FrontAxis", 2);
+        builder.global_int("FrontAxisSign", -1);
+        builder.global_int("CoordAxis", 0);
+        builder.global_int("CoordAxisSign", 1);
+    }
+
+    #[test]
+    fn a_left_handed_file_keeps_triangles_front_facing() {
+        let meshes = read_square(|builder| {
+            mirror_z_in_the_axis_settings(builder);
+            builder.square(false);
+        });
+        assert!(
+            has_position(&meshes, [1.0, 1.0, -2.0]),
+            "{:?}",
+            meshes[0].positions
+        );
+        assert_first_triangle_faces(&meshes[0], [0.0, -2.0, -1.0]);
+    }
+
+    #[test]
+    fn a_mirroring_node_in_a_left_handed_file_keeps_its_winding() {
+        let meshes = read_square(|builder| {
+            mirror_z_in_the_axis_settings(builder);
+            let model = builder.square(false);
+            let properties = builder.properties(model);
+            builder.vector(properties, "Lcl Scaling", [-1.0, 1.0, 1.0]);
+        });
+        assert!(
+            has_position(&meshes, [-1.0, 1.0, -2.0]),
+            "{:?}",
+            meshes[0].positions
+        );
+        assert_first_triangle_faces(&meshes[0], [0.0, -2.0, -1.0]);
+    }
+
+    #[test]
+    fn a_polygon_naming_a_missing_control_point_fails_naming_the_polygon() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.fbx");
+        let mut builder = FbxBuilder::new(1, 1);
+        // fbx closes a polygon with the bitwise not of its last index, so -10 is control point 9
+        builder.square_vertices_with_polygons(&[0, 1, -3, 0, 2, -10]);
+        builder.write(&path);
+
+        let error = read(&path).unwrap_err().to_string();
+        assert!(error.contains("polygon 1 names a control point"), "{error}");
     }
 
     #[test]
@@ -1118,7 +1241,7 @@ mod tests {
             .positions
             .iter()
             .map(|p| p[1])
-            .fold(f32::NEG_INFINITY, f32::max);
+            .fold(f64::NEG_INFINITY, f64::max);
         assert_eq!(up_most, 2.0);
         assert!(
             meshes[0].positions.contains(&[1.0, 2.0, -1.0]),

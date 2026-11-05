@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use tiletopia_server::{AppState, router};
+use tiletopia_server::{AppState, Asset, AssetStatus, AssetType, router};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -97,9 +97,26 @@ async fn a_bundle_built_with_a_cesium_dir_set_carries_the_library() {
     }
 
     let state = common::test_state().await;
-    let editor = common::token(&Uuid::new_v4().to_string(), "editor");
+    let editor_id = Uuid::new_v4().to_string();
+    let editor = common::token(&editor_id, "editor");
     let asset_id = Uuid::new_v4();
     seed_tiled_asset(&state.data_dir, asset_id);
+    state
+        .db
+        .create_asset(&Asset {
+            id: asset_id,
+            name: "cloud.las".into(),
+            asset_type: AssetType::PointCloud,
+            status: AssetStatus::Ready,
+            created_at: chrono::Utc::now(),
+            tile_count: 0,
+            size_bytes: 0,
+            description: String::new(),
+            tags: Vec::new(),
+            owner_id: Some(editor_id),
+        })
+        .await
+        .unwrap();
 
     let (status, bytes) = send(
         &state,

@@ -4,6 +4,8 @@ ARG MAGO_SHA256=d37e58b634e91d7ce7ca046168b1db2cf950cd9b2ffacb826fd3b10a8d31f7e2
 ARG TIPPECANOE_VERSION=2.79.0
 ARG CESIUM_VERSION=1.119
 ARG CESIUM_SHA256=b171f3397eb8ee58dd1f07f99d4dfd75aecb7a8aaeec18e7baf2f4c18e301705
+# matches the grokj2k-sys rev in Cargo.toml
+ARG GROK_REV=00f9baaed2f41a8dadef1c62cf009d8e80064e9d
 
 # CesiumJS for the offline viewer export, the version the exported page falls
 # back to on the CDN
@@ -33,19 +35,44 @@ RUN git clone --depth 1 -b "${TIPPECANOE_VERSION}" \
     make -C /usr/src/tippecanoe -j"$(nproc)" && \
     make -C /usr/src/tippecanoe install PREFIX=/opt/tippecanoe
 
+# Grok decodes JPEG 2000 uploads. bookworm's libgrokj2k is older than the API the
+# jp2 feature binds, so it is built from the pinned commit
+FROM debian:bookworm-slim AS grok
+ARG GROK_REV
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git cmake g++ make \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init /usr/src/grok && \
+    git -C /usr/src/grok remote add origin https://github.com/GrokImageCompression/grok.git && \
+    git -C /usr/src/grok fetch --depth 1 origin "${GROK_REV}" && \
+    git -C /usr/src/grok checkout FETCH_HEAD && \
+    git -C /usr/src/grok submodule update --init --recursive
+RUN cmake -S /usr/src/grok -B /usr/src/grok/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/opt/grok \
+      -DCMAKE_INSTALL_LIBDIR=lib \
+      -DGRK_BUILD_CODEC=OFF \
+      -DGRK_BUILD_CORE_EXAMPLES=OFF \
+      -DGRK_BUILD_CORE_SWIG_BINDINGS=OFF \
+      -DGRK_BUILD_JPEG=OFF && \
+    cmake --build /usr/src/grok/build -j"$(nproc)" && \
+    cmake --install /usr/src/grok/build
+
 FROM rust:bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cmake g++ make libclang-dev \
+    cmake g++ make libclang-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=grok /opt/grok /opt/grok
+ENV PKG_CONFIG_PATH=/opt/grok/lib/pkgconfig
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
-COPY patches/ patches/
 
 # Build release binary
-RUN cargo build --release --bin tiletopia --features martin
+RUN cargo build --release --bin tiletopia --features martin,jp2
 
 # Minimal runtime image
 FROM debian:bookworm-slim
@@ -55,6 +82,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=tippecanoe /opt/tippecanoe/bin/tippecanoe /usr/local/bin/tippecanoe
+COPY --from=grok /opt/grok/lib/ /usr/local/lib/
+RUN ldconfig
 
 # Non-root user for security
 RUN useradd -r -s /bin/false tiletopia && \
@@ -93,4 +122,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:3000/api/v1/health || exit 1
 
 ENTRYPOINT ["tiletopia"]
+# tiletopia serve exits unless docker run sets TILETOPIA_ION_BASE_URL
 CMD ["serve", "--data-dir", "/data", "--host", "0.0.0.0", "--port", "3000"]
