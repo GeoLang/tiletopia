@@ -571,11 +571,20 @@ async fn fail_upload(state: &AppState, mut asset: Asset, answer: IonError) -> Io
     answer
 }
 
+fn upload_name(relative_path: &Path) -> String {
+    // zip entry names are '/'-separated whatever the host uses
+    relative_path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn named_files<P: AsRef<Path>>(paths: &[P]) -> String {
     let mut names: Vec<String> = paths
         .iter()
         .take(MOST_NAMED_FILES)
-        .map(|path| path.as_ref().display().to_string())
+        .map(|path| upload_name(path.as_ref()))
         .collect();
     if paths.len() > MOST_NAMED_FILES {
         names.push(format!("and {} more", paths.len() - MOST_NAMED_FILES));
@@ -788,7 +797,7 @@ pub(crate) async fn upload_complete(
             return Err(fail_upload(&state, asset, answer).await);
         }
     };
-    let file_name = main_file.display().to_string();
+    let file_name = upload_name(main_file);
     let extension = lowercase_extension(main_file);
 
     // the mesh readers refuse a sidecar path that climbs out of the main file's directory

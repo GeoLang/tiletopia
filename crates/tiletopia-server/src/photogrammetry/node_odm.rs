@@ -136,6 +136,16 @@ impl Session<'_> {
         Ok(left)
     }
 
+    fn request_failure(&self, what: &str, error: reqwest::Error) -> String {
+        // requests time out at the reconstruction deadline
+        if error.is_timeout()
+            && let Err(past_deadline) = self.time_left()
+        {
+            return past_deadline;
+        }
+        format!("NodeODM {what}: {error}")
+    }
+
     fn call(
         &self,
         request: RequestBuilder,
@@ -145,7 +155,7 @@ impl Session<'_> {
         let response = request
             .timeout(timeout)
             .send()
-            .map_err(|e| format!("NodeODM {what}: {e}"))?;
+            .map_err(|error| self.request_failure(what, error))?;
         let status = response.status();
         let body: Value = response
             .json()
@@ -294,7 +304,7 @@ impl Session<'_> {
             .get(self.url(&format!("task/{uuid}/download/all.zip")))
             .timeout(self.time_left()?)
             .send()
-            .map_err(|e| format!("NodeODM download: {e}"))?;
+            .map_err(|error| self.request_failure("download", error))?;
         // nodeodm answers a download it cannot serve with 200 and a JSON error
         let is_zip = response
             .headers()

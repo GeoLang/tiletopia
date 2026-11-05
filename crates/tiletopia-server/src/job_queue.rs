@@ -59,10 +59,7 @@ pub struct JobQueue {
 }
 
 pub(crate) fn stored_input_path(file_name: &std::ffi::OsStr) -> String {
-    Path::new("input")
-        .join(file_name)
-        .to_string_lossy()
-        .into_owned()
+    format!("input/{}", file_name.to_string_lossy())
 }
 
 pub(crate) fn job_with_input_in_asset_dir(job: &JobRecord, asset_dir: &Path) -> JobRecord {
