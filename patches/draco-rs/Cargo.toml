@@ -44,7 +44,7 @@ version = "0.28"
 version = "1.0.78"
 
 [build-dependencies.autocxx-build]
-version = "0.28"
+version = "0.30"
 
 [build-dependencies.cmake]
 version = "0.1.54"
