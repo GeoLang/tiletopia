@@ -696,7 +696,10 @@ async fn write_report(
         }
     };
     // the report was written with synchronous off, and a rename can reach disk before the file's pages do
-    let file = tokio::fs::File::open(&building)
+    // windows refuses FlushFileBuffers on a handle opened read-only
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&building)
         .await
         .map_err(|error| format!("could not publish the report: {error}"))?;
     file.sync_all()

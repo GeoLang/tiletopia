@@ -417,7 +417,10 @@ pub fn finish_build(asset_dir: &Path, tiling_succeeded: bool) -> Result<(), Stri
     let describe =
         |error: std::io::Error| format!("could not publish {}: {error}", building.display());
     // the build ran with synchronous off, and a rename can reach disk before the file's pages do
-    std::fs::File::open(&building)
+    // windows refuses FlushFileBuffers on a handle opened read-only
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&building)
         .and_then(|file| file.sync_all())
         .map_err(describe)?;
     std::fs::rename(&building, store_path(asset_dir)).map_err(describe)

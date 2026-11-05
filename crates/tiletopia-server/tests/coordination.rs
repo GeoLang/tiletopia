@@ -1061,6 +1061,8 @@ async fn a_failed_status_write_ends_the_report_in_error_and_frees_the_pair() {
     let first_ion_id = first.ion_id.to_string();
     let second = upload_and_tile(&state, &SECOND_REVISION, Some(&first_ion_id)).await;
     let compare = json!({ "fromAssetId": first.ion_id, "toAssetId": second.ion_id });
+    // sqlite checks a new trigger's name against the connection's cached schema, which misses a drop made on another connection
+    let mut schema_connection = state.db.pool.acquire().await.unwrap();
 
     for (refused_status, reason) in [
         ("IN_PROGRESS", "writing the report's progress failed"),
@@ -1070,7 +1072,7 @@ async fn a_failed_status_write_ends_the_report_in_error_and_frees_the_pair() {
             "CREATE TRIGGER refuse_status BEFORE UPDATE OF status ON change_reports \
              WHEN NEW.status = '{refused_status}' BEGIN SELECT RAISE(ABORT, 'refused'); END"
         )))
-        .execute(&state.db.pool)
+        .execute(&mut *schema_connection)
         .await
         .unwrap();
 
@@ -1085,7 +1087,7 @@ async fn a_failed_status_write_ends_the_report_in_error_and_frees_the_pair() {
         );
 
         sqlx::query("DROP TRIGGER refuse_status")
-            .execute(&state.db.pool)
+            .execute(&mut *schema_connection)
             .await
             .unwrap();
     }

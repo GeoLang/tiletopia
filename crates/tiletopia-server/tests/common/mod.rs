@@ -290,25 +290,15 @@ async fn build_state_with_account_limits(
     global_terrain: tiletopia_server::global_terrain::GlobalTerrain,
     ids_check: Option<tiletopia_server::ids_check::IdsCheckSidecar>,
 ) -> Arc<AppState> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-
-    let dir = std::env::temp_dir().join(format!(
-        "tiletopia_server_test_{}_{}",
-        std::process::id(),
-        n
-    ));
-    std::fs::create_dir_all(&dir).ok();
+    let dir = tempfile::Builder::new()
+        .prefix("tiletopia_server_test_")
+        .tempdir()
+        .unwrap()
+        .keep();
     stage_fixture_dem(&dir);
 
-    // named shared-cache memory db so all pooled connections see one database,
-    // unique per test so cases stay isolated
-    let db_url = format!(
-        "sqlite:file:tiletopia_test_{}_{}?mode=memory&cache=shared",
-        std::process::id(),
-        n
-    );
+    // sqlite shared-cache memory databases answer concurrent writers with table locks
+    let db_url = format!("sqlite://{}?mode=rwc", dir.join("tiletopia.db").display());
     let db = Arc::new(tiletopia_server::db::Database::new(&db_url).await.unwrap());
     db.migrate().await.unwrap();
     global_terrain.reserve_ion_asset_id(&db).await.unwrap();
