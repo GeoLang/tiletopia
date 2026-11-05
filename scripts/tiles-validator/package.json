@@ -4,5 +4,5 @@
   "devDependencies": {
     "3d-tiles-validator": "0.6.1"
   },
-  "packageManager": "pnpm@11.27.0"
+  "packageManager": "pnpm@11.28.10"
 }
