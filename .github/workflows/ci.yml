@@ -75,7 +75,7 @@ jobs:
           fi
           echo "$prefix/bin" >> "$GITHUB_PATH"
       - name: Test
-        run: cargo test --all --no-default-features --features plugin-dylib,ml,martin
+        run: cargo test --all --no-fail-fast --no-default-features --features plugin-dylib,ml,martin
 
   jp2:
     runs-on: ubuntu-latest
