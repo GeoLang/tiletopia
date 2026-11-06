@@ -339,7 +339,13 @@ async fn import_unpacked(
     stage_snapshots(&scratch.join(STAGED_DIR), base_asset_id, &archive)
         .await
         .map_err(write_failure)?;
-    let mut transaction = state.db.pool.begin().await.map_err(write_failure)?;
+    // sqlite answers a deferred transaction's first write with SQLITE_BUSY while another connection writes, without waiting
+    let mut transaction = state
+        .db
+        .pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(write_failure)?;
     let topic_counts = store_archive(&mut transaction, base_asset_id, &archive)
         .await
         .map_err(write_failure)?;

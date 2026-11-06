@@ -77,7 +77,8 @@ pub async fn add_version(
     new_asset_id: Uuid,
     existing_asset_id: Uuid,
 ) -> Result<AssetVersion, sqlx::Error> {
-    let mut transaction = db.pool.begin().await?;
+    // sqlite answers a deferred transaction's first write with SQLITE_BUSY while another connection writes, without waiting
+    let mut transaction = db.pool.begin_with("BEGIN IMMEDIATE").await?;
     let known_base: Option<String> =
         sqlx::query_scalar("SELECT base_asset_id FROM asset_versions WHERE asset_id = ?")
             .bind(existing_asset_id.to_string())
