@@ -1,7 +1,9 @@
 //! Mesh tiling pipeline — spatial subdivision, LOD generation, and 3D Tiles output for meshes.
 
 use crate::bounding_volume::Aabb;
-use crate::compression::{reorder_vertices_for_meshopt, simplify_mesh};
+use crate::compression::{
+    SIMPLIFICATION_ERROR_FRACTION, reorder_vertices_for_meshopt, simplify_mesh,
+};
 use crate::glb_writer::{
     self, EdgeVisibility, GlbMesh, InstancedMesh, MeshCompression, MetadataProperty,
     MetadataValues, TextureData, TileMetadata,
@@ -669,6 +671,11 @@ struct TilePart<'a> {
     bounds: Aabb,
 }
 
+struct ParentContent<'a> {
+    parts: Vec<TilePart<'a>>,
+    geometric_error: f64,
+}
+
 impl TilePart<'_> {
     fn triangle_count(&self) -> usize {
         self.indices.len() / 3
@@ -833,13 +840,9 @@ impl<'a> GroupTiler<'a> {
             return self.leaf(&parts, bounds, path);
         }
 
-        let (content_uri, content_triangle_count) = {
-            let lod_parts = self.parent_content_parts(&parts, tri_count);
-            (
-                self.write_content(&lod_parts, path)?,
-                total_triangles(&lod_parts),
-            )
-        };
+        let content = self.parent_content(&parts, tri_count);
+        let content_uri = self.write_content(&content.parts, path)?;
+        let content_triangle_count = total_triangles(&content.parts);
         drop(parts);
 
         let mut children = Vec::with_capacity(2);
@@ -849,10 +852,15 @@ impl<'a> GroupTiler<'a> {
             children.push(self.tile(half, half_bounds, depth + 1, path)?);
             path.pop();
         }
+        // cesium refines a tile only while its error is too large on screen, so a parent below a child would stop refinement early
+        let geometric_error = children
+            .iter()
+            .map(|child| child.geometric_error)
+            .fold(content.geometric_error, f64::max);
 
         Ok(WrittenMeshTile {
             bounds,
-            geometric_error: geometric_error_for(&bounds),
+            geometric_error,
             content_uri,
             content_triangle_count,
             children,
@@ -911,7 +919,7 @@ impl<'a> GroupTiler<'a> {
         (near, far)
     }
 
-    fn parent_content_parts(&self, parts: &[TilePart<'a>], tri_count: usize) -> Vec<TilePart<'a>> {
+    fn parent_content(&self, parts: &[TilePart<'a>], tri_count: usize) -> ParentContent<'a> {
         let triangle_budget = self.config.max_triangles_per_tile;
         let ratio = self
             .config
@@ -926,14 +934,18 @@ impl<'a> GroupTiler<'a> {
         let mut simplified_first_occurrences = HashMap::new();
         let mut kept: Vec<TilePart<'a>> = Vec::new();
         let mut kept_triangles = 0;
+        let mut geometric_error: f64 = 0.0;
         for part in largest_first {
             if !kept.is_empty() && kept_triangles >= triangle_budget {
+                geometric_error = geometric_error.max(geometric_error_for(&part.bounds));
                 break;
             }
-            let mut indices =
+            let (mut indices, simplification_error) =
                 self.simplified_indices(part, ratio, &mut simplified_first_occurrences);
             if indices.is_empty() {
                 indices = part.indices.to_vec();
+            } else if indices.len() < part.indices.len() {
+                geometric_error = geometric_error.max(simplification_error);
             }
             kept_triangles += indices.len() / 3;
             kept.push(TilePart {
@@ -942,7 +954,10 @@ impl<'a> GroupTiler<'a> {
                 bounds: part.bounds,
             });
         }
-        kept
+        ParentContent {
+            parts: kept,
+            geometric_error,
+        }
     }
 
     fn simplified_indices(
@@ -950,7 +965,7 @@ impl<'a> GroupTiler<'a> {
         part: &TilePart<'a>,
         ratio: f32,
         simplified_first_occurrences: &mut HashMap<usize, Vec<u32>>,
-    ) -> Vec<u32> {
+    ) -> (Vec<u32>, f64) {
         let elements = &self.group.elements;
         let repeated = part.whole_element.and_then(|element_index| {
             let element = &elements[element_index];
@@ -960,15 +975,15 @@ impl<'a> GroupTiler<'a> {
         });
         // simplify_mesh's error limit is a fraction of the side it gets, and the group's side collapses small elements to nothing
         let Some((element, repeated)) = repeated else {
-            return simplify_mesh(
-                &self.simplification_positions,
-                &part.indices,
-                ratio,
-                part.bounds.max_extent() as f32,
+            let side = part.bounds.max_extent() as f32;
+            return (
+                simplify_mesh(&self.simplification_positions, &part.indices, ratio, side),
+                f64::from(SIMPLIFICATION_ERROR_FRACTION * side),
             );
         };
 
         let first = &elements[repeated.first_occurrence];
+        let side = first.bounds.max_extent() as f32;
         let first_indices = simplified_first_occurrences
             .entry(repeated.first_occurrence)
             .or_insert_with(|| {
@@ -976,13 +991,14 @@ impl<'a> GroupTiler<'a> {
                     &self.simplification_positions,
                     &self.group.indices[first.indices.clone()],
                     ratio,
-                    first.bounds.max_extent() as f32,
+                    side,
                 )
             });
-        first_indices
+        let indices = first_indices
             .iter()
             .map(|index| index - first.vertices.start + element.vertices.start)
-            .collect()
+            .collect();
+        (indices, f64::from(SIMPLIFICATION_ERROR_FRACTION * side))
     }
 
     fn leaf(
@@ -1845,6 +1861,47 @@ mod tests {
             lod_tris < 8192,
             "LOD mesh should have fewer triangles, got {lod_tris}"
         );
+    }
+
+    fn errors_never_grow_toward_the_leaves(tile: &Tile) {
+        for child in &tile.children {
+            assert!(
+                child.geometric_error <= tile.geometric_error,
+                "child error {} above parent error {}",
+                child.geometric_error,
+                tile.geometric_error
+            );
+            errors_never_grow_toward_the_leaves(child);
+        }
+    }
+
+    #[test]
+    fn a_parent_error_is_the_largest_element_it_leaves_out() {
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 100,
+            ..Default::default()
+        };
+        let cubes: Vec<MeshData> = (0..50)
+            .map(|index| {
+                let mut cube = cube_mesh();
+                for position in &mut cube.positions {
+                    position[0] += 2.0 * index as f64;
+                }
+                cube
+            })
+            .collect();
+
+        let written = write_tileset(&cubes, &config);
+
+        let unit_cube_half_diagonal = 0.75_f64.sqrt();
+        let root = &written.tileset.root;
+        assert!(!root.children.is_empty());
+        assert!(
+            (root.geometric_error - unit_cube_half_diagonal).abs() < 1e-2,
+            "root error {}",
+            root.geometric_error
+        );
+        errors_never_grow_toward_the_leaves(root);
     }
 
     #[test]

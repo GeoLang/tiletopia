@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 2026-11-06: a mesh tileset's parent tile carries the error of its own content:
+  the largest half diagonal among the parts it leaves out, or the simplification
+  limit of a part it keeps, and never less than a child's. It was half the
+  diagonal of the tile's box, so Cesium refined every branch to its leaves. The
+  first view of the 262 MB `balconies-a2` IFC fetches 78 MB in 44 requests
+  instead of 622 MB in 452, holds 188 MB of geometry instead of 984 MB, and
+  draws at 378 fps instead of 76 on an RTX 2080 Ti. Tilesets written before this
+  need a re-tile.
 - 2026-11-05: `GET /v1/assets/{id}/section` and `GET /v1/assets/{id}/dxf` read
   an IFC in the tileset's frame for every model. A map-converted IFC that is
   tiled with each vertex moved into the east-north-up frame was cut and

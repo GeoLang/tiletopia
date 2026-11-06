@@ -31,6 +31,8 @@ pub fn optimize_mesh(vertices: &mut Vec<[f32; 3]>, indices: &mut Vec<u32>) {
     *vertices = meshopt::remap_vertex_buffer(vertices, vertices.len(), &remap);
 }
 
+pub const SIMPLIFICATION_ERROR_FRACTION: f32 = 1e-2;
+
 /// Simplify a mesh by reducing triangle count while preserving shape.
 ///
 /// `target_ratio` is the fraction of triangles to keep (0.0–1.0).
@@ -52,7 +54,7 @@ pub fn simplify_mesh(
         indices,
         &vertex_adapter,
         target_count,
-        1e-2 * mesh_longest_side,
+        SIMPLIFICATION_ERROR_FRACTION * mesh_longest_side,
         meshopt::SimplifyOptions::Sparse | meshopt::SimplifyOptions::ErrorAbsolute,
         None,
     )
