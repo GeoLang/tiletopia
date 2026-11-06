@@ -14,6 +14,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::upload::slash_separated;
+
 /// Export format options.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ExportFormat {
@@ -742,11 +744,7 @@ fn zip_tree(dir: &std::path::Path, path: &std::path::Path) -> Result<(), String>
                 continue;
             }
             // zip entry names are '/'-separated whatever the host uses
-            let name = entry_path
-                .strip_prefix(dir)
-                .map_err(|e| e.to_string())?
-                .to_string_lossy()
-                .replace('\\', "/");
+            let name = slash_separated(entry_path.strip_prefix(dir).map_err(|e| e.to_string())?);
             zip.start_file(name, opts).map_err(|e| e.to_string())?;
             let mut source = std::fs::File::open(&entry_path).map_err(read_failed)?;
             std::io::copy(&mut source, &mut zip).map_err(read_failed)?;

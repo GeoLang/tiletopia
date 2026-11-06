@@ -21,7 +21,7 @@ use crate::imagery::{self, ImageryForm, PreparedUpload};
 use crate::ion_compat::{IonAsset, IonError, ion_error, resolve_asset, to_ion_asset};
 use crate::job_queue::{is_splat_capture, stored_input_path};
 use crate::photogrammetry::PhotogrammetryPreset;
-use crate::upload::lowercase_extension;
+use crate::upload::{lowercase_extension, slash_separated};
 use crate::users::to_hex;
 use crate::zip_unpack::unpack_zip;
 use crate::{
@@ -571,20 +571,11 @@ async fn fail_upload(state: &AppState, mut asset: Asset, answer: IonError) -> Io
     answer
 }
 
-fn upload_name(relative_path: &Path) -> String {
-    // zip entry names are '/'-separated whatever the host uses
-    relative_path
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 fn named_files<P: AsRef<Path>>(paths: &[P]) -> String {
     let mut names: Vec<String> = paths
         .iter()
         .take(MOST_NAMED_FILES)
-        .map(|path| upload_name(path.as_ref()))
+        .map(|path| slash_separated(path.as_ref()))
         .collect();
     if paths.len() > MOST_NAMED_FILES {
         names.push(format!("and {} more", paths.len() - MOST_NAMED_FILES));
@@ -797,7 +788,7 @@ pub(crate) async fn upload_complete(
             return Err(fail_upload(&state, asset, answer).await);
         }
     };
-    let file_name = upload_name(main_file);
+    let file_name = slash_separated(main_file);
     let extension = lowercase_extension(main_file);
 
     // the mesh readers refuse a sidecar path that climbs out of the main file's directory

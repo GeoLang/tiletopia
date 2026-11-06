@@ -22,7 +22,7 @@ use crate::db::Database;
 use crate::elements::{element_error, permitted_asset, server_failure};
 use crate::ion_compat::IonError;
 use crate::job_queue::job_with_input_in_asset_dir;
-use crate::upload::{lowercase_extension, write_field};
+use crate::upload::{lowercase_extension, slash_separated, write_field};
 use crate::{AppState, Asset, AssetStatus, may_modify_asset, may_view_asset, scratch_files, users};
 
 pub const IDS_CHECK_URL_ENV: &str = "TILETOPIA_IDS_CHECK_URL";
@@ -236,11 +236,7 @@ async fn ifc_source_in_data_dir(
         ))
     })?;
     // the ids-check sidecar is a linux container whatever this server runs on
-    Ok(relative
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/"))
+    Ok(slash_separated(relative))
 }
 
 async fn receive_ids_file(multipart: &mut Multipart, upload: &Path) -> Result<String, IonError> {

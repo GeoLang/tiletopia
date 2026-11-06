@@ -139,6 +139,13 @@ pub(crate) fn lowercase_extension(path: &Path) -> String {
         .to_lowercase()
 }
 
+pub(crate) fn slash_separated(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 pub(crate) async fn prepare_input(
     state: &AppState,
     input_path: &Path,
