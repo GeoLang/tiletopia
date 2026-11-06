@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 2026-11-06: a mesh whose corner normals all lie within 2.5° of their face
+  normal, or that has no normals, is welded by position and texture coordinate
+  and written without `NORMAL`. Curved elements keep their normals. The
+  `balconies-a2` tileset went from 89 MB to 54 MB decompressed, 31 MB served
+  with brotli, and its first view fetches 2.3 MB instead of 4.4 MB. Cesium
+  clients other than viewtopia draw welded tiles unlit.
+- 2026-11-06: an IFC model tiles with `ADD` refinement. Each element is stored
+  once, whole, largest first, in the shallowest tile with room under
+  `max_triangles_per_tile`, and a tile's geometric error is half the diagonal
+  of the largest part left to its children. Elements too large for one tile
+  are cut into spatial chunks. Meshes without an IFC element id keep
+  simplification and `REPLACE`. The `balconies-a2` tileset went from 246 MB to
+  89 MB decompressed.
+- 2026-11-06: meshopt tiles store `NORMAL` and `EXT_mesh_primitive_edge_visibility`
+  silhouette normals as 8-bit octahedral, indices as `UNSIGNED_SHORT` when a
+  primitive has at most 65,536 vertices, and positions of non-instanced nodes as
+  uint16 with one step over the primitive's box, carried by the node's
+  translation and scale. These tiles require `KHR_mesh_quantization`. The
+  normals alone took the `balconies-a2` tileset from 622 MB to 374 MB and
+  `restage-demonstrator` from 359 MB to 182 MB. Draco and uncompressed tiles
+  are unchanged.
+
 - 2026-11-06: a mesh tileset's parent tile carries the error of its own content:
   the largest half diagonal among the parts it leaves out, or the simplification
   limit of a part it keeps, and never less than a child's. It was half the
@@ -104,6 +126,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 2026-11-06: `tileset.json`, `tiles/{path}` and `data/{path}` responses are
+  compressed with brotli at quality 5, or gzip, when the request accepts it.
+  Brotli serves the `balconies-a2` tiles 40% smaller.
+- 2026-11-06: IFC tiles carry a colour per element as `COLOR_0`, from the
+  element's styled item, then its material, then a default for its IFC type.
+  Translucent elements go in a second material group with `alphaMode: BLEND`,
+  and instanced meshes carry the colour too. Tiles were grey before. Tilesets
+  written before this need a re-tile.
 - 2026-11-05: `GET /v1/assets/{id}/section?axis=&position=` answers each IFC
   element's cross-section on the plane where `x`, `y` or `z` equals `position`,
   as polygons of rings in the tileset's local frame, outer ring first and holes

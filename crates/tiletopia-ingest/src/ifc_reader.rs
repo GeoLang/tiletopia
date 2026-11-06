@@ -11,6 +11,10 @@ use ifc_lite_geometry::representation::{Select, product_shape};
 use ifc_lite_geometry::{
     GeometryRouter, Mesh, format_unsupported_breakdown, void_index_from_content,
 };
+use ifc_lite_processing::prepass::{PrepassSpans, ResolveOptions, resolve_prepass};
+use ifc_lite_processing::style::{
+    Rgba, default_color_for_type, element_material_fallback_color, resolve_element_color,
+};
 use memmap2::Mmap;
 use std::path::Path;
 use tiletopia_core::bounding_volume::Aabb;
@@ -140,6 +144,25 @@ pub fn read_elements(source: &[u8], max_bytes_held: u64) -> Result<IfcElements, 
     let axis_factors = axis_factors_resizing_the_model(source)?;
     let void_index = void_index_from_content(source, &mut decoder);
 
+    let mut style_spans = PrepassSpans::default();
+    let mut style_scanner = EntityScanner::new(source);
+    while let Some((id, type_name, start, end)) = style_scanner.next_entity() {
+        style_spans.stash(type_name, id, start, end);
+    }
+    let styles = resolve_prepass(
+        &style_spans,
+        &mut decoder,
+        ResolveOptions {
+            collect_indexed_colour_full: false,
+            defer_attached_styles: false,
+        },
+    );
+    let geometry_colors = styles
+        .geometry_style_index
+        .iter()
+        .map(|(geometry_id, style)| (*geometry_id, style.color))
+        .collect();
+
     let mut meshes = Vec::new();
     let mut bytes_held = 0u64;
     let mut dropped = DroppedElements::default();
@@ -196,6 +219,20 @@ pub fn read_elements(source: &[u8], max_bytes_held: u64) -> Result<IfcElements, 
             dropped.record(format!("{type_name} #{id}: no triangles"));
         }
 
+        let color = resolve_element_color(&entity, &geometry_colors, &mut decoder)
+            .or_else(|| {
+                styles
+                    .element_material_colors
+                    .get(&id)
+                    .and_then(|colors| element_material_fallback_color(colors))
+            })
+            .map_or_else(|| default_color_for_type(ifc_type), Rgba::from_array);
+        let mut element_color = color.to_rgba8();
+        // ifc-lite draws alpha from 0.95 up as opaque
+        if !color.is_transparent() {
+            element_color[3] = u8::MAX;
+        }
+
         for part in parts.into_iter().filter(|part| !part.is_empty()) {
             let mesh = MeshData {
                 // ifc-lite stores vertices relative to Mesh.origin for far or void-cut hosts
@@ -219,6 +256,7 @@ pub fn read_elements(source: &[u8], max_bytes_held: u64) -> Result<IfcElements, 
                 asset_id: entity.get_string(GLOBAL_ID_INDEX).map(str::to_string),
                 class: None,
                 storey: None,
+                element_color: Some(element_color),
             };
             bytes_held = bytes_held.saturating_add(bytes_held_by_mesh(&mesh));
             if bytes_held > max_bytes_held {
@@ -867,6 +905,51 @@ END-ISO-10303-21;
         assert!(!first.indices.is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn surface_styles_colour_elements_and_only_clear_ones_stay_translucent() {
+        let source = ifc_file(
+            "#1=IFCPROJECT('0001',$,'Project',$,$,$,$,$,$);
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCLOCALPLACEMENT($,#11);
+#13=IFCDIRECTION((0.,0.,1.));
+#20=IFCRECTANGLEPROFILEDEF(.AREA.,$,#11,2.0,1.0);
+#21=IFCEXTRUDEDAREASOLID(#20,#11,#13,3.0);
+#22=IFCEXTRUDEDAREASOLID(#20,#11,#13,3.0);
+#23=IFCEXTRUDEDAREASOLID(#20,#11,#13,3.0);
+#30=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#21));
+#31=IFCPRODUCTDEFINITIONSHAPE($,$,(#30));
+#32=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#22));
+#33=IFCPRODUCTDEFINITIONSHAPE($,$,(#32));
+#34=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#23));
+#35=IFCPRODUCTDEFINITIONSHAPE($,$,(#34));
+#40=IFCPLATE('pane',$,'Pane',$,$,#12,#31,$,$);
+#41=IFCSLAB('slab',$,'Slab',$,$,#12,#33,$,$);
+#42=IFCWALL('wall',$,'Wall',$,$,#12,#35,$,$);
+#50=IFCCOLOURRGB($,0.2,0.4,0.6);
+#51=IFCSURFACESTYLERENDERING(#50,0.6,$,$,$,$,$,$,.NOTDEFINED.);
+#52=IFCSURFACESTYLE('glass',.BOTH.,(#51));
+#53=IFCSTYLEDITEM(#21,(#52),$);
+#60=IFCCOLOURRGB($,0.4,0.4,0.4);
+#61=IFCSURFACESTYLERENDERING(#60,0.02,$,$,$,$,$,$,.NOTDEFINED.);
+#62=IFCSURFACESTYLE('concrete',.BOTH.,(#61));
+#63=IFCSTYLEDITEM(#22,(#62),$);",
+        );
+
+        let elements = read_elements(&source, u64::MAX).expect("the styled model should read");
+        let color_of = |global_id: &str| {
+            elements
+                .meshes
+                .iter()
+                .find(|mesh| mesh.asset_id.as_deref() == Some(global_id))
+                .and_then(|mesh| mesh.element_color)
+                .unwrap_or_else(|| panic!("{global_id} has a coloured mesh"))
+        };
+        assert_eq!(color_of("pane"), [51, 102, 153, 102]);
+        assert_eq!(color_of("slab"), [102, 102, 102, 255]);
+        assert_eq!(color_of("wall"), [217, 217, 217, 255]);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use draco_gltf::{ComponentType, MeshIndex, PackedGeometry, PrimitiveIndex, ValidationProfile};
+use draco_gltf::{ComponentType, MeshIndex, PrimitiveIndex, ValidationProfile};
 use serde_json::Value;
 use tiletopia_core::glb_writer::{
     GlbMesh, InstancedMesh, MeshCompression, MetadataProperty, MetadataValues, TextureData,
@@ -8,6 +8,7 @@ use tiletopia_core::mesh_tiler::{MeshData, MeshTilingConfig, tile_meshes};
 
 const GRID_QUADS_PER_SIDE: u32 = 16;
 const UNREFERENCED_VERTEX_X: f32 = 1000.0;
+const UNREFERENCED_VERTEX_COUNT: u32 = 5;
 const ASSET_IDS: [&str; 2] = ["asset-a", "asset-b"];
 
 #[derive(Clone, Copy, Debug)]
@@ -26,9 +27,10 @@ struct Tolerance {
     texcoord: f32,
 }
 
-const LOSSLESS: Tolerance = Tolerance {
-    position: 0.0,
-    normal: 0.0,
+// these are half a 16 bit step over the grid and its unreferenced vertices, and one 8 bit octahedral step on a unit normal
+const MESHOPT: Tolerance = Tolerance {
+    position: (UNREFERENCED_VERTEX_X + UNREFERENCED_VERTEX_COUNT as f32) / 65535.0 / 2.0 * 1.01,
+    normal: 0.02,
     texcoord: 0.0,
 };
 
@@ -102,7 +104,7 @@ fn grid_mesh_with_unreferenced_vertices() -> GlbMesh {
     let mut corners: Vec<Corner> = (0..side)
         .flat_map(|z| (0..side).map(move |x| grid_corner(x, z)))
         .collect();
-    for extra in 0..5 {
+    for extra in 0..UNREFERENCED_VERTEX_COUNT {
         corners.push(Corner {
             position: [UNREFERENCED_VERTEX_X + extra as f32, 0.0, 0.0],
             ..corners[0]
@@ -165,60 +167,196 @@ fn written_triangles(mesh: &GlbMesh) -> Vec<[Corner; 3]> {
         .collect()
 }
 
-fn attribute_values<T: bytemuck::Pod>(geometry: &PackedGeometry, semantic: &str) -> Vec<T> {
-    let attribute = geometry
-        .attributes()
-        .iter()
-        .find(|attribute| attribute.semantic() == semantic)
-        .unwrap_or_else(|| panic!("the tile decodes to no {semantic}"));
-    bytemuck::pod_collect_to_vec(attribute.bytes())
+struct DecodedAttribute {
+    semantic: String,
+    component_type: u32,
+    bytes: Vec<u8>,
 }
 
-fn decoded_feature_ids(geometry: &PackedGeometry) -> Vec<u32> {
-    let attribute = geometry
-        .attributes()
-        .iter()
-        .find(|attribute| attribute.semantic() == "_FEATURE_ID_0")
-        .expect("decoded feature ids");
-    let bytes = attribute.bytes();
-    // draco stores feature ids as UNSIGNED_SHORT or FLOAT and meshopt keeps UNSIGNED_INT
-    match attribute.component_type() {
-        ComponentType::U16 => bytemuck::pod_collect_to_vec::<u8, u16>(bytes)
-            .into_iter()
-            .map(u32::from)
-            .collect(),
-        ComponentType::U32 => bytemuck::pod_collect_to_vec(bytes),
-        ComponentType::F32 => bytemuck::pod_collect_to_vec::<u8, f32>(bytes)
-            .into_iter()
-            .map(|id| id as u32)
-            .collect(),
-        other => panic!("feature ids decoded as {other:?}"),
+struct DecodedPrimitive {
+    attributes: Vec<DecodedAttribute>,
+    indices: Vec<u32>,
+    positions: Vec<[f64; 3]>,
+}
+
+impl DecodedPrimitive {
+    fn attribute(&self, semantic: &str) -> &DecodedAttribute {
+        self.attributes
+            .iter()
+            .find(|attribute| attribute.semantic == semantic)
+            .unwrap_or_else(|| panic!("the tile decodes to no {semantic}"))
+    }
+
+    fn vertex_count(&self) -> usize {
+        self.positions.len()
+    }
+
+    fn positions_f32(&self) -> Vec<[f32; 3]> {
+        self.positions
+            .iter()
+            .map(|position| position.map(|component| component as f32))
+            .collect()
     }
 }
 
-fn decoded_mesh_geometry(glb: &[u8], mesh: usize) -> PackedGeometry {
-    draco_gltf::parse(glb, ValidationProfile::Gltf20)
-        .expect("draco-gltf parses the tile")
-        .read_primitive(PrimitiveIndex::new(MeshIndex::from(mesh), 0))
-        .expect("draco-gltf reads the primitive")
+fn attribute_values<T: bytemuck::Pod>(geometry: &DecodedPrimitive, semantic: &str) -> Vec<T> {
+    bytemuck::pod_collect_to_vec(&geometry.attribute(semantic).bytes)
 }
 
-fn decoded_geometry(glb: &[u8]) -> PackedGeometry {
+fn decoded_normals(geometry: &DecodedPrimitive) -> Vec<[f32; 3]> {
+    let attribute = geometry.attribute("NORMAL");
+    // meshopt tiles hold normalized BYTE normals under KHR_mesh_quantization, draco tiles hold floats
+    match attribute.component_type {
+        code if code == ComponentType::F32 as u32 => bytemuck::pod_collect_to_vec(&attribute.bytes),
+        code if code == ComponentType::I8 as u32 => attribute
+            .bytes
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|normal| normal.map(|component| (component as i8 as f32 / 127.0).max(-1.0)))
+            .collect(),
+        other => panic!("normals decoded with component type {other}"),
+    }
+}
+
+fn decoded_feature_ids(geometry: &DecodedPrimitive) -> Vec<u32> {
+    let attribute = geometry.attribute("_FEATURE_ID_0");
+    let bytes = &attribute.bytes;
+    // draco stores feature ids as UNSIGNED_SHORT or FLOAT and meshopt keeps UNSIGNED_INT
+    match attribute.component_type {
+        code if code == ComponentType::U16 as u32 => bytemuck::pod_collect_to_vec::<u8, u16>(bytes)
+            .into_iter()
+            .map(u32::from)
+            .collect(),
+        code if code == ComponentType::U32 as u32 => bytemuck::pod_collect_to_vec(bytes),
+        code if code == ComponentType::F32 as u32 => bytemuck::pod_collect_to_vec::<u8, f32>(bytes)
+            .into_iter()
+            .map(|id| id as u32)
+            .collect(),
+        other => panic!("feature ids decoded with component type {other}"),
+    }
+}
+
+fn positions_in_node_parent_frame(
+    document: &Value,
+    mesh: usize,
+    position: &DecodedAttribute,
+) -> Vec<[f64; 3]> {
+    let node = document["nodes"]
+        .as_array()
+        .expect("a nodes array")
+        .iter()
+        .find(|node| node["mesh"].as_u64() == Some(mesh as u64))
+        .expect("a node draws the mesh");
+    let translation = |axis: usize| node["translation"][axis].as_f64().unwrap_or(0.0);
+    let scale = |axis: usize| node["scale"][axis].as_f64().unwrap_or(1.0);
+    // meshopt tiles hold UNSIGNED_SHORT positions under KHR_mesh_quantization, draco and uncompressed tiles hold floats
+    let stored: Vec<[f64; 3]> = match position.component_type {
+        code if code == ComponentType::F32 as u32 => {
+            bytemuck::pod_collect_to_vec::<u8, [f32; 3]>(&position.bytes)
+                .into_iter()
+                .map(|position| position.map(f64::from))
+                .collect()
+        }
+        code if code == ComponentType::U16 as u32 => {
+            bytemuck::pod_collect_to_vec::<u8, [u16; 3]>(&position.bytes)
+                .into_iter()
+                .map(|position| position.map(f64::from))
+                .collect()
+        }
+        other => panic!("positions decoded with component type {other}"),
+    };
+    stored
+        .into_iter()
+        .map(|position| [0, 1, 2].map(|axis| translation(axis) + scale(axis) * position[axis]))
+        .collect()
+}
+
+fn decoded_mesh_geometry(glb: &[u8], mesh: usize) -> DecodedPrimitive {
+    let import =
+        draco_gltf::parse(glb, ValidationProfile::Gltf20).expect("draco-gltf parses the tile");
+    let (document, _) = glb_document(glb);
+    let primitive = &document["meshes"][mesh]["primitives"][0];
+    let (attributes, indices) = if primitive["extensions"]
+        .get("KHR_draco_mesh_compression")
+        .is_some()
+    {
+        let geometry = import
+            .read_primitive(PrimitiveIndex::new(MeshIndex::from(mesh), 0))
+            .expect("draco-gltf reads the primitive");
+        let attributes: Vec<DecodedAttribute> = geometry
+            .attributes()
+            .iter()
+            .map(|attribute| DecodedAttribute {
+                semantic: attribute.semantic().to_string(),
+                component_type: attribute.component_type() as u32,
+                bytes: attribute.bytes().to_vec(),
+            })
+            .collect();
+        let indices =
+            bytemuck::pod_collect_to_vec(geometry.indices().expect("decoded indices").bytes());
+        (attributes, indices)
+    } else {
+        // draco-gltf's read_primitive allows only float normals under Gltf20, even with KHR_mesh_quantization required
+        let source = import.accessor_source();
+        let read = |accessor: &Value| {
+            source
+                .read_accessor(accessor.as_u64().expect("an accessor index") as usize)
+                .expect("draco-gltf reads the accessor")
+        };
+        let attributes: Vec<DecodedAttribute> = primitive["attributes"]
+            .as_object()
+            .expect("an attributes object")
+            .iter()
+            .map(|(semantic, accessor)| {
+                let data = read(accessor);
+                DecodedAttribute {
+                    semantic: semantic.clone(),
+                    component_type: data.component_type,
+                    bytes: data.bytes,
+                }
+            })
+            .collect();
+        let index_data = read(&primitive["indices"]);
+        let indices = match index_data.component_type {
+            code if code == ComponentType::U32 as u32 => {
+                bytemuck::pod_collect_to_vec(&index_data.bytes)
+            }
+            code if code == ComponentType::U16 as u32 => {
+                bytemuck::pod_collect_to_vec::<u8, u16>(&index_data.bytes)
+                    .into_iter()
+                    .map(u32::from)
+                    .collect()
+            }
+            other => panic!("indices decoded with component type {other}"),
+        };
+        (attributes, indices)
+    };
+    let position = attributes
+        .iter()
+        .find(|attribute| attribute.semantic == "POSITION")
+        .expect("the tile decodes to no POSITION");
+    let positions = positions_in_node_parent_frame(&document, mesh, position);
+    DecodedPrimitive {
+        attributes,
+        indices,
+        positions,
+    }
+}
+
+fn decoded_geometry(glb: &[u8]) -> DecodedPrimitive {
     decoded_mesh_geometry(glb, 0)
-}
-
-fn decoded_indices(geometry: &PackedGeometry) -> Vec<u32> {
-    bytemuck::pod_collect_to_vec(geometry.indices().expect("decoded indices").bytes())
 }
 
 fn decoded_triangles(glb: &[u8]) -> Vec<[Corner; 3]> {
     let geometry = decoded_geometry(glb);
-    let positions: Vec<[f32; 3]> = attribute_values(&geometry, "POSITION");
-    let normals: Vec<[f32; 3]> = attribute_values(&geometry, "NORMAL");
+    let positions = geometry.positions_f32();
+    let normals = decoded_normals(&geometry);
     let texcoords: Vec<[f32; 2]> = attribute_values(&geometry, "TEXCOORD_0");
     let colors: Vec<[u8; 4]> = attribute_values(&geometry, "COLOR_0");
     let feature_ids = decoded_feature_ids(&geometry);
-    decoded_indices(&geometry)
+    geometry
+        .indices
         .as_chunks::<3>()
         .0
         .iter()
@@ -296,18 +434,14 @@ fn assert_required(document: &Value, extension: &str) {
 }
 
 #[test]
-fn meshopt_tile_decodes_exactly_and_follows_the_fallback_rules() {
+fn meshopt_tile_decodes_within_normal_quantization_and_follows_the_fallback_rules() {
     let mesh = grid_mesh_with_unreferenced_vertices();
     let glb = compressed(&mesh, MeshCompression::Meshopt);
     let mut plain = Vec::new();
     write_glb(&mesh, &mut plain).unwrap();
     assert!(glb.len() < plain.len(), "{} >= {}", glb.len(), plain.len());
 
-    assert_same_triangles(
-        &written_triangles(&mesh),
-        &decoded_triangles(&glb),
-        LOSSLESS,
-    );
+    assert_same_triangles(&written_triangles(&mesh), &decoded_triangles(&glb), MESHOPT);
 
     let (document, bin) = glb_document(&glb);
     assert_required(&document, "EXT_meshopt_compression");
@@ -387,6 +521,7 @@ fn meshopt_compresses_instance_attributes_and_they_decode_exactly() {
             instance_translations: translations.clone(),
             instance_rotations: Some(rotations.clone()),
             instance_feature_ids: Some(vec![0, 1, 2]),
+            colors: None,
         }],
         edge_visibility: None,
     };
@@ -465,7 +600,7 @@ fn draco_tile_decodes_within_quantization_and_drops_unreferenced_vertices() {
     assert!(indices_accessor.get("bufferView").is_none());
     assert_eq!(
         indices_accessor["count"].as_u64().unwrap() as usize,
-        decoded_indices(&geometry).len()
+        geometry.indices.len()
     );
 
     let positions: Vec<[f32; 3]> = attribute_values(&geometry, "POSITION");
@@ -611,8 +746,9 @@ fn degenerate_triangles_do_not_stop_either_encoder() {
         let mut glb = Vec::new();
         write_compressed_glb(&mesh, compression, &mut glb).unwrap();
         let geometry = decoded_geometry(&glb);
-        let positions: Vec<[f32; 3]> = attribute_values(&geometry, "POSITION");
-        let triangles: Vec<[[f32; 3]; 3]> = decoded_indices(&geometry)
+        let positions = geometry.positions_f32();
+        let triangles: Vec<[[f32; 3]; 3]> = geometry
+            .indices
             .as_chunks::<3>()
             .0
             .iter()
@@ -633,20 +769,6 @@ fn degenerate_triangles_do_not_stop_either_encoder() {
         for corner in &mesh.positions {
             assert!(reaches(&triangles, *corner), "{compression:?}: {corner:?}");
         }
-    }
-}
-
-fn leaf_tile_paths(
-    tile: &Value,
-    tiles_root: &std::path::Path,
-    found: &mut Vec<std::path::PathBuf>,
-) {
-    let children = tile["children"].as_array().map_or(&[][..], Vec::as_slice);
-    if children.is_empty() {
-        found.push(tiles_root.join(tile["content"]["uri"].as_str().unwrap()));
-    }
-    for child in children {
-        leaf_tile_paths(child, tiles_root, found);
     }
 }
 
@@ -675,6 +797,7 @@ fn split_tiles_of_either_compression_cover_the_mesh_with_only_their_own_vertices
         asset_id: Some("asset-a".into()),
         class: None,
         storey: None,
+        element_color: None,
         base_color_factor: None,
         texture: None,
     };
@@ -693,26 +816,26 @@ fn split_tiles_of_either_compression_cover_the_mesh_with_only_their_own_vertices
         };
         tile_meshes(std::slice::from_ref(&mesh), &dir, &config).expect("tiling should succeed");
 
-        let tileset: Value =
-            serde_json::from_slice(&std::fs::read(dir.join("tileset.json")).unwrap()).unwrap();
-        let mut leaves = Vec::new();
-        leaf_tile_paths(&tileset["root"], &dir, &mut leaves);
-        assert!(leaves.len() > 1, "the mesh should split");
+        let tiles: Vec<std::path::PathBuf> = std::fs::read_dir(dir.join("tiles"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert!(tiles.len() > 1, "the mesh should split");
 
-        let mut leaf_triangles = 0;
-        for leaf in &leaves {
-            let glb = std::fs::read(leaf).unwrap();
+        let mut tile_triangles = 0;
+        for tile in &tiles {
+            let glb = std::fs::read(tile).unwrap();
             let geometry = decoded_geometry(&glb);
-            let indices = decoded_indices(&geometry);
-            leaf_triangles += indices.len() / 3;
+            let indices = &geometry.indices;
+            tile_triangles += indices.len() / 3;
 
             let mut referenced = indices.clone();
             referenced.sort_unstable();
             referenced.dedup();
-            assert_eq!(geometry.vertex_count(), referenced.len(), "{leaf:?}");
+            assert_eq!(geometry.vertex_count(), referenced.len(), "{tile:?}");
             assert!(
                 geometry.vertex_count() < mesh.positions.len(),
-                "{leaf:?} carries the whole vertex array"
+                "{tile:?} carries the whole vertex array"
             );
 
             assert!(
@@ -721,7 +844,7 @@ fn split_tiles_of_either_compression_cover_the_mesh_with_only_their_own_vertices
                     .all(|feature_id| *feature_id == 0)
             );
         }
-        assert_eq!(leaf_triangles, mesh.indices.len() / 3, "{compression:?}");
+        assert_eq!(tile_triangles, mesh.indices.len() / 3, "{compression:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -768,6 +891,7 @@ fn element_grid(origin: [f64; 3], first_x: u32, last_x: u32, asset_id: &str) -> 
         asset_id: Some(asset_id.to_string()),
         class: None,
         storey: None,
+        element_color: None,
         base_color_factor: None,
         texture: None,
     }
@@ -792,12 +916,6 @@ impl Drop for WrittenTiles {
 }
 
 impl WrittenTiles {
-    fn leaves(&self) -> Vec<std::path::PathBuf> {
-        let mut leaves = Vec::new();
-        leaf_tile_paths(&self.tileset["root"], &self.dir, &mut leaves);
-        leaves
-    }
-
     fn every_tile(&self) -> Vec<std::path::PathBuf> {
         std::fs::read_dir(self.dir.join("tiles"))
             .unwrap()
@@ -834,7 +952,6 @@ struct DecodedTile {
     bin: Vec<u8>,
     local_positions: Vec<[f32; 3]>,
     node_translation: [f64; 3],
-    indices: Vec<u32>,
     feature_ids: Vec<u32>,
 }
 
@@ -850,9 +967,14 @@ impl DecodedTile {
                 .expect("a tile's node has a translation")
         });
         Self {
-            local_positions: attribute_values(&geometry, "POSITION"),
+            local_positions: geometry
+                .positions
+                .iter()
+                .map(|position| {
+                    [0, 1, 2].map(|axis| (position[axis] - node_translation[axis]) as f32)
+                })
+                .collect(),
             node_translation,
-            indices: decoded_indices(&geometry),
             feature_ids: decoded_feature_ids(&geometry),
             document,
             bin,
@@ -927,74 +1049,27 @@ fn each_tile_table_lists_only_the_elements_with_triangles_in_that_tile() {
         let written = write_tiles(&meshes, &config);
 
         let tables: Vec<Vec<String>> = written
-            .leaves()
+            .every_tile()
             .iter()
-            .map(|leaf| {
-                let tile = DecodedTile::read(leaf);
+            .map(|path| {
+                let tile = DecodedTile::read(path);
                 tile.assert_the_table_has_one_row_per_feature_id();
                 tile.assert_every_vertex_sits_on_the_element_its_row_names();
                 tile.column("asset_id")
             })
             .collect();
 
-        let tiles_listing = |expected: &[&str]| {
+        let tiles_naming = |element: &str| {
             tables
                 .iter()
-                .filter(|table| table.as_slice() == expected)
+                .filter(|table| table.iter().any(|row| row == element))
                 .count()
         };
-        // x 16 to 24 holds the 80 triangle end of element-a whole and the start of element-b
-        assert_eq!(
-            tiles_listing(&["element-a", "element-b"]),
-            1,
-            "{compression:?}: {tables:?}"
-        );
         assert!(
-            tiles_listing(&["element-a"]) > 1,
+            tiles_naming("element-a") > 1,
             "{compression:?}: element-a's fragments should carry its id in several tiles: {tables:?}"
         );
-        assert!(
-            tiles_listing(&["element-b"]) > 0,
-            "{compression:?}: {tables:?}"
-        );
-        assert_eq!(
-            tiles_listing(&["element-a"])
-                + tiles_listing(&["element-b"])
-                + tiles_listing(&["element-a", "element-b"]),
-            tables.len(),
-            "{compression:?}: {tables:?}"
-        );
-    }
-}
-
-#[test]
-fn a_simplified_parent_keeps_every_surviving_vertex_on_its_own_element() {
-    let meshes = two_touching_elements([0.0; 3]);
-    let input_triangles: usize = meshes.iter().map(|mesh| mesh.indices.len() / 3).sum();
-    for compression in ALL_MESH_COMPRESSIONS {
-        let config = MeshTilingConfig {
-            max_triangles_per_tile: 100,
-            mesh_compression: compression,
-            ..Default::default()
-        };
-        let written = write_tiles(&meshes, &config);
-
-        let root = DecodedTile::read(&written.dir.join("tiles/root.glb"));
-        assert!(
-            root.indices.len() / 3 < input_triangles,
-            "{compression:?}: the root should be simplified"
-        );
-        root.assert_the_table_has_one_row_per_feature_id();
-        root.assert_every_vertex_sits_on_the_element_its_row_names();
-        assert_eq!(root.column("asset_id"), ["element-a", "element-b"]);
-        // meshoptimizer collapses a vertex only along an edge of its own triangles
-        for triangle in root.indices.as_chunks::<3>().0 {
-            let [first, second, third] = triangle.map(|corner| root.feature_ids[corner as usize]);
-            assert!(
-                first == second && second == third,
-                "{compression:?}: {triangle:?} spans two elements"
-            );
-        }
+        assert!(tiles_naming("element-b") > 0, "{compression:?}: {tables:?}");
     }
 }
 
@@ -1111,13 +1186,22 @@ fn class_and_storey_columns_line_up_with_asset_ids_in_a_tile_that_has_them() {
             ..Default::default()
         };
         let written = write_tiles(&meshes, &split);
-        let leaves = written.leaves();
-        assert_eq!(leaves.len(), 2, "{compression:?}: one leaf per element");
-        let wall_tile = DecodedTile::read(&leaves[0]);
+        let tiles: Vec<DecodedTile> = written
+            .every_tile()
+            .iter()
+            .map(|path| DecodedTile::read(path))
+            .collect();
+        assert_eq!(tiles.len(), 2, "{compression:?}: one tile per element");
+        let tile_of = |asset_id: &str| {
+            tiles
+                .iter()
+                .find(|tile| tile.column("asset_id") == [asset_id])
+                .unwrap_or_else(|| panic!("{compression:?}: a tile holding only {asset_id}"))
+        };
+        let wall_tile = tile_of("wall");
         assert_eq!(wall_tile.column_names(), ["asset_id", "class", "storey"]);
         assert_eq!(wall_tile.column("class"), ["IfcWall"]);
-        let plain_tile = DecodedTile::read(&leaves[1]);
-        assert_eq!(plain_tile.column_names(), ["asset_id"]);
+        assert_eq!(tile_of("plain").column_names(), ["asset_id"]);
     }
 }
 

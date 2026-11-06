@@ -111,6 +111,7 @@ pub fn read(path: &Path) -> Result<Vec<MeshData>, IngestError> {
             asset_id: None,
             class: None,
             storey: None,
+            element_color: None,
         });
     }
 

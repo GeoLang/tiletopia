@@ -539,6 +539,7 @@ mod tests {
             asset_id: Some("0box000000000000000000".to_string()),
             class: None,
             storey: None,
+            element_color: None,
         }
     }
 

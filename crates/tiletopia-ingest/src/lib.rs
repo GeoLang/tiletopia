@@ -21,9 +21,9 @@ pub mod usgs_dem_reader;
 
 use thiserror::Error;
 
-// MeshData and the tiler's material group each have 24 + 12 + 8 bytes of position, normal and texcoord a vertex, and the tiler holds 12 more for simplification
+// MeshData and the tiler's material group each have 24 + 12 + 8 bytes of position, normal and texcoord a vertex, and the tiler holds 12 more for simplification and 4 for colour
 // TODO: measure peak bytes per vertex on a large public model before changing this or JOB_BUDGET_BYTES
-const BYTES_HELD_PER_VERTEX: u64 = 100;
+const BYTES_HELD_PER_VERTEX: u64 = 104;
 const BYTES_HELD_PER_MESH: u64 =
     std::mem::size_of::<MeshData>() as u64 + tiletopia_core::mesh_tiler::TILER_BYTES_PER_MESH;
 
@@ -179,6 +179,7 @@ pub struct MeshData {
     pub asset_id: Option<String>,
     pub class: Option<String>,
     pub storey: Option<String>,
+    pub element_color: Option<[u8; 4]>,
 }
 
 /// The single material a `MeshData` is painted with.
@@ -214,6 +215,7 @@ impl From<MeshData> for tiletopia_core::mesh_tiler::MeshData {
             asset_id: mesh.asset_id,
             class: mesh.class,
             storey: mesh.storey,
+            element_color: mesh.element_color,
             base_color_factor,
             texture: texture.map(|texture| tiletopia_core::glb_writer::TextureData {
                 image_data: texture.image_data,

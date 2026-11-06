@@ -450,6 +450,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn asset_tiles_arrive_brotli_encoded_when_asked_and_plain_otherwise() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "brotli-reader@example.com").await;
+        let asset_id = seed_asset(&state, tiletopia_server::AssetType::Model).await;
+        let tile: Vec<u8> = b"glTF".iter().copied().cycle().take(4096).collect();
+        state
+            .store
+            .put(
+                &format!("{asset_id}/tiles/root.glb"),
+                axum::body::Bytes::from(tile.clone()),
+            )
+            .await
+            .unwrap();
+
+        let fetch = |accept_encoding: Option<&'static str>| {
+            let mut request = Request::builder()
+                .uri(format!("/api/v1/assets/{asset_id}/tiles/root.glb"))
+                .header("authorization", format!("Bearer {token}"));
+            if let Some(accept_encoding) = accept_encoding {
+                request = request.header("accept-encoding", accept_encoding);
+            }
+            router(Arc::clone(&state)).oneshot(request.body(Body::empty()).unwrap())
+        };
+
+        let encoded = fetch(Some("gzip, deflate, br")).await.unwrap();
+        assert_eq!(encoded.status(), StatusCode::OK);
+        assert_eq!(encoded.headers()["content-encoding"], "br");
+        let body = body_bytes(encoded).await;
+        assert!(body.len() < tile.len());
+        let mut decoded = Vec::new();
+        brotli::BrotliDecompress(&mut body.as_slice(), &mut decoded).unwrap();
+        assert_eq!(decoded, tile);
+
+        let plain = fetch(None).await.unwrap();
+        assert!(plain.headers().get("content-encoding").is_none());
+        assert_eq!(body_bytes(plain).await, tile);
+    }
+
+    #[tokio::test]
     async fn bundle_plain_tile_is_not_labelled_gzip() {
         let state = test_state().await;
         seed_terrain_bundle(&state.data_dir, "alps", bundle_layer_json());
@@ -5324,19 +5363,22 @@ END-ISO-10303-21;
         let unnamed = served_mesh_tile(&state, &token, &placement).await;
         assert_eq!(
             unnamed["extensionsRequired"],
-            serde_json::json!(["EXT_meshopt_compression"])
+            serde_json::json!(["KHR_mesh_quantization", "EXT_meshopt_compression"])
         );
 
-        for (value, extension) in [
-            ("meshopt", "EXT_meshopt_compression"),
-            ("draco", "KHR_draco_mesh_compression"),
+        for (value, extensions) in [
+            (
+                "meshopt",
+                &["KHR_mesh_quantization", "EXT_meshopt_compression"][..],
+            ),
+            ("draco", &["KHR_draco_mesh_compression"][..]),
         ] {
             let mut fields = placement.to_vec();
             fields.push(("mesh_compression", value));
             let tile = served_mesh_tile(&state, &token, &fields).await;
             assert_eq!(
                 tile["extensionsRequired"],
-                serde_json::json!([extension]),
+                serde_json::json!(extensions),
                 "{value}"
             );
         }
@@ -5720,9 +5762,19 @@ END-ISO-10303-21;
         let state = test_state().await;
         let token = bootstrap_editor(&state, "ktx2-mesh-editor@example.com").await;
 
-        for (value, extension) in [
-            ("meshopt", "EXT_meshopt_compression"),
-            ("draco", "KHR_draco_mesh_compression"),
+        for (value, extensions) in [
+            (
+                "meshopt",
+                &[
+                    "KHR_texture_basisu",
+                    "KHR_mesh_quantization",
+                    "EXT_meshopt_compression",
+                ][..],
+            ),
+            (
+                "draco",
+                &["KHR_texture_basisu", "KHR_draco_mesh_compression"][..],
+            ),
         ] {
             let (status, body) = upload_bytes_with_fields(
                 &state,
@@ -5752,7 +5804,7 @@ END-ISO-10303-21;
             let (json, texture) = root_tile_json_and_texture(&state, &token, asset_id).await;
             assert_eq!(
                 json["extensionsRequired"],
-                serde_json::json!(["KHR_texture_basisu", extension]),
+                serde_json::json!(extensions),
                 "{value}"
             );
             assert_eq!(json["images"][0]["mimeType"], "image/ktx2", "{value}");

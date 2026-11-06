@@ -221,6 +221,7 @@ mod tests {
             asset_id: None,
             class: None,
             storey: None,
+            element_color: None,
         }
     }
 

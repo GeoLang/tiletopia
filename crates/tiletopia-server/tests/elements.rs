@@ -93,6 +93,7 @@ fn wall_mesh() -> MeshData {
         asset_id: Some(OUTER_WALL.to_string()),
         class: None,
         storey: None,
+        element_color: None,
         base_color_factor: None,
         texture: None,
     }

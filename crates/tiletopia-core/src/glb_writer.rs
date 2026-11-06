@@ -20,7 +20,9 @@ const CHUNK_TYPE_BIN: u32 = 0x004E4942; // "BIN\0"
 
 pub(crate) const COMPONENT_FLOAT: u32 = 5126;
 const COMPONENT_UNSIGNED_INT: u32 = 5125;
+const COMPONENT_UNSIGNED_SHORT: u32 = 5123;
 pub(crate) const COMPONENT_UNSIGNED_BYTE: u32 = 5121;
+const COMPONENT_BYTE: u32 = 5120;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -35,6 +37,7 @@ pub const KTX2_MIME_TYPE: &str = "image/ktx2";
 const KTX2_TEXTURE_EXTENSION: &str = "KHR_texture_basisu";
 const EXT_INSTANCE_FEATURES: &str = "EXT_instance_features";
 const EXT_MESH_PRIMITIVE_EDGE_VISIBILITY: &str = "EXT_mesh_primitive_edge_visibility";
+const KHR_MESH_QUANTIZATION: &str = "KHR_mesh_quantization";
 
 pub struct EdgeVisibility {
     pub visibility: Vec<u8>,
@@ -49,6 +52,7 @@ pub struct InstancedMesh {
     pub instance_translations: Vec<[f32; 3]>,
     pub instance_rotations: Option<Vec<[f32; 4]>>,
     pub instance_feature_ids: Option<Vec<u32>>,
+    pub colors: Option<Vec<[u8; 4]>>,
 }
 
 /// Mesh data for GLB output.
@@ -279,6 +283,14 @@ fn property_table_count(metadata: &TileMetadata) -> usize {
         .unwrap_or(0)
 }
 
+fn vertex_colors(mesh: &GlbMesh) -> impl Iterator<Item = &[u8; 4]> {
+    let instanced = mesh
+        .instanced_meshes
+        .iter()
+        .filter_map(|instanced| instanced.colors.as_ref());
+    mesh.colors.iter().chain(instanced).flatten()
+}
+
 fn writes_direct_mesh(mesh: &GlbMesh) -> bool {
     !mesh.positions.is_empty() || mesh.instanced_meshes.is_empty()
 }
@@ -409,7 +421,8 @@ fn build_document(mesh: &GlbMesh, layout: &BufferLayout) -> serde_json::Value {
     let mut textures_json = Vec::new();
     let mut samplers_json = Vec::new();
     let mut materials_json = Vec::new();
-    if mesh.texture.is_some() || mesh.base_color_factor.is_some() {
+    let has_vertex_colors = vertex_colors(mesh).next().is_some();
+    if mesh.texture.is_some() || mesh.base_color_factor.is_some() || has_vertex_colors {
         let mut pbr = serde_json::json!({
             "metallicFactor": 0.0,
             "roughnessFactor": 1.0
@@ -453,7 +466,12 @@ fn build_document(mesh: &GlbMesh, layout: &BufferLayout) -> serde_json::Value {
             pbr["baseColorFactor"] = serde_json::json!(factor);
         }
 
-        materials_json.push(serde_json::json!({ "pbrMetallicRoughness": pbr }));
+        let mut material = serde_json::json!({ "pbrMetallicRoughness": pbr });
+        if vertex_colors(mesh).any(|color| color[3] < u8::MAX) {
+            // gltf draws alpha only under BLEND or MASK, its default OPAQUE ignores it
+            material["alphaMode"] = serde_json::json!("BLEND");
+        }
+        materials_json.push(material);
         primitive["material"] = serde_json::json!(0);
     }
 
@@ -763,6 +781,10 @@ const VERTEX_VIEW: AppendedView = AppendedView {
     target: Some(TARGET_ARRAY_BUFFER),
     byte_stride: Some(12),
 };
+const COLOR_VIEW: AppendedView = AppendedView {
+    target: Some(TARGET_ARRAY_BUFFER),
+    byte_stride: Some(4),
+};
 const INDEX_VIEW: AppendedView = AppendedView {
     target: Some(TARGET_ELEMENT_ARRAY_BUFFER),
     byte_stride: None,
@@ -850,6 +872,21 @@ fn append_instanced_meshes(
                 }),
             );
             attributes.insert("NORMAL".to_string(), serde_json::json!(normals));
+        }
+        if let Some(colors) = &instanced.colors {
+            let colors = append_accessor(
+                document,
+                bin,
+                bytemuck::cast_slice(colors),
+                COLOR_VIEW,
+                serde_json::json!({
+                    "componentType": COMPONENT_UNSIGNED_BYTE,
+                    "count": colors.len(),
+                    "type": "VEC4",
+                    "normalized": true
+                }),
+            );
+            attributes.insert("COLOR_0".to_string(), serde_json::json!(colors));
         }
         let indices = append_accessor(
             document,
@@ -1100,7 +1137,7 @@ fn primitive_geometries(mesh: &GlbMesh) -> Vec<PrimitiveGeometry<'_>> {
         .map(|instanced| PrimitiveGeometry {
             positions: &instanced.positions,
             normals: instanced.normals.as_deref(),
-            colors: None,
+            colors: instanced.colors.as_deref(),
             texcoords: None,
             feature_ids: None,
             indices: &instanced.indices,
@@ -1122,6 +1159,134 @@ fn instance_attribute_views(document: &serde_json::Value) -> HashSet<u64> {
             document["accessors"][accessor as usize]["bufferView"].as_u64()
         })
         .collect()
+}
+
+fn primitive_accessor_views(
+    document: &serde_json::Value,
+    accessor_of: impl Fn(&serde_json::Value) -> &serde_json::Value,
+) -> HashSet<u64> {
+    let Some(meshes) = document["meshes"].as_array() else {
+        return HashSet::new();
+    };
+    meshes
+        .iter()
+        .filter_map(|mesh| mesh["primitives"].as_array())
+        .flatten()
+        .filter_map(|primitive| accessor_of(primitive).as_u64())
+        .filter_map(|accessor| document["accessors"][accessor as usize]["bufferView"].as_u64())
+        .collect()
+}
+
+const OCTAHEDRAL_NORMAL_BITS: i32 = 8;
+const OCTAHEDRAL_NORMAL_STRIDE: usize = 4;
+
+fn octahedral_normals(float_normals: &[u8]) -> Vec<u8> {
+    let normals: Vec<[f32; 4]> = float_normals
+        .as_chunks::<12>()
+        .0
+        .iter()
+        .map(|normal| {
+            let [x, y, z]: [f32; 3] = bytemuck::pod_read_unaligned(normal);
+            [x, y, z, 0.0]
+        })
+        .collect();
+    bytemuck::cast_slice(&meshopt::encode_filter_oct::<i8>(
+        &normals,
+        OCTAHEDRAL_NORMAL_BITS,
+    ))
+    .to_vec()
+}
+
+const QUANTIZED_POSITION_STRIDE: usize = 8;
+
+struct QuantizedPositions {
+    bytes: Vec<u8>,
+    offset: [f64; 3],
+    step: f64,
+    highest: [u16; 3],
+}
+
+fn quantized_positions(float_positions: &[u8]) -> QuantizedPositions {
+    let positions: Vec<[f32; 3]> = bytemuck::pod_collect_to_vec(float_positions);
+    let (min, max) = compute_aabb(&positions);
+    let offset = min.map(f64::from);
+    let extent = (0..3)
+        .map(|axis| f64::from(max[axis]) - offset[axis])
+        .fold(0.0, f64::max);
+    // one step for all three axes keeps the node scale uniform, so normals keep their directions
+    let step = if extent > 0.0 {
+        extent / f64::from(u16::MAX)
+    } else {
+        1.0
+    };
+    let mut highest = [0; 3];
+    let mut bytes = Vec::with_capacity(positions.len() * QUANTIZED_POSITION_STRIDE);
+    for position in &positions {
+        let mut quantized = [0_u16; 4];
+        for axis in 0..3 {
+            quantized[axis] = ((f64::from(position[axis]) - offset[axis]) / step).round() as u16;
+            highest[axis] = highest[axis].max(quantized[axis]);
+        }
+        bytes.extend_from_slice(bytemuck::bytes_of(&quantized));
+    }
+    QuantizedPositions {
+        bytes,
+        offset,
+        step,
+        highest,
+    }
+}
+
+fn quantize_direct_positions(
+    document: &mut serde_json::Value,
+    bin: &[u8],
+) -> HashMap<u64, Vec<u8>> {
+    let mut quantized_views = HashMap::new();
+    let node_count = document["nodes"].as_array().map_or(0, Vec::len);
+    for node_index in 0..node_count {
+        let node = &document["nodes"][node_index];
+        if node["extensions"].get(EXT_MESH_GPU_INSTANCING).is_some() {
+            continue;
+        }
+        let Some(mesh) = node["mesh"].as_u64() else {
+            continue;
+        };
+        let accessor = document["meshes"][mesh as usize]["primitives"][0]["attributes"]["POSITION"]
+            .as_u64()
+            .expect("every primitive has positions") as usize;
+        let view = document["accessors"][accessor]["bufferView"]
+            .as_u64()
+            .expect("positions have a buffer view");
+        let quantized =
+            quantized_positions(view_bytes(&document["bufferViews"][view as usize], bin));
+
+        let accessor = &mut document["accessors"][accessor];
+        accessor["componentType"] = serde_json::json!(COMPONENT_UNSIGNED_SHORT);
+        accessor["min"] = serde_json::json!([0, 0, 0]);
+        accessor["max"] = serde_json::json!(quantized.highest);
+        let node = &mut document["nodes"][node_index];
+        let translation = node["translation"]
+            .as_array()
+            .map(|values| {
+                [0, 1, 2].map(|axis| values[axis].as_f64().expect("a translation component"))
+            })
+            .unwrap_or([0.0; 3]);
+        node["translation"] =
+            serde_json::json!([0, 1, 2].map(|axis| translation[axis] + quantized.offset[axis]));
+        node["scale"] = serde_json::json!([quantized.step, quantized.step, quantized.step]);
+        quantized_views.insert(view, quantized.bytes);
+    }
+    quantized_views
+}
+
+const UNSIGNED_SHORT_INDEX_VERTEX_LIMIT: usize = 1 << 16;
+
+struct StoredView {
+    encoded: Vec<u8>,
+    mode: &'static str,
+    filter: &'static str,
+    byte_stride: usize,
+    count: usize,
 }
 
 fn apply_meshopt(
@@ -1152,56 +1317,136 @@ fn apply_meshopt(
         })
         .collect();
     let instance_views = instance_attribute_views(document);
+    let silhouette_normal_views = primitive_accessor_views(document, |primitive| {
+        &primitive["extensions"][EXT_MESH_PRIMITIVE_EDGE_VISIBILITY]["silhouetteNormals"]
+    });
+    let normal_views: HashSet<u64> =
+        primitive_accessor_views(document, |primitive| &primitive["attributes"]["NORMAL"])
+            .union(&silhouette_normal_views)
+            .copied()
+            .collect();
+    let quantized_position_views = quantize_direct_positions(document, bin);
+    let mut short_index_views = HashSet::new();
     let views = document["bufferViews"]
         .as_array_mut()
         .expect("a bufferViews array");
     for (index, view) in views.iter_mut().enumerate() {
+        let view_index = index as u64;
         let bytes = view_bytes(view, bin);
         let target = view.get("target").and_then(serde_json::Value::as_u64);
-        if target.is_none() && !instance_views.contains(&(index as u64)) {
+        if target.is_none()
+            && !instance_views.contains(&view_index)
+            && !silhouette_normal_views.contains(&view_index)
+        {
             view["byteOffset"] = serde_json::json!(append_aligned(&mut packed, bytes));
             continue;
         }
 
-        let byte_stride = match view.get("byteStride").and_then(serde_json::Value::as_u64) {
-            Some(stride) => stride as usize,
-            // gltf views with no byteStride are tightly packed, one accessor element per stride
-            None => *element_bytes_by_view
-                .get(&(index as u64))
-                .expect("every targeted bufferView has an accessor"),
-        };
         let index_geometry = (target == Some(TARGET_ELEMENT_ARRAY_BUFFER)).then(|| {
             *geometry_by_index_view
-                .get(&(index as u64))
+                .get(&view_index)
                 .expect("every index view belongs to a primitive")
         });
-        let (encoded, mode) = match index_geometry {
-            None => (encode_meshopt_attribute(bytes, byte_stride), "ATTRIBUTES"),
-            // meshopt_encodeIndexBuffer rotates triangle corners, which moves each edge visibility value onto another edge
-            Some(geometry) if geometry.has_edge_visibility => (
-                meshopt::encode_index_sequence(geometry.indices, geometry.positions.len()),
-                "INDICES",
-            ),
-            Some(geometry) => (
-                meshopt::encode_index_buffer(geometry.indices, geometry.positions.len()),
-                "TRIANGLES",
-            ),
+        let stored = if let Some(geometry) = index_geometry {
+            let vertex_count = geometry.positions.len();
+            let encoded = if geometry.has_edge_visibility {
+                // meshopt_encodeIndexBuffer rotates triangle corners, which moves each edge visibility value onto another edge
+                meshopt::encode_index_sequence(geometry.indices, vertex_count)
+                    .map(|encoded| (encoded, "INDICES"))
+            } else {
+                meshopt::encode_index_buffer(geometry.indices, vertex_count)
+                    .map(|encoded| (encoded, "TRIANGLES"))
+            };
+            let (encoded, mode) = encoded.map_err(io::Error::other)?;
+            let byte_stride = if vertex_count <= UNSIGNED_SHORT_INDEX_VERTEX_LIMIT {
+                short_index_views.insert(view_index);
+                2
+            } else {
+                4
+            };
+            StoredView {
+                encoded,
+                mode,
+                filter: "NONE",
+                byte_stride,
+                count: geometry.indices.len(),
+            }
+        } else if let Some(positions) = quantized_position_views.get(&view_index) {
+            StoredView {
+                encoded: encode_meshopt_attribute(positions, QUANTIZED_POSITION_STRIDE)
+                    .map_err(io::Error::other)?,
+                mode: "ATTRIBUTES",
+                filter: "NONE",
+                byte_stride: QUANTIZED_POSITION_STRIDE,
+                count: positions.len() / QUANTIZED_POSITION_STRIDE,
+            }
+        } else if normal_views.contains(&view_index) {
+            let normals = octahedral_normals(bytes);
+            StoredView {
+                encoded: encode_meshopt_attribute(&normals, OCTAHEDRAL_NORMAL_STRIDE)
+                    .map_err(io::Error::other)?,
+                mode: "ATTRIBUTES",
+                filter: "OCTAHEDRAL",
+                byte_stride: OCTAHEDRAL_NORMAL_STRIDE,
+                count: normals.len() / OCTAHEDRAL_NORMAL_STRIDE,
+            }
+        } else {
+            let byte_stride = match view.get("byteStride").and_then(serde_json::Value::as_u64) {
+                Some(stride) => stride as usize,
+                // gltf views with no byteStride are tightly packed, one accessor element per stride
+                None => *element_bytes_by_view
+                    .get(&view_index)
+                    .expect("every compressed bufferView has an accessor"),
+            };
+            StoredView {
+                encoded: encode_meshopt_attribute(bytes, byte_stride).map_err(io::Error::other)?,
+                mode: "ATTRIBUTES",
+                filter: "NONE",
+                byte_stride,
+                count: bytes.len() / byte_stride,
+            }
         };
-        let encoded = encoded.map_err(io::Error::other)?;
 
+        let decoded_length = stored.count * stored.byte_stride;
         view["extensions"] = serde_json::json!({
             EXT_MESHOPT_COMPRESSION: {
                 "buffer": 0,
-                "byteOffset": append_aligned(&mut packed, &encoded),
-                "byteLength": encoded.len(),
-                "byteStride": byte_stride,
-                "count": bytes.len() / byte_stride,
-                "mode": mode
+                "byteOffset": append_aligned(&mut packed, &stored.encoded),
+                "byteLength": stored.encoded.len(),
+                "byteStride": stored.byte_stride,
+                "count": stored.count,
+                "mode": stored.mode,
+                "filter": stored.filter
             }
         });
         view["buffer"] = serde_json::json!(1);
         view["byteOffset"] = serde_json::json!(fallback_len);
-        fallback_len += align4(bytes.len());
+        view["byteLength"] = serde_json::json!(decoded_length);
+        if stored.filter == "OCTAHEDRAL" || quantized_position_views.contains_key(&view_index) {
+            view["byteStride"] = serde_json::json!(stored.byte_stride);
+        }
+        fallback_len += align4(decoded_length);
+    }
+
+    for accessor in document["accessors"]
+        .as_array_mut()
+        .expect("an accessors array")
+        .iter_mut()
+    {
+        let Some(view) = accessor["bufferView"].as_u64() else {
+            continue;
+        };
+        if short_index_views.contains(&view) {
+            accessor["componentType"] = serde_json::json!(COMPONENT_UNSIGNED_SHORT);
+        }
+        if normal_views.contains(&view) {
+            accessor["componentType"] = serde_json::json!(COMPONENT_BYTE);
+            accessor["normalized"] = serde_json::json!(true);
+        }
+    }
+    // byte normals and short positions are valid glTF only under KHR_mesh_quantization
+    if !normal_views.is_empty() || !quantized_position_views.is_empty() {
+        require_extension(document, KHR_MESH_QUANTIZATION);
     }
 
     document["buffers"] = serde_json::json!([
@@ -1874,6 +2119,119 @@ mod tests {
         let used = json["extensionsUsed"].as_array().unwrap();
         assert!(used.contains(&serde_json::json!(EXT_MESH_PRIMITIVE_EDGE_VISIBILITY)));
         assert!(json.get("extensionsRequired").is_none());
+    }
+
+    #[test]
+    fn meshopt_writes_short_indices_up_to_65536_vertices() {
+        for (vertex_count, component_type) in [
+            (1 << 16, COMPONENT_UNSIGNED_SHORT),
+            ((1 << 16) + 1, COMPONENT_UNSIGNED_INT),
+        ] {
+            let last = vertex_count as u32 - 1;
+            let indices = vec![0, 1, last, last, 1, 0];
+            let mesh = GlbMesh {
+                positions: (0..vertex_count)
+                    .map(|index| [index as f32, 0.0, (index % 2) as f32])
+                    .collect(),
+                indices: Some(indices.clone()),
+                ..triangle_mesh()
+            };
+            let mut buf = Vec::new();
+            write_compressed_glb(&mesh, MeshCompression::Meshopt, &mut buf).unwrap();
+
+            let glb = gltf::Glb::from_slice(&buf).expect("should parse GLB");
+            let json: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+            let bin = glb.bin.unwrap();
+            let accessor_index = json["meshes"][0]["primitives"][0]["indices"]
+                .as_u64()
+                .unwrap();
+            let accessor = &json["accessors"][accessor_index as usize];
+            assert_eq!(accessor["componentType"], component_type, "{vertex_count}");
+            let view = &json["bufferViews"][accessor["bufferView"].as_u64().unwrap() as usize];
+            let stream = &view["extensions"][EXT_MESHOPT_COMPRESSION];
+            let stride = if component_type == COMPONENT_UNSIGNED_SHORT {
+                2
+            } else {
+                4
+            };
+            assert_eq!(stream["byteStride"], stride, "{vertex_count}");
+            assert_eq!(view["byteLength"], stride * indices.len(), "{vertex_count}");
+            let offset = stream["byteOffset"].as_u64().unwrap() as usize;
+            let length = stream["byteLength"].as_u64().unwrap() as usize;
+            let decoded: Vec<u32> =
+                meshopt::decode_index_buffer(&bin[offset..offset + length], indices.len()).unwrap();
+            let mut decoded_triangles: Vec<[u32; 3]> = decoded.as_chunks::<3>().0.to_vec();
+            let mut written_triangles: Vec<[u32; 3]> = indices.as_chunks::<3>().0.to_vec();
+            // meshopt_encodeIndexBuffer may rotate a triangle's corners
+            for triangle in decoded_triangles
+                .iter_mut()
+                .chain(written_triangles.iter_mut())
+            {
+                let smallest = (0..3).min_by_key(|&corner| triangle[corner]).unwrap();
+                triangle.rotate_left(smallest);
+            }
+            decoded_triangles.sort_unstable();
+            written_triangles.sort_unstable();
+            assert_eq!(decoded_triangles, written_triangles, "{vertex_count}");
+        }
+    }
+
+    fn assert_octahedral_normals(encoded: &[u8], expected: &[[f32; 3]]) {
+        let mut decoded: Vec<[i8; 4]> =
+            meshopt::decode_vertex_buffer(encoded, expected.len()).unwrap();
+        meshopt::decode_filter_oct(&mut decoded);
+        for (decoded, original) in decoded.iter().zip(expected) {
+            for axis in 0..3 {
+                let value = f32::from(decoded[axis]) / 127.0;
+                assert!(
+                    (value - original[axis]).abs() < 0.02,
+                    "{decoded:?} for {original:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn meshopt_stores_vertex_and_silhouette_normals_octahedral() {
+        let normals = vec![[0.0, 0.0, 1.0], [0.6, 0.0, 0.8], [0.0, -1.0, 0.0]];
+        let mesh = GlbMesh {
+            normals: Some(normals.clone()),
+            ..triangle_with_edges()
+        };
+        let mut buf = Vec::new();
+        write_compressed_glb(&mesh, MeshCompression::Meshopt, &mut buf).unwrap();
+
+        let glb = gltf::Glb::from_slice(&buf).expect("should parse GLB");
+        let json: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+        let bin = glb.bin.unwrap();
+        let primitive = &json["meshes"][0]["primitives"][0];
+        let stream = |accessor: &serde_json::Value| {
+            let view = json["accessors"][accessor.as_u64().unwrap() as usize]["bufferView"]
+                .as_u64()
+                .unwrap();
+            let stream = &json["bufferViews"][view as usize]["extensions"][EXT_MESHOPT_COMPRESSION];
+            let offset = stream["byteOffset"].as_u64().unwrap() as usize;
+            let length = stream["byteLength"].as_u64().unwrap() as usize;
+            (stream, &bin[offset..offset + length])
+        };
+
+        let normal_accessor =
+            &json["accessors"][primitive["attributes"]["NORMAL"].as_u64().unwrap() as usize];
+        assert_eq!(normal_accessor["componentType"], COMPONENT_BYTE);
+        assert_eq!(normal_accessor["normalized"], true);
+        let required = json["extensionsRequired"].as_array().unwrap();
+        assert!(required.contains(&serde_json::json!(KHR_MESH_QUANTIZATION)));
+        let (normal_stream, encoded) = stream(&primitive["attributes"]["NORMAL"]);
+        assert_eq!(normal_stream["filter"], "OCTAHEDRAL");
+        assert_octahedral_normals(encoded, &normals);
+
+        let silhouette =
+            &primitive["extensions"][EXT_MESH_PRIMITIVE_EDGE_VISIBILITY]["silhouetteNormals"];
+        let (silhouette_stream, encoded) = stream(silhouette);
+        assert_eq!(silhouette_stream["filter"], "OCTAHEDRAL");
+        let silhouette_accessor = &json["accessors"][silhouette.as_u64().unwrap() as usize];
+        assert_eq!(silhouette_accessor["componentType"], COMPONENT_BYTE);
+        assert_octahedral_normals(encoded, &[[0.0, 0.0, 1.0], [0.0, 0.6, 0.8]]);
     }
 
     #[test]

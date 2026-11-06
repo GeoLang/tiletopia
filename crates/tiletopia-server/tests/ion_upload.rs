@@ -624,7 +624,11 @@ async fn a_model_tiles_at_the_position_and_compressions_of_the_create_call() {
     let document: Value = serde_json::from_slice(&glb.json).unwrap();
     assert_eq!(
         document["extensionsRequired"],
-        json!(["KHR_texture_basisu", "EXT_meshopt_compression"]),
+        json!([
+            "KHR_texture_basisu",
+            "KHR_mesh_quantization",
+            "EXT_meshopt_compression"
+        ]),
         "{document}"
     );
     assert_eq!(document["images"][0]["mimeType"], "image/ktx2");

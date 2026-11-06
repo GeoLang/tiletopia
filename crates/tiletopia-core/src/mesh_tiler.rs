@@ -41,6 +41,29 @@ pub struct MeshData {
     pub storey: Option<String>,
     pub base_color_factor: Option<[f32; 4]>,
     pub texture: Option<TextureData>,
+    pub element_color: Option<[u8; 4]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VertexColors {
+    Absent,
+    Opaque,
+    Translucent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shading {
+    FromNormals,
+    FromFaces,
+}
+
+// 2.5 degrees
+const LEAST_COSINE_OF_A_FACE_NORMAL: f64 = 0.999;
+
+struct WeldedGeometry {
+    positions: Vec<[f64; 3]>,
+    texcoords: Vec<[f32; 2]>,
+    indices: Vec<u32>,
 }
 
 /// The `EXT_structural_metadata` class and property the tiler writes asset ids
@@ -51,6 +74,78 @@ const FEATURE_COLUMN_NAMES: [&str; 3] = ["asset_id", "class", "storey"];
 impl MeshData {
     fn feature_columns(&self) -> [&Option<String>; FEATURE_COLUMN_NAMES.len()] {
         [&self.asset_id, &self.class, &self.storey]
+    }
+
+    fn vertex_colors(&self) -> VertexColors {
+        match self.element_color {
+            None => VertexColors::Absent,
+            Some(color) if color[3] < u8::MAX => VertexColors::Translucent,
+            Some(_) => VertexColors::Opaque,
+        }
+    }
+
+    fn shading(&self) -> Shading {
+        if self.normals.len() != self.positions.len() {
+            return Shading::FromFaces;
+        }
+        let corner_follows_its_face = |corners: &[u32; 3]| {
+            let [first, second, third] = corners.map(|corner| self.positions[corner as usize]);
+            let face = cross(subtract(second, first), subtract(third, first));
+            let face_length = dot(face, face).sqrt();
+            if face_length == 0.0 {
+                return true;
+            }
+            corners.iter().all(|&corner| {
+                let normal = self.normals[corner as usize].map(f64::from);
+                let normal_length = dot(normal, normal).sqrt();
+                normal_length > 0.0
+                    && dot(normal, face) / (normal_length * face_length)
+                        >= LEAST_COSINE_OF_A_FACE_NORMAL
+            })
+        };
+        if self
+            .indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .all(corner_follows_its_face)
+        {
+            Shading::FromFaces
+        } else {
+            Shading::FromNormals
+        }
+    }
+
+    fn welded_by_position(&self) -> WeldedGeometry {
+        let has_texcoords = self.texcoords.len() == self.positions.len();
+        let mut welded = WeldedGeometry {
+            positions: Vec::new(),
+            texcoords: Vec::new(),
+            indices: Vec::with_capacity(self.indices.len()),
+        };
+        let mut welded_index: HashMap<([u64; 3], [u32; 2]), u32> = HashMap::new();
+        for &vertex in &self.indices {
+            let position = self.positions[vertex as usize];
+            let texcoord = if has_texcoords {
+                self.texcoords[vertex as usize]
+            } else {
+                [0.0; 2]
+            };
+            // f64 negative zero has other bits than positive zero
+            let key = (
+                position.map(|component| (component + 0.0).to_bits()),
+                texcoord.map(|component| (component + 0.0).to_bits()),
+            );
+            let index = *welded_index.entry(key).or_insert_with(|| {
+                welded.positions.push(position);
+                if has_texcoords {
+                    welded.texcoords.push(texcoord);
+                }
+                welded.positions.len() as u32 - 1
+            });
+            welded.indices.push(index);
+        }
+        welded
     }
 }
 
@@ -122,6 +217,7 @@ struct WrittenMeshTile {
     content_uri: Option<String>,
     content_triangle_count: usize,
     children: Vec<WrittenMeshTile>,
+    refine: Refine,
 }
 
 /// Full pipeline: build tree from meshes and write tiles to disk.
@@ -197,13 +293,9 @@ fn write_mesh_tiles(
             content_uri: None,
             content_triangle_count: 0,
             children: Vec::new(),
+            refine: Refine::Replace,
         }),
-        [tiler] => tiler.tile(
-            tiler.whole_element_parts(),
-            tiler.group_bounds,
-            0,
-            &mut path,
-        ),
+        [tiler] => tiler.tile_group(0, &mut path),
         tilers => {
             // glb_writer writes one material per tile
             let mut bounds = Aabb::empty();
@@ -212,12 +304,7 @@ fn write_mesh_tiles(
                 bounds.expand_point(tiler.group_bounds.min);
                 bounds.expand_point(tiler.group_bounds.max);
                 path.push(index as u8);
-                children.push(tiler.tile(
-                    tiler.whole_element_parts(),
-                    tiler.group_bounds,
-                    1,
-                    &mut path,
-                )?);
+                children.push(tiler.tile_group(1, &mut path)?);
                 path.pop();
             }
             Ok(WrittenMeshTile {
@@ -226,6 +313,7 @@ fn write_mesh_tiles(
                 content_uri: None,
                 content_triangle_count: 0,
                 children,
+                refine: Refine::Replace,
             })
         }
     }
@@ -242,6 +330,9 @@ struct MaterialGroup {
     indices: Vec<u32>,
     feature_ids: Vec<u32>,
     feature_rows: Vec<[String; FEATURE_COLUMN_NAMES.len()]>,
+    colors: Vec<[u8; 4]>,
+    vertex_colors: VertexColors,
+    shading: Shading,
     base_color_factor: Option<[f32; 4]>,
     texture: Option<TextureData>,
     elements: Vec<GroupElement>,
@@ -281,7 +372,23 @@ fn group_by_material(meshes: &[MeshData]) -> Vec<MaterialGroup> {
         if mesh.positions.is_empty() {
             continue;
         }
-        let group = match groups.iter().position(|group| group.takes(mesh)) {
+        let shading = mesh.shading();
+        let welded = (shading == Shading::FromFaces).then(|| mesh.welded_by_position());
+        let (positions, normals, texcoords, indices) = match &welded {
+            Some(welded) => (
+                welded.positions.as_slice(),
+                &[][..],
+                welded.texcoords.as_slice(),
+                welded.indices.as_slice(),
+            ),
+            None => (
+                mesh.positions.as_slice(),
+                mesh.normals.as_slice(),
+                mesh.texcoords.as_slice(),
+                mesh.indices.as_slice(),
+            ),
+        };
+        let group = match groups.iter().position(|group| group.takes(mesh, shading)) {
             Some(index) => &mut groups[index],
             None => {
                 groups.push(MaterialGroup {
@@ -291,6 +398,9 @@ fn group_by_material(meshes: &[MeshData]) -> Vec<MaterialGroup> {
                     indices: Vec::new(),
                     feature_ids: Vec::new(),
                     feature_rows: Vec::new(),
+                    colors: Vec::new(),
+                    vertex_colors: mesh.vertex_colors(),
+                    shading,
                     base_color_factor: mesh.base_color_factor,
                     texture: mesh.texture.clone(),
                     elements: Vec::new(),
@@ -301,26 +411,31 @@ fn group_by_material(meshes: &[MeshData]) -> Vec<MaterialGroup> {
 
         let base = group.positions.len() as u32;
         // an attribute only carries on while it lines up with the positions
-        if group.normals.len() == base as usize && mesh.normals.len() == mesh.positions.len() {
-            group.normals.extend_from_slice(&mesh.normals);
+        if group.normals.len() == base as usize && normals.len() == positions.len() {
+            group.normals.extend_from_slice(normals);
         }
-        if group.texcoords.len() == base as usize && mesh.texcoords.len() == mesh.positions.len() {
-            group.texcoords.extend_from_slice(&mesh.texcoords);
+        if group.texcoords.len() == base as usize && texcoords.len() == positions.len() {
+            group.texcoords.extend_from_slice(texcoords);
         }
         if any_feature_column {
             let feature_id = group.feature_rows.len() as u32;
             group
                 .feature_ids
-                .extend(std::iter::repeat_n(feature_id, mesh.positions.len()));
+                .extend(std::iter::repeat_n(feature_id, positions.len()));
             group.feature_rows.push(
                 mesh.feature_columns()
                     .map(|value| value.clone().unwrap_or_default()),
             );
         }
-        group.positions.extend_from_slice(&mesh.positions);
+        if let Some(color) = mesh.element_color {
+            group
+                .colors
+                .extend(std::iter::repeat_n(color, positions.len()));
+        }
+        group.positions.extend_from_slice(positions);
         let first_index = group.indices.len();
-        group.indices.extend(mesh.indices.iter().map(|i| i + base));
-        if !mesh.indices.is_empty() {
+        group.indices.extend(indices.iter().map(|i| i + base));
+        if !indices.is_empty() {
             group.elements.push(GroupElement {
                 bounds: aabb_from_indices(&group.positions, &group.indices[first_index..]),
                 indices: first_index..group.indices.len(),
@@ -495,6 +610,10 @@ fn geometry_key(group: &MaterialGroup, element: &GroupElement) -> u64 {
 
     let mut hasher = DefaultHasher::new();
     positions.len().hash(&mut hasher);
+    group
+        .colors
+        .get(element.vertices.start as usize)
+        .hash(&mut hasher);
     for index in &group.indices[element.indices.clone()] {
         (index - element.vertices.start).hash(&mut hasher);
     }
@@ -627,8 +746,11 @@ impl MaterialGroup {
         &self.positions[element.vertices.start as usize..element.vertices.end as usize]
     }
 
-    fn takes(&self, mesh: &MeshData) -> bool {
-        if self.base_color_factor != mesh.base_color_factor {
+    fn takes(&self, mesh: &MeshData, shading: Shading) -> bool {
+        if self.base_color_factor != mesh.base_color_factor
+            || self.vertex_colors != mesh.vertex_colors()
+            || self.shading != shading
+        {
             return false;
         }
         match (&self.texture, &mesh.texture) {
@@ -679,6 +801,17 @@ struct ParentContent<'a> {
 impl TilePart<'_> {
     fn triangle_count(&self) -> usize {
         self.indices.len() / 3
+    }
+}
+
+fn longest_axis(bounds: &Aabb) -> usize {
+    let half_extents = bounds.half_extents();
+    if half_extents[0] >= half_extents[1] && half_extents[0] >= half_extents[2] {
+        0
+    } else if half_extents[1] >= half_extents[2] {
+        1
+    } else {
+        2
     }
 }
 
@@ -737,7 +870,8 @@ impl InstancedElements<'_> {
         used_vertices.dedup();
         let bytes_per_vertex = 12
             + if group.normals.is_empty() { 0 } else { 12 }
-            + if group.feature_ids.is_empty() { 0 } else { 4 };
+            + if group.feature_ids.is_empty() { 0 } else { 4 }
+            + if group.colors.is_empty() { 0 } else { 4 };
         let geometry_bytes =
             used_vertices.len() * bytes_per_vertex + self.first_element_indices.len() * 4;
         let instance_count = self.elements.len();
@@ -810,6 +944,123 @@ impl<'a> GroupTiler<'a> {
             .collect()
     }
 
+    fn tile_group(&self, depth: u32, path: &mut NodePath) -> io::Result<WrittenMeshTile> {
+        let group = self.group;
+        let parts = self.whole_element_parts();
+        // pieces of one surface, like photogrammetry, leave holes when a small one is not drawn, and only they come without an asset id
+        let every_element_has_an_asset_id = !group.feature_ids.is_empty()
+            && group.elements.iter().all(|element| {
+                let feature = group.feature_ids[element.vertices.start as usize];
+                !group.feature_rows[feature as usize][0].is_empty()
+            });
+        if every_element_has_an_asset_id {
+            self.tile_additive(self.parts_within_budget(parts), depth, path)
+        } else {
+            self.tile(parts, self.group_bounds, depth, path)
+        }
+    }
+
+    fn parts_within_budget(&self, parts: Vec<TilePart<'a>>) -> Vec<TilePart<'a>> {
+        let mut pending = parts;
+        let mut within_budget = Vec::with_capacity(pending.len());
+        while let Some(part) = pending.pop() {
+            if part.triangle_count() <= self.config.max_triangles_per_tile {
+                within_budget.push(part);
+                continue;
+            }
+            let axis = longest_axis(&part.bounds);
+            let (mut near, mut far) =
+                self.split_triangles(&part.indices, axis, part.bounds.center()[axis]);
+            if near.is_empty() || far.is_empty() {
+                near = part.indices[..part.indices.len() / 6 * 3].to_vec();
+                far = part.indices[near.len()..].to_vec();
+            }
+            pending.push(self.anonymous_part(near));
+            pending.push(self.anonymous_part(far));
+        }
+        within_budget
+    }
+
+    fn anonymous_part(&self, indices: Vec<u32>) -> TilePart<'a> {
+        TilePart {
+            whole_element: None,
+            bounds: aabb_from_indices(&self.group.positions, &indices),
+            indices: Cow::Owned(indices),
+        }
+    }
+
+    fn split_triangles(&self, indices: &[u32], axis: usize, split: f64) -> (Vec<u32>, Vec<u32>) {
+        let positions = &self.group.positions;
+        let mut near = Vec::new();
+        let mut far = Vec::new();
+        for triangle in indices.as_chunks::<3>().0 {
+            let centroid = triangle
+                .iter()
+                .map(|&index| positions[index as usize][axis])
+                .sum::<f64>()
+                / 3.0;
+            if centroid < split {
+                near.extend_from_slice(triangle);
+            } else {
+                far.extend_from_slice(triangle);
+            }
+        }
+        (near, far)
+    }
+
+    fn tile_additive(
+        &self,
+        parts: Vec<TilePart<'a>>,
+        depth: u32,
+        path: &mut NodePath,
+    ) -> io::Result<WrittenMeshTile> {
+        let bounds = parts_bounds(&parts);
+        let triangle_budget = self.config.max_triangles_per_tile;
+        if total_triangles(&parts) <= triangle_budget || depth >= self.config.max_depth {
+            return self.leaf(&parts, bounds, path);
+        }
+
+        let mut content = parts;
+        content.sort_by(|left, right| {
+            geometric_error_for(&right.bounds).total_cmp(&geometric_error_for(&left.bounds))
+        });
+        let mut content_triangles = 0;
+        let content_count = content
+            .iter()
+            .take_while(|part| {
+                content_triangles += part.triangle_count();
+                content_triangles <= triangle_budget
+            })
+            .count();
+        let rest = content.split_off(content_count);
+        let content_uri = self.write_content(&content, path)?;
+        // cesium leaves the children unloaded while this tile's error is small on screen, and the largest element they hold is what goes missing
+        let geometric_error = geometric_error_for(&rest[0].bounds);
+
+        let rest_bounds = parts_bounds(&rest);
+        let axis = longest_axis(&rest_bounds);
+        let (near, far) = self.split_parts(&rest, axis, rest_bounds.center()[axis]);
+        drop(rest);
+        let mut children = Vec::with_capacity(2);
+        for (index, half) in [near, far].into_iter().enumerate() {
+            if half.is_empty() {
+                continue;
+            }
+            path.push(index as u8);
+            children.push(self.tile_additive(half, depth + 1, path)?);
+            path.pop();
+        }
+
+        Ok(WrittenMeshTile {
+            bounds,
+            geometric_error,
+            content_uri,
+            content_triangle_count: total_triangles(&content),
+            children,
+            refine: Refine::Add,
+        })
+    }
+
     fn tile(
         &self,
         parts: Vec<TilePart<'a>>,
@@ -823,16 +1074,7 @@ impl<'a> GroupTiler<'a> {
             return self.leaf(&parts, bounds, path);
         }
 
-        // Find longest axis and split along its median.
-        let he = bounds.half_extents();
-        let axis = if he[0] >= he[1] && he[0] >= he[2] {
-            0
-        } else if he[1] >= he[2] {
-            1
-        } else {
-            2
-        };
-
+        let axis = longest_axis(&bounds);
         let (near, far) = self.split_parts(&parts, axis, bounds.center()[axis]);
 
         // Degenerate split: one part whose triangles all fall to one side.
@@ -864,6 +1106,7 @@ impl<'a> GroupTiler<'a> {
             content_uri,
             content_triangle_count,
             children,
+            refine: Refine::Replace,
         })
     }
 
@@ -885,32 +1128,14 @@ impl<'a> GroupTiler<'a> {
                 continue;
             }
 
-            // Classify triangles by centroid position along the split axis.
-            let positions = &self.group.positions;
-            let mut near_indices = Vec::new();
-            let mut far_indices = Vec::new();
-            for tri in part.indices.as_chunks::<3>().0 {
-                let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-                let centroid =
-                    (positions[i0][axis] + positions[i1][axis] + positions[i2][axis]) / 3.0;
-                if centroid < split {
-                    near_indices.extend_from_slice(tri);
-                } else {
-                    far_indices.extend_from_slice(tri);
-                }
-            }
+            let (near_indices, far_indices) = self.split_triangles(&part.indices, axis, split);
             if near_indices.is_empty() {
                 far.push(part.clone());
             } else if far_indices.is_empty() {
                 near.push(part.clone());
             } else {
-                for (side, indices) in [(&mut near, near_indices), (&mut far, far_indices)] {
-                    side.push(TilePart {
-                        whole_element: None,
-                        bounds: aabb_from_indices(positions, &indices),
-                        indices: Cow::Owned(indices),
-                    });
-                }
+                near.push(self.anonymous_part(near_indices));
+                far.push(self.anonymous_part(far_indices));
             }
         }
         if near.is_empty() || far.is_empty() {
@@ -1013,6 +1238,7 @@ impl<'a> GroupTiler<'a> {
             content_uri: self.write_content(parts, path)?,
             content_triangle_count: total_triangles(parts),
             children: Vec::new(),
+            refine: Refine::Replace,
         })
     }
 
@@ -1204,6 +1430,7 @@ fn instanced_mesh(
         instance_translations,
         instance_rotations,
         instance_feature_ids,
+        colors: (!group.colors.is_empty()).then(|| values_at(&group.colors, &first_vertices)),
     }
 }
 
@@ -1284,7 +1511,7 @@ fn direct_glb_mesh(
         positions,
         normals,
         indices: Some(tile_indices),
-        colors: None,
+        colors: (!group.colors.is_empty()).then(|| values_at(&group.colors, used_vertices)),
         texcoords,
         metadata: None,
         feature_ids,
@@ -1525,7 +1752,7 @@ fn generate_tile(node: &WrittenMeshTile, tileset_box: fn(&Aabb) -> [f64; 12]) ->
             .iter()
             .map(|child| generate_tile(child, tileset_box))
             .collect(),
-        refine: Some(Refine::Replace),
+        refine: Some(node.refine),
         transform: None,
     }
 }
@@ -1533,7 +1760,7 @@ fn generate_tile(node: &WrittenMeshTile, tileset_box: fn(&Aabb) -> [f64; 12]) ->
 fn collect_stats(node: &WrittenMeshTile, depth: u32, stats: &mut MeshTilingStats) {
     stats.tile_count += 1;
     stats.max_depth_reached = stats.max_depth_reached.max(depth);
-    if node.children.is_empty() {
+    if node.children.is_empty() || node.refine == Refine::Add {
         stats.total_triangles += node.content_triangle_count;
     }
     for child in &node.children {
@@ -1694,6 +1921,7 @@ mod tests {
             asset_id: None,
             class: None,
             storey: None,
+            element_color: None,
             base_color_factor: None,
             texture: None,
         }
@@ -1731,6 +1959,7 @@ mod tests {
             asset_id: None,
             class: None,
             storey: None,
+            element_color: None,
             base_color_factor: None,
             texture: None,
         }
@@ -1761,6 +1990,13 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(dir.join("tileset.json")).unwrap())
                 .expect("a parseable tileset.json");
         WrittenTileset { dir, tileset }
+    }
+
+    fn content_tiles(tile: &Tile) -> Vec<&Tile> {
+        let own = tile.content.is_some().then_some(tile);
+        own.into_iter()
+            .chain(tile.children.iter().flat_map(content_tiles))
+            .collect()
     }
 
     fn leaf_tiles(tile: &Tile) -> Vec<&Tile> {
@@ -1989,6 +2225,7 @@ mod tests {
             asset_id: None,
             class: None,
             storey: None,
+            element_color: None,
             base_color_factor: None,
             texture: None,
         };
@@ -2021,6 +2258,7 @@ mod tests {
             asset_id: None,
             class: None,
             storey: None,
+            element_color: None,
             base_color_factor: None,
             texture: None,
         };
@@ -2051,6 +2289,7 @@ mod tests {
             asset_id: asset_id.map(str::to_string),
             class: None,
             storey: None,
+            element_color: None,
             base_color_factor: None,
             texture: None,
         }
@@ -2097,22 +2336,23 @@ mod tests {
         };
 
         let written = write_tileset(&meshes, &config);
-        let leaves: Vec<_> = leaf_tiles(&written.tileset.root)
+        let tiles: Vec<_> = content_tiles(&written.tileset.root)
             .into_iter()
-            .map(|leaf| written.glb(leaf))
+            .map(|tile| written.glb(tile))
             .collect();
-        assert_eq!(leaves.len(), 2, "the two triangles should split apart");
+        assert_eq!(tiles.len(), 2, "the two triangles should split apart");
 
-        let reached: Vec<Vec<u32>> = leaves
+        let reached: Vec<Vec<u32>> = tiles
             .iter()
             .map(|(json, views)| referenced_feature_ids(json, views))
             .collect();
         assert_eq!(reached, vec![vec![0], vec![0]]);
 
-        let tables: Vec<Vec<String>> = leaves
+        let mut tables: Vec<Vec<String>> = tiles
             .iter()
             .map(|(json, views)| asset_ids(json, views))
             .collect();
+        tables.sort_unstable();
         assert_eq!(tables, [["asset-a"], ["asset-b"]]);
     }
 
@@ -2136,7 +2376,16 @@ mod tests {
         };
 
         let written = write_tileset(&meshes, &config);
-        let (json, views) = written.glb(leaf_tiles(&written.tileset.root)[1]);
+        let tile_of_the_bare_triangle = content_tiles(&written.tileset.root)
+            .into_iter()
+            .find(|tile| {
+                let BoundingVolume::Box { r#box } = &tile.bounding_volume else {
+                    panic!("mesh tiles have box bounding volumes");
+                };
+                r#box[0] > 5.0
+            })
+            .expect("a tile around the triangle at x = 10");
+        let (json, views) = written.glb(tile_of_the_bare_triangle);
 
         assert!(attribute_values::<f32>(&json, &views, "_FEATURE_ID_0").is_none());
         assert!(json["extensions"].get("EXT_structural_metadata").is_none());
@@ -2478,6 +2727,100 @@ mod tests {
     }
 
     #[test]
+    fn translucent_element_colors_tile_apart_from_opaque_ones_and_only_they_blend() {
+        let brick = [180, 60, 40, 255];
+        let glass = [150, 200, 255, 100];
+        let mut wall = cube_mesh();
+        wall.element_color = Some(brick);
+        let mut pane = cube_mesh();
+        pane.element_color = Some(glass);
+        for position in &mut pane.positions {
+            position[0] += 3.0;
+        }
+
+        let written = write_tileset(&[wall, pane], &MeshTilingConfig::default());
+        let leaves = leaf_tiles(&written.tileset.root);
+        assert_eq!(leaves.len(), 2);
+        let mut seen = Vec::new();
+        for leaf in leaves {
+            let (json, views) = written.glb(leaf);
+            let colors: Vec<[u8; 4]> = attribute_values(&json, &views, "COLOR_0").unwrap();
+            assert!(colors.iter().all(|color| *color == colors[0]));
+            let material = &json["materials"][0];
+            assert_eq!(material["pbrMetallicRoughness"]["metallicFactor"], 0.0);
+            let blends = material.get("alphaMode") == Some(&serde_json::json!("BLEND"));
+            assert_eq!(blends, colors[0] == glass, "{:?}", colors[0]);
+            seen.push(colors[0]);
+        }
+        seen.sort_unstable();
+        let mut expected = vec![brick, glass];
+        expected.sort_unstable();
+        assert_eq!(seen, expected);
+    }
+
+    fn cube_with_a_vertex_per_face_corner(
+        normal_of_face: impl Fn([f64; 3]) -> [f32; 3],
+    ) -> MeshData {
+        let mut cube = cube_mesh();
+        let corners = std::mem::take(&mut cube.positions);
+        let faces = std::mem::take(&mut cube.indices);
+        cube.normals.clear();
+        for quad in faces.chunks(6) {
+            let [first, second, third] =
+                [quad[0], quad[1], quad[2]].map(|corner| corners[corner as usize]);
+            let face = cross(subtract(second, first), subtract(third, first));
+            let base = cube.positions.len() as u32;
+            for (offset, &corner) in quad.iter().enumerate() {
+                cube.positions.push(corners[corner as usize]);
+                cube.normals.push(normal_of_face(face));
+                cube.indices.push(base + offset as u32);
+            }
+        }
+        cube
+    }
+
+    #[test]
+    fn flat_shaded_elements_weld_by_position_and_drop_their_normals() {
+        let mut flat = cube_with_a_vertex_per_face_corner(|face| {
+            let length = dot(face, face).sqrt();
+            face.map(|component| (component / length) as f32)
+        });
+        flat.asset_id = Some("flat".into());
+        let mut curved = moved_by(
+            cube_with_a_vertex_per_face_corner(|_| [0.0, 0.6, 0.8]),
+            [5.0, 0.0, 0.0],
+        );
+        curved.asset_id = Some("curved".into());
+        let corners_per_cube = flat.positions.len();
+
+        let written = write_tileset(&[flat, curved], &MeshTilingConfig::default());
+        let leaves = leaf_tiles(&written.tileset.root);
+        assert_eq!(leaves.len(), 2, "shading splits the two into groups");
+        let mut seen = Vec::new();
+        for leaf in leaves {
+            let (json, views) = written.glb(leaf);
+            let positions: Vec<[f32; 3]> = attribute_values(&json, &views, "POSITION").unwrap();
+            let normals: Option<Vec<[f32; 3]>> = attribute_values(&json, &views, "NORMAL");
+            assert_eq!(index_values(&json, &views).len(), 36);
+            let rows = asset_ids(&json, &views);
+            match rows[0].as_str() {
+                "flat" => {
+                    assert_eq!(positions.len(), 8);
+                    assert!(normals.is_none());
+                }
+                "curved" => {
+                    assert_eq!(positions.len(), corners_per_cube);
+                    assert_eq!(normals.unwrap().len(), corners_per_cube);
+                }
+                other => panic!("no cube is named {other}"),
+            }
+            seen.push(rows[0].clone());
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, ["curved", "flat"]);
+    }
+
+    #[test]
     fn a_texture_without_uvs_is_dropped() {
         let mut mesh = cube_mesh();
         mesh.texture = Some(make_test_texture(4, 4));
@@ -2604,14 +2947,17 @@ mod tests {
         };
 
         let written = write_tileset(&[first, second], &config);
-        let leaves = leaf_tiles(&written.tileset.root);
-        assert_eq!(leaves.len(), 2, "one leaf per element");
-        for (leaf, expected) in leaves.into_iter().zip(["first", "second"]) {
-            let (json, views) = written.glb(leaf);
+        let tiles = content_tiles(&written.tileset.root);
+        assert_eq!(tiles.len(), 2, "one tile per element");
+        let mut tables = Vec::new();
+        for tile in tiles {
+            let (json, views) = written.glb(tile);
             assert_eq!(json["images"][0]["mimeType"], "image/ktx2");
-            assert_eq!(asset_ids(&json, &views), [expected]);
             assert_eq!(referenced_feature_ids(&json, &views), vec![0]);
+            tables.push(asset_ids(&json, &views));
         }
+        tables.sort_unstable();
+        assert_eq!(tables, [["first"], ["second"]]);
     }
 
     #[test]
@@ -2683,6 +3029,11 @@ mod tests {
 
     const DOOR_VERTEX_COUNT: usize = 81;
     const DOOR_TRIANGLE_COUNT: usize = 128;
+
+    fn shaded_by_its_normals(mut mesh: MeshData) -> MeshData {
+        mesh.normals = vec![[0.0, 0.6, 0.8]; mesh.positions.len()];
+        mesh
+    }
 
     fn door(asset_id: &str) -> MeshData {
         let mut door = grid_mesh(8);
@@ -2818,7 +3169,7 @@ mod tests {
     #[test]
     fn repeated_meshes_write_one_geometry_with_one_instance_and_feature_id_each() {
         let mut meshes = numbered_doors(6);
-        meshes.push(triangle_at(-20.0, Some("wall")));
+        meshes.push(shaded_by_its_normals(triangle_at(-20.0, Some("wall"))));
 
         let written = write_tileset(&meshes, &MeshTilingConfig::default());
         let (json, views) = written.glb(&written.tileset.root);
@@ -2892,6 +3243,38 @@ mod tests {
         assert_eq!(json["nodes"].as_array().unwrap().len(), 1);
         assert_eq!(json["scenes"][0]["nodes"], serde_json::json!([0]));
         assert_instances_land_on_their_sources(&json, &views, &json["nodes"][0], &meshes, false);
+    }
+
+    #[test]
+    fn repeated_meshes_instance_per_element_color_and_carry_it() {
+        let oak = [120, 80, 40, 255];
+        let steel = [90, 90, 100, 255];
+        let mut meshes = numbered_doors(12);
+        for (number, mesh) in meshes.iter_mut().enumerate() {
+            mesh.element_color = Some(if number < 6 { oak } else { steel });
+        }
+
+        let written = write_tileset(&meshes, &MeshTilingConfig::default());
+        let (json, views) = written.glb(&written.tileset.root);
+
+        assert!(json["materials"][0].get("alphaMode").is_none());
+        let nodes = instanced_nodes(&json);
+        assert_eq!(nodes.len(), 2);
+        let mut node_colors: Vec<[u8; 4]> = nodes
+            .iter()
+            .map(|node| {
+                let colors: Vec<[u8; 4]> = node_mesh_attribute(&json, &views, node, "COLOR_0");
+                assert!(colors.iter().all(|color| *color == colors[0]));
+                colors[0]
+            })
+            .collect();
+        node_colors.sort_unstable();
+        let mut expected = [oak, steel];
+        expected.sort_unstable();
+        assert_eq!(node_colors, expected);
+        for node in nodes {
+            assert_instances_land_on_their_sources(&json, &views, node, &meshes, false);
+        }
     }
 
     #[test]
@@ -3043,8 +3426,45 @@ mod tests {
         }
     }
 
+    fn assert_errors_shrink_toward_the_leaves(tile: &Tile) {
+        for child in &tile.children {
+            assert!(child.geometric_error <= tile.geometric_error);
+            assert_errors_shrink_toward_the_leaves(child);
+        }
+    }
+
     #[test]
-    fn elements_that_fit_stay_whole_in_one_leaf_inside_its_box() {
+    fn additive_tiles_put_the_largest_elements_nearest_the_root() {
+        let mut meshes: Vec<MeshData> = (0..14)
+            .map(|number| small_cube_at(f64::from(number), 0.0, 1.0, &format!("cube-{number}")))
+            .collect();
+        meshes.push(small_cube_at(5.0, 20.0, 8.0, "slab"));
+        let config = MeshTilingConfig {
+            max_triangles_per_tile: 36,
+            content_y_up: true,
+            ..Default::default()
+        };
+        let written = write_tileset(&meshes, &config);
+        let root = &written.tileset.root;
+
+        assert!(matches!(root.refine, Some(Refine::Add)));
+        let (json, views) = written.glb(root);
+        let root_rows: Vec<String> = triangles_per_row(&json, &views)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(root_rows.contains(&"slab".to_string()), "{root_rows:?}");
+        let unit_cube_error = 3f64.sqrt() / 2.0;
+        // element bounds carry a padding that grows with the distance from the origin
+        assert!((root.geometric_error - unit_cube_error).abs() < 0.01);
+        assert_errors_shrink_toward_the_leaves(root);
+        for leaf in leaf_tiles(root) {
+            assert_eq!(leaf.geometric_error, 0.0);
+        }
+    }
+
+    #[test]
+    fn elements_that_fit_stay_whole_in_one_tile_inside_its_box() {
         // the middle cube straddles the root's split plane at x = 7
         let meshes: Vec<MeshData> = (0..15)
             .map(|number| small_cube_at(f64::from(number), 0.0, 1.0, &format!("cube-{number}")))
@@ -3056,20 +3476,20 @@ mod tests {
         };
         let written = write_tileset(&meshes, &config);
 
-        let mut leaves_listing: BTreeMap<String, usize> = BTreeMap::new();
-        for leaf in leaf_tiles(&written.tileset.root) {
-            let (json, views) = written.glb(leaf);
+        let mut tiles_listing: BTreeMap<String, usize> = BTreeMap::new();
+        for tile in content_tiles(&written.tileset.root) {
+            let (json, views) = written.glb(tile);
             assert!(index_values(&json, &views).len() / 3 <= 36);
-            assert_every_vertex_is_inside_the_tile_box(&json, &views, leaf);
+            assert_every_vertex_is_inside_the_tile_box(&json, &views, tile);
             for (name, triangles) in triangles_per_row(&json, &views) {
                 assert_eq!(triangles, 12, "{name} should be whole");
-                *leaves_listing.entry(name).or_default() += 1;
+                *tiles_listing.entry(name).or_default() += 1;
             }
         }
-        assert_eq!(leaves_listing.len(), 15);
+        assert_eq!(tiles_listing.len(), 15);
         assert!(
-            leaves_listing.values().all(|count| *count == 1),
-            "{leaves_listing:?}"
+            tiles_listing.values().all(|count| *count == 1),
+            "{tiles_listing:?}"
         );
     }
 
@@ -3092,21 +3512,21 @@ mod tests {
         };
         let written = write_tileset(&meshes, &config);
 
-        let mut leaves_listing: BTreeMap<String, usize> = BTreeMap::new();
+        let mut tiles_listing: BTreeMap<String, usize> = BTreeMap::new();
         let mut triangles_by_name: BTreeMap<String, usize> = BTreeMap::new();
-        for leaf in leaf_tiles(&written.tileset.root) {
-            let (json, views) = written.glb(leaf);
+        for tile in content_tiles(&written.tileset.root) {
+            let (json, views) = written.glb(tile);
             assert!(index_values(&json, &views).len() / 3 <= 100);
             for (name, triangles) in triangles_per_row(&json, &views) {
-                *leaves_listing.entry(name.clone()).or_default() += 1;
+                *tiles_listing.entry(name.clone()).or_default() += 1;
                 *triangles_by_name.entry(name).or_default() += triangles;
             }
         }
-        assert!(leaves_listing["slab"] > 1, "{leaves_listing:?}");
+        assert!(tiles_listing["slab"] > 1, "{tiles_listing:?}");
         assert_eq!(triangles_by_name["slab"], 2 * 32 * 32);
         for number in 0..5 {
             let name = format!("cube-{number}");
-            assert_eq!(leaves_listing[&name], 1, "{leaves_listing:?}");
+            assert_eq!(tiles_listing[&name], 1, "{tiles_listing:?}");
             assert_eq!(triangles_by_name[&name], 12);
         }
     }
@@ -3117,7 +3537,7 @@ mod tests {
         for position in &mut terrain.positions {
             position[2] = 2.0 * (position[0] * 0.8).sin() * (position[1] * 0.8).sin();
         }
-        terrain.asset_id = Some("terrain".to_string());
+        terrain.asset_id = None;
         let meshes = [
             terrain,
             small_cube_at(70.0, 0.0, 0.1, "first"),
@@ -3136,7 +3556,7 @@ mod tests {
         assert_eq!(triangles["first"], 12);
         assert_eq!(triangles["second"], 12);
         assert!(
-            triangles["terrain"] < 2 * 64 * 64,
+            triangles[""] < 2 * 64 * 64,
             "the large element should be simplified: {triangles:?}"
         );
     }
@@ -3176,14 +3596,20 @@ mod tests {
 
     #[test]
     fn a_parent_draws_one_simplified_geometry_for_its_repeated_elements() {
-        let meshes = numbered_doors(40);
+        let mut meshes = numbered_doors(40);
+        let oversize = shaded_by_its_normals(moved_by(grid_mesh(32), [0.0, -200.0, 0.0]));
+        let oversize_triangles = oversize.indices.len() / 3;
+        meshes.push(oversize);
         let config = MeshTilingConfig {
             max_triangles_per_tile: 2000,
             ..Default::default()
         };
         let dir = std::env::temp_dir().join(format!("mesh_tiler_{}", uuid::Uuid::new_v4()));
         let stats = tile_meshes(&meshes, &dir, &config).expect("tile_meshes failed");
-        assert_eq!(stats.total_triangles, 40 * DOOR_TRIANGLE_COUNT);
+        assert_eq!(
+            stats.total_triangles,
+            40 * DOOR_TRIANGLE_COUNT + oversize_triangles
+        );
 
         let (json, views) = read_glb(&dir.join("tiles/root.glb"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3372,9 +3798,21 @@ mod tests {
                 let positions = stream(&primitive["attributes"]["POSITION"]);
                 let indices = stream(&primitive["indices"]);
                 assert_eq!(indices["mode"], "INDICES");
-                (
+                let quantized: Vec<[u16; 4]> =
                     meshopt::decode_vertex_buffer(bin_slice(bin, positions), count(positions))
-                        .expect("meshopt decodes the positions"),
+                        .expect("meshopt decodes the positions");
+                let node = &json["nodes"][0];
+                let translation = |axis: usize| node["translation"][axis].as_f64().unwrap();
+                let scale = |axis: usize| node["scale"][axis].as_f64().unwrap();
+                (
+                    quantized
+                        .iter()
+                        .map(|position| {
+                            [0, 1, 2].map(|axis| {
+                                (translation(axis) + scale(axis) * f64::from(position[axis])) as f32
+                            })
+                        })
+                        .collect(),
                     meshopt::decode_index_sequence(bin_slice(bin, indices), count(indices))
                         .expect("meshopt decodes the indices"),
                 )
@@ -3516,7 +3954,7 @@ mod tests {
     #[test]
     fn cad_edges_skip_instanced_geometry() {
         let mut meshes = numbered_doors(6);
-        meshes.push(triangle_at(-20.0, Some("wall")));
+        meshes.push(shaded_by_its_normals(triangle_at(-20.0, Some("wall"))));
         let config = MeshTilingConfig {
             cad_edges: true,
             ..Default::default()

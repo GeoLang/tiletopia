@@ -741,6 +741,7 @@ fn read_triangles(
         asset_id: None,
         class: None,
         storey: None,
+        element_color: None,
     };
     let mut vertex_by_source_indices: HashMap<[u32; 3], u32> = HashMap::new();
     let mirrored = world.is_mirroring();

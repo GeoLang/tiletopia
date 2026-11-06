@@ -514,6 +514,7 @@ mod tests {
             asset_id: None,
             class: None,
             storey: None,
+            element_color: None,
         };
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("model.dxf");

@@ -69,6 +69,7 @@ fn grid_mesh(quads_per_side: u32) -> MeshData {
         asset_id: None,
         class: None,
         storey: None,
+        element_color: None,
         base_color_factor: None,
         texture: None,
     }
