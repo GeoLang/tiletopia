@@ -54,6 +54,7 @@ pub struct JobQueue {
     tiling_lock: tokio::sync::Mutex<()>,
     webhooks: Arc<WebhookQueue>,
     elevation_store: Arc<DemStore>,
+    ids_check: Option<crate::ids_check::IdsCheckSidecar>,
     #[cfg(test)]
     tiler_overlap_probe: Arc<tiler_overlap::Probe>,
 }
@@ -109,6 +110,7 @@ fn unrecorded_outcome_error(outcome: Result<TiledAsset, String>, failed_write: &
 }
 
 impl JobQueue {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<Database>,
         data_dir: PathBuf,
@@ -117,6 +119,7 @@ impl JobQueue {
         node_odm: Option<NodeOdm>,
         webhooks: Arc<WebhookQueue>,
         elevation_store: Arc<DemStore>,
+        ids_check: Option<crate::ids_check::IdsCheckSidecar>,
     ) -> Self {
         Self {
             db,
@@ -128,6 +131,7 @@ impl JobQueue {
             tiling_lock: tokio::sync::Mutex::new(()),
             webhooks,
             elevation_store,
+            ids_check,
             #[cfg(test)]
             tiler_overlap_probe: Arc::default(),
         }
@@ -383,6 +387,16 @@ impl JobQueue {
         } else {
             outcome
         };
+        if outcome.is_ok() && status_follows_job {
+            // apply_retention removes older version directories
+            crate::ids_check::check_ready_asset(
+                &self.db,
+                &self.data_dir,
+                self.ids_check.clone(),
+                asset_id,
+            )
+            .await;
+        }
         if outcome.is_ok()
             && let Err(reason) = crate::model_versions::apply_retention(
                 &self.db,
@@ -1052,6 +1066,7 @@ mod tests {
                 platform_webhook::PrivateHosts::Refused,
             )),
             Arc::new(DemStore::new()),
+            None,
         ));
         let first = queue_with_point_cloud_job(&queue, dir.path()).await;
         let second = queue_with_point_cloud_job(&queue, dir.path()).await;

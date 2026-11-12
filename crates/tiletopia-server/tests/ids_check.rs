@@ -448,3 +448,281 @@ async fn a_second_assets_check_reaches_the_sidecar_only_after_the_first_frees_it
         format!("{second}/input/second.ifc")
     );
 }
+
+fn store_ids(state: &AppState, asset_id: Uuid, file_name: Option<&str>) {
+    let ids_dir = state.data_dir.join(asset_id.to_string()).join("ids");
+    std::fs::create_dir_all(&ids_dir).unwrap();
+    std::fs::write(ids_dir.join("specification.ids"), IDS_XML).unwrap();
+    if let Some(file_name) = file_name {
+        std::fs::write(ids_dir.join("file-name"), file_name).unwrap();
+    }
+}
+
+async fn request_count(sidecar: &MockSidecar, count: usize) -> Vec<Value> {
+    let deadline = Instant::now() + WAIT_LIMIT;
+    loop {
+        let requests = sidecar.requests.lock().unwrap().clone();
+        if requests.len() >= count {
+            return requests;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the sidecar was called {count} times"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn counted(state: &AppState, query: &'static str) -> i64 {
+    sqlx::query_scalar(query)
+        .fetch_one(&state.db.pool)
+        .await
+        .unwrap()
+}
+
+fn asset_upload(file_name: &str, ids_name: Option<&str>, ids_body: &[u8]) -> Vec<u8> {
+    let mut body = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(b"ISO-10303-21;");
+    if let Some(ids_name) = ids_name {
+        body.extend_from_slice(
+            format!(
+                "\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"ids\"; filename=\"{ids_name}\"\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(ids_body);
+    }
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    body
+}
+
+async fn post_asset(state: &Arc<AppState>, body: Vec<u8>) -> Answer {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/assets")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .header(
+            "authorization",
+            format!("Bearer {}", token(OWNER, "editor")),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    send(state, request).await
+}
+
+#[tokio::test]
+async fn a_ready_ifc_with_a_stored_ids_file_starts_the_sidecar() {
+    let sidecar = mock_sidecar(StatusCode::OK, REPORT).await;
+    let state = test_state_with_ids_check(sidecar.ids_check_sidecar()).await;
+    let id = model_asset(&state, "model.ifc").await;
+    store_ids(&state, id, Some(IDS_FILE_NAME));
+
+    ids_check::check_ready_asset(&state.db, &state.data_dir, state.ids_check.clone(), id).await;
+    ids_check::check_ready_asset(&state.db, &state.data_dir, state.ids_check.clone(), id).await;
+
+    let request = first_request(&sidecar).await;
+    assert_eq!(request["ifc_path"], format!("{id}/input/model.ifc"));
+    assert_eq!(request["ids_path"], format!("{id}/ids/specification.ids"));
+    assert_eq!(sidecar.requests.lock().unwrap().len(), 1);
+    sidecar.release();
+    let check = settled_check(&state, id).await.json();
+    assert_eq!(check["status"], "done");
+    assert_eq!(check["idsFileName"], IDS_FILE_NAME);
+}
+
+#[tokio::test]
+async fn a_new_version_copies_the_previous_ids_file_and_starts_the_check() {
+    let sidecar = mock_sidecar(StatusCode::OK, REPORT).await;
+    sidecar.release();
+    let state = test_state_with_ids_check(sidecar.ids_check_sidecar()).await;
+    let previous = model_asset(&state, "previous.ifc").await;
+    store_ids(&state, previous, None);
+    sqlx::query(
+        "INSERT INTO ids_checks (asset_id, ids_file_name, status, checked_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(previous.to_string())
+    .bind(IDS_FILE_NAME)
+    .bind("done")
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&state.db.pool)
+    .await
+    .unwrap();
+    let next = model_asset(&state, "next.ifc").await;
+    tiletopia_server::model_versions::add_version(&state.db, next, previous)
+        .await
+        .unwrap();
+
+    ids_check::check_ready_asset(&state.db, &state.data_dir, state.ids_check.clone(), next).await;
+
+    let copied = state.data_dir.join(next.to_string()).join("ids");
+    assert_eq!(
+        std::fs::read_to_string(copied.join("specification.ids")).unwrap(),
+        IDS_XML
+    );
+    assert_eq!(
+        std::fs::read_to_string(copied.join("file-name")).unwrap(),
+        IDS_FILE_NAME
+    );
+    assert!(
+        state
+            .data_dir
+            .join(previous.to_string())
+            .join("ids/specification.ids")
+            .is_file()
+    );
+    let requests = request_count(&sidecar, 1).await;
+    assert_eq!(requests[0]["ifc_path"], format!("{next}/input/next.ifc"));
+    assert_eq!(
+        requests[0]["ids_path"],
+        format!("{next}/ids/specification.ids")
+    );
+    let check = settled_check(&state, next).await.json();
+    assert_eq!(check["status"], "done");
+    assert_eq!(check["idsFileName"], IDS_FILE_NAME);
+}
+
+#[tokio::test]
+async fn a_ready_ifc_with_no_ids_file_does_not_call_the_sidecar() {
+    let sidecar = mock_sidecar(StatusCode::OK, REPORT).await;
+    sidecar.release();
+    let state = test_state_with_ids_check(sidecar.ids_check_sidecar()).await;
+    let id = model_asset(&state, "model.ifc").await;
+
+    ids_check::check_ready_asset(&state.db, &state.data_dir, state.ids_check.clone(), id).await;
+
+    assert!(sidecar.requests.lock().unwrap().is_empty());
+    let check = get_ids(&state, id, OWNER).await;
+    assert_eq!(check.json()["code"], "IDS_NOT_CHECKED");
+}
+
+#[tokio::test]
+async fn a_ready_non_ifc_with_an_ids_file_does_not_start_a_check() {
+    let sidecar = mock_sidecar(StatusCode::OK, REPORT).await;
+    sidecar.release();
+    let state = test_state_with_ids_check(sidecar.ids_check_sidecar()).await;
+    let id = model_asset(&state, "model.obj").await;
+    store_ids(&state, id, Some(IDS_FILE_NAME));
+
+    ids_check::check_ready_asset(&state.db, &state.data_dir, state.ids_check.clone(), id).await;
+
+    assert!(sidecar.requests.lock().unwrap().is_empty());
+    let check = get_ids(&state, id, OWNER).await;
+    assert_eq!(check.json()["code"], "IDS_NOT_CHECKED");
+}
+
+#[tokio::test]
+async fn an_ids_file_with_no_sidecar_is_stored_as_a_failed_check() {
+    let state = test_state().await;
+    let id = model_asset(&state, "model.ifc").await;
+    store_ids(&state, id, Some(IDS_FILE_NAME));
+
+    ids_check::check_ready_asset(&state.db, &state.data_dir, None, id).await;
+
+    let check = get_ids(&state, id, OWNER).await;
+    assert_eq!(check.status, StatusCode::OK, "{}", check.json());
+    assert_eq!(check.json()["status"], "failed");
+    assert_eq!(check.json()["idsFileName"], IDS_FILE_NAME);
+    let error = check.json()["error"].as_str().unwrap().to_string();
+    assert!(error.contains("TILETOPIA_IDS_CHECK_URL"), "{error}");
+}
+
+fn ids_directories(state: &AppState) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(&state.data_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.join("ids").is_dir() {
+            found.push(path);
+        }
+    }
+    found
+}
+
+#[tokio::test]
+async fn an_ids_field_without_a_model_file_answers_400_and_leaves_no_directory() {
+    let state = test_state().await;
+    let mut body = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"ids\"; filename=\"{IDS_FILE_NAME}\"\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(IDS_XML.as_bytes());
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+
+    let answer = post_asset(&state, body).await;
+
+    assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+    let text = String::from_utf8(answer.bytes).unwrap();
+    assert!(text.contains("no file field"), "{text}");
+    assert!(ids_directories(&state).is_empty());
+}
+
+#[tokio::test]
+async fn an_upload_ids_field_that_is_not_an_ids_file_answers_400_before_a_job() {
+    let state = test_state().await;
+
+    let answer = post_asset(
+        &state,
+        asset_upload("model.ifc", Some("notes.txt"), b"not ids"),
+    )
+    .await;
+
+    assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+    let text = String::from_utf8(answer.bytes).unwrap();
+    assert!(text.contains("notes.txt"), "{text}");
+    assert_eq!(counted(&state, "SELECT COUNT(*) FROM jobs").await, 0);
+    assert_eq!(counted(&state, "SELECT COUNT(*) FROM assets").await, 0);
+    assert!(ids_directories(&state).is_empty());
+}
+
+#[tokio::test]
+async fn an_upload_stores_an_ids_file_and_does_not_start_a_check() {
+    let state = test_state().await;
+
+    let answer = post_asset(
+        &state,
+        asset_upload("model.ifc", Some(IDS_FILE_NAME), IDS_XML.as_bytes()),
+    )
+    .await;
+
+    assert_eq!(answer.status, StatusCode::CREATED, "{}", answer.json());
+    let uploaded = answer.json();
+    let id = uploaded["id"].as_str().unwrap();
+    let ids_dir = state.data_dir.join(id).join("ids");
+    assert_eq!(
+        std::fs::read_to_string(ids_dir.join("specification.ids")).unwrap(),
+        IDS_XML
+    );
+    assert_eq!(
+        std::fs::read_to_string(ids_dir.join("file-name")).unwrap(),
+        IDS_FILE_NAME
+    );
+    assert_eq!(counted(&state, "SELECT COUNT(*) FROM ids_checks").await, 0);
+    assert_eq!(counted(&state, "SELECT COUNT(*) FROM jobs").await, 1);
+
+    let check = get_ids(&state, Uuid::parse_str(id).unwrap(), OWNER).await;
+    assert_eq!(check.json()["code"], "IDS_NOT_CHECKED");
+}
+
+#[tokio::test]
+async fn an_upload_ids_field_longer_than_16_mib_answers_400_before_a_job() {
+    let state = test_state().await;
+    let ids_body = vec![b'x'; 16 * 1024 * 1024 + 1];
+
+    let answer = post_asset(
+        &state,
+        asset_upload("model.ifc", Some(IDS_FILE_NAME), &ids_body),
+    )
+    .await;
+
+    assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+    let text = String::from_utf8(answer.bytes).unwrap();
+    assert!(text.contains("16 MiB"), "{text}");
+    assert_eq!(counted(&state, "SELECT COUNT(*) FROM jobs").await, 0);
+    assert_eq!(counted(&state, "SELECT COUNT(*) FROM assets").await, 0);
+    assert!(ids_directories(&state).is_empty());
+}

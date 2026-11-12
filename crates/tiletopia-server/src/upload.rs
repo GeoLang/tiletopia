@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::audit::AuditedResource;
 use crate::db::ModelPlacement;
+use crate::ids_check::{FILE_NAME_FILE, IDS_DIR, MOST_IDS_UPLOAD_BYTES, STORED_IDS_FILE};
 use crate::imagery::{self, ImageryForm, PreparedUpload};
 use crate::job_queue::{Tiler, stored_input_path, tiler_for};
 use crate::model_versions;
@@ -223,7 +224,9 @@ pub async fn upload_asset(
         .await);
     }
 
-    let streamed_path = streamed_path.ok_or_else(|| bad_request("no file field in the upload"))?;
+    let Some(streamed_path) = streamed_path else {
+        return Err(discard(&asset_dir, bad_request("no file field in the upload")).await);
+    };
     let asset_name = name.unwrap_or_else(|| "unnamed".into());
 
     let Some(detected_type) = detect_asset_type(&asset_name) else {
@@ -483,6 +486,7 @@ async fn read_fields(
         photogrammetry_preset: None,
         base_asset_id: None,
     };
+    let mut stored_ids = false;
 
     while let Some(mut field) = multipart.next_field().await? {
         let field_name = field.name().unwrap_or("").to_string();
@@ -557,6 +561,32 @@ async fn read_fields(
                 let path = asset_dir.join("input").join(&file_name);
                 write_field(&mut field, &path).await?;
                 fields.streamed_path = Some(path);
+            }
+            "ids" => {
+                if stored_ids {
+                    return Err(bad_request("the upload has more than one ids field"));
+                }
+                let file_name = field
+                    .file_name()
+                    .map(|name| name.to_string())
+                    .ok_or_else(|| bad_request("the ids field has no file name"))?;
+                let file_name = checked_file_name(&file_name)?;
+                if lowercase_extension(Path::new(&file_name)) != "ids" {
+                    return Err(bad_request(format!("{file_name} is not an .ids file")));
+                }
+                let stored = asset_dir.join(IDS_DIR).join(STORED_IDS_FILE);
+                write_field(&mut field, &stored).await?;
+                let length = tokio::fs::metadata(&stored)
+                    .await
+                    .map_err(|_| server_error("could not write the uploaded file"))?
+                    .len();
+                if length > MOST_IDS_UPLOAD_BYTES as u64 {
+                    return Err(bad_request("the IDS file is longer than 16 MiB"));
+                }
+                tokio::fs::write(asset_dir.join(IDS_DIR).join(FILE_NAME_FILE), &file_name)
+                    .await
+                    .map_err(|_| server_error("could not write the uploaded file"))?;
+                stored_ids = true;
             }
             _ => {}
         }

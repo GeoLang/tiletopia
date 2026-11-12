@@ -331,6 +331,7 @@ async fn build_state_with_account_limits(
         node_odm,
         Arc::clone(&webhooks),
         Arc::clone(&elevation_store),
+        ids_check.clone(),
     ));
 
     let export_engine = Arc::new(tiletopia_server::export::ExportEngine::new());

@@ -22,18 +22,20 @@ use crate::db::Database;
 use crate::elements::{element_error, permitted_asset, server_failure};
 use crate::ion_compat::IonError;
 use crate::job_queue::job_with_input_in_asset_dir;
+use crate::model_versions;
 use crate::upload::{lowercase_extension, slash_separated, write_field};
 use crate::{AppState, Asset, AssetStatus, may_modify_asset, may_view_asset, scratch_files, users};
 
 pub const IDS_CHECK_URL_ENV: &str = "TILETOPIA_IDS_CHECK_URL";
 pub const IDS_CHECK_TOKEN_ENV: &str = "TILETOPIA_IDS_CHECK_TOKEN";
 
-const IDS_DIR: &str = "ids";
-const STORED_IDS_FILE: &str = "specification.ids";
+pub(crate) const IDS_DIR: &str = "ids";
+pub(crate) const STORED_IDS_FILE: &str = "specification.ids";
+pub(crate) const FILE_NAME_FILE: &str = "file-name";
 const REPORT_FILE: &str = "report.json";
 const UPLOAD_FILE: &str = "upload.ids";
 
-const MOST_IDS_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MOST_IDS_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
 const MOST_CHECK_DURATION: Duration = Duration::from_secs(60 * 60);
 const SIDECAR_BODY_CHARACTERS_IN_ERROR: usize = 500;
 
@@ -146,6 +148,10 @@ struct IdsCheckAnswer {
 
 fn ids_refusal(message: impl Into<String>) -> IonError {
     element_error(StatusCode::BAD_REQUEST, "INVALID_IDS", message)
+}
+
+fn sidecar_unset_message() -> String {
+    format!("{IDS_CHECK_URL_ENV} is unset, so this server has no IDS check sidecar to call")
 }
 
 fn read_failure(error: impl std::fmt::Display) -> IonError {
@@ -329,9 +335,7 @@ async fn start_check(
         return Err(element_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "IDS_CHECK_UNAVAILABLE",
-            format!(
-                "{IDS_CHECK_URL_ENV} is unset, so this server has no IDS check sidecar to call"
-            ),
+            sidecar_unset_message(),
         ));
     };
     let ifc_path = ifc_source_in_data_dir(&state, &asset, &id).await?;
@@ -363,7 +367,13 @@ async fn start_check(
         ifc_path,
         ids_path: format!("{}/{IDS_DIR}/{STORED_IDS_FILE}", asset.id),
     };
-    tokio::spawn(run_check(Arc::clone(&state), asset.id, sidecar, request));
+    tokio::spawn(run_check(
+        Arc::clone(&state.db),
+        state.data_dir.clone(),
+        asset.id,
+        sidecar,
+        request,
+    ));
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({ "status": CheckStatus::Running })),
@@ -412,14 +422,15 @@ async fn sidecar_report(
 }
 
 async fn run_check(
-    state: Arc<AppState>,
+    db: Arc<Database>,
+    data_dir: PathBuf,
     asset_id: Uuid,
     sidecar: IdsCheckSidecar,
     request: CheckRequest,
 ) {
     let outcome = match sidecar_report(&sidecar, &request).await {
         // tokio::fs::write creates no missing directory, and deleting the asset removes the ids directory
-        Ok(report) => tokio::fs::write(report_path(&state.data_dir, asset_id), report.get())
+        Ok(report) => tokio::fs::write(report_path(&data_dir, asset_id), report.get())
             .await
             .map_err(|error| format!("writing the IDS report failed: {error}")),
         Err(reason) => Err(reason),
@@ -427,10 +438,241 @@ async fn run_check(
     if let Err(reason) = &outcome {
         tracing::warn!("IDS check of asset {asset_id} failed: {reason}");
     }
-    if let Err(error) = settle_check(&state.db, asset_id, &outcome).await {
+    if let Err(error) = settle_check(&db, asset_id, &outcome).await {
         tracing::error!(
             "IDS check of asset {asset_id}: it reads as running until the next restart, writing its outcome failed: {error}"
         );
+    }
+}
+
+fn specification_path(data_dir: &Path, asset_id: Uuid) -> PathBuf {
+    data_dir
+        .join(asset_id.to_string())
+        .join(IDS_DIR)
+        .join(STORED_IDS_FILE)
+}
+
+fn ion_message(error: &IonError) -> String {
+    error
+        .1
+        .0
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("the IDS check could not be started")
+        .to_string()
+}
+
+fn check_is_running(error: &IonError) -> bool {
+    error.0 == StatusCode::CONFLICT
+        && error.1.0.get("code").and_then(serde_json::Value::as_str) == Some("IDS_CHECK_RUNNING")
+}
+
+async fn ids_file_name(db: &Database, data_dir: &Path, asset_id: Uuid) -> Result<String, String> {
+    let path = data_dir
+        .join(asset_id.to_string())
+        .join(IDS_DIR)
+        .join(FILE_NAME_FILE);
+    match tokio::fs::read_to_string(&path).await {
+        Ok(name) => {
+            let name = name.trim();
+            if !name.is_empty() {
+                return Ok(name.to_string());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("reading {} failed: {error}", path.display())),
+    }
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT ids_file_name FROM ids_checks WHERE asset_id = ?")
+            .bind(asset_id.to_string())
+            .fetch_optional(&db.pool)
+            .await
+            .map_err(|error| format!("reading the IDS file name of {asset_id} failed: {error}"))?;
+    Ok(stored.unwrap_or_else(|| STORED_IDS_FILE.to_string()))
+}
+
+struct StoredSpecification {
+    asset_id: Uuid,
+    file_name: String,
+}
+
+async fn specification_is_stored(data_dir: &Path, asset_id: Uuid) -> Result<bool, String> {
+    tokio::fs::try_exists(specification_path(data_dir, asset_id))
+        .await
+        .map_err(|error| format!("reading the IDS file of {asset_id} failed: {error}"))
+}
+
+async fn specification_for(
+    db: &Database,
+    data_dir: &Path,
+    asset_id: Uuid,
+) -> Result<Option<StoredSpecification>, String> {
+    if specification_is_stored(data_dir, asset_id).await? {
+        return Ok(Some(StoredSpecification {
+            asset_id,
+            file_name: ids_file_name(db, data_dir, asset_id).await?,
+        }));
+    }
+    let version = model_versions::version_of(db, asset_id)
+        .await
+        .map_err(|error| format!("reading the versions of {asset_id} failed: {error}"))?;
+    let Some(version) = version else {
+        return Ok(None);
+    };
+    let versions = model_versions::versions_newest_first(db, version.base_asset_id)
+        .await
+        .map_err(|error| {
+            format!(
+                "reading the versions of {} failed: {error}",
+                version.base_asset_id
+            )
+        })?;
+    for earlier in versions {
+        if earlier.asset_id == asset_id {
+            continue;
+        }
+        if !specification_is_stored(data_dir, earlier.asset_id).await? {
+            continue;
+        }
+        return Ok(Some(StoredSpecification {
+            asset_id: earlier.asset_id,
+            file_name: ids_file_name(db, data_dir, earlier.asset_id).await?,
+        }));
+    }
+    Ok(None)
+}
+
+async fn copy_specification(
+    data_dir: &Path,
+    from_asset_id: Uuid,
+    asset_id: Uuid,
+    file_name: &str,
+) -> Result<(), String> {
+    let ids_dir = data_dir.join(asset_id.to_string()).join(IDS_DIR);
+    tokio::fs::create_dir_all(&ids_dir)
+        .await
+        .map_err(|error| format!("creating {} failed: {error}", ids_dir.display()))?;
+    tokio::fs::copy(
+        specification_path(data_dir, from_asset_id),
+        ids_dir.join(STORED_IDS_FILE),
+    )
+    .await
+    .map_err(|error| format!("copying the IDS file onto {asset_id} failed: {error}"))?;
+    tokio::fs::write(ids_dir.join(FILE_NAME_FILE), file_name)
+        .await
+        .map_err(|error| format!("writing the IDS file name of {asset_id} failed: {error}"))?;
+    Ok(())
+}
+
+async fn ready_ifc_path(
+    db: &Database,
+    data_dir: &Path,
+    asset_id: Uuid,
+) -> Result<Option<String>, String> {
+    let jobs = db
+        .list_jobs_for_asset(asset_id)
+        .await
+        .map_err(|error| format!("reading the jobs of {asset_id} failed: {error}"))?;
+    let Some(job) = jobs.into_iter().next() else {
+        return Ok(None);
+    };
+    let source = PathBuf::from(
+        job_with_input_in_asset_dir(&job, &data_dir.join(asset_id.to_string())).input_path,
+    );
+    let extension = lowercase_extension(&source);
+    if !matches!(extension.as_str(), "ifc" | "ifczip") {
+        return Ok(None);
+    }
+    let present = tokio::fs::try_exists(&source)
+        .await
+        .map_err(|error| format!("reading {} failed: {error}", source.display()))?;
+    if !present {
+        return Err(format!("asset {asset_id}'s source file is gone"));
+    }
+    let relative = source.strip_prefix(data_dir).map_err(|_| {
+        format!(
+            "{} is outside the data directory {}",
+            source.display(),
+            data_dir.display()
+        )
+    })?;
+    Ok(Some(slash_separated(relative)))
+}
+
+async fn start_check_of_ready_asset(
+    db: &Arc<Database>,
+    data_dir: &Path,
+    sidecar: Option<IdsCheckSidecar>,
+    asset_id: Uuid,
+) -> Result<(), String> {
+    let asset = db
+        .get_asset(asset_id)
+        .await
+        .map_err(|error| format!("reading asset {asset_id} failed: {error}"))?;
+    let Some(asset) = asset else {
+        return Ok(());
+    };
+    if !matches!(asset.status, AssetStatus::Ready) {
+        return Ok(());
+    }
+    let checked: Option<String> =
+        sqlx::query_scalar("SELECT status FROM ids_checks WHERE asset_id = ?")
+            .bind(asset_id.to_string())
+            .fetch_optional(&db.pool)
+            .await
+            .map_err(|error| format!("reading the IDS check of {asset_id} failed: {error}"))?;
+    if checked.is_some() {
+        return Ok(());
+    }
+    let Some(ifc_path) = ready_ifc_path(db, data_dir, asset_id).await? else {
+        return Ok(());
+    };
+    let Some(specification) = specification_for(db, data_dir, asset_id).await? else {
+        return Ok(());
+    };
+    if specification.asset_id != asset_id {
+        copy_specification(
+            data_dir,
+            specification.asset_id,
+            asset_id,
+            &specification.file_name,
+        )
+        .await?;
+    }
+    match claim_check(db, asset_id, &specification.file_name).await {
+        Ok(()) => {}
+        Err(error) if check_is_running(&error) => return Ok(()),
+        Err(error) => return Err(ion_message(&error)),
+    }
+    let Some(sidecar) = sidecar else {
+        let outcome = Err(sidecar_unset_message());
+        settle_check(db, asset_id, &outcome)
+            .await
+            .map_err(|error| format!("writing the IDS check outcome failed: {error}"))?;
+        return Ok(());
+    };
+    let request = CheckRequest {
+        ifc_path,
+        ids_path: format!("{asset_id}/{IDS_DIR}/{STORED_IDS_FILE}"),
+    };
+    tokio::spawn(run_check(
+        Arc::clone(db),
+        data_dir.to_path_buf(),
+        asset_id,
+        sidecar,
+        request,
+    ));
+    Ok(())
+}
+
+pub async fn check_ready_asset(
+    db: &Arc<Database>,
+    data_dir: &Path,
+    sidecar: Option<IdsCheckSidecar>,
+    asset_id: Uuid,
+) {
+    if let Err(reason) = start_check_of_ready_asset(db, data_dir, sidecar, asset_id).await {
+        tracing::warn!("IDS check of asset {asset_id} failed: {reason}");
     }
 }
 

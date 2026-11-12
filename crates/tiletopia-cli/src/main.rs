@@ -238,6 +238,7 @@ async fn main() -> anyhow::Result<()> {
                 node_odm,
                 Arc::clone(&webhooks),
                 Arc::clone(&elevation_store),
+                ids_check.clone(),
             ));
             let interrupted_jobs = job_queue
                 .fail_interrupted_jobs()

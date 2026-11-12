@@ -134,6 +134,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 2026-11-12: an `.ifc` or `.ifczip` upload can include an `.ids` file in the
+  multipart field `ids`, up to 16 MiB. The check starts when the tiling job
+  sets the asset ready. A new version with no `ids` field is checked against
+  the newest earlier version's stored file, copied onto the new asset before
+  older versions are removed. With `TILETOPIA_IDS_CHECK_URL` unset, that check
+  is stored `failed` and its error names the variable. `POST /v1/assets/{id}/ids`
+  with the variable unset still answers 503 and stores no row.
 - 2026-11-06: `tileset.json`, `tiles/{path}` and `data/{path}` responses are
   compressed with brotli at quality 5, or gzip, when the request accepts it.
   Brotli serves the `balconies-a2` tiles 40% smaller.
