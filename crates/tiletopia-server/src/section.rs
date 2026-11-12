@@ -43,13 +43,13 @@ impl Axis {
         }
     }
 
-    fn plane_axes(self) -> [usize; 2] {
+    pub(crate) fn plane_axes(self) -> [usize; 2] {
         let index = self.index();
         [(index + 1) % 3, (index + 2) % 3]
     }
 }
 
-fn parsed_axis(raw: Option<&str>) -> Result<Axis, IonError> {
+pub(crate) fn parsed_axis(raw: Option<&str>) -> Result<Axis, IonError> {
     match raw {
         Some("x") => Ok(Axis::X),
         Some("y") => Ok(Axis::Y),
@@ -61,12 +61,22 @@ fn parsed_axis(raw: Option<&str>) -> Result<Axis, IonError> {
     }
 }
 
-fn parsed_position(raw: Option<&str>) -> Result<f64, IonError> {
+pub(crate) fn parsed_position(raw: Option<&str>) -> Result<f64, IonError> {
     let raw = raw.ok_or_else(|| invalid_parameter("position is required, in metres"))?;
     raw.parse::<f64>()
         .ok()
         .filter(|position| position.is_finite())
         .ok_or_else(|| invalid_parameter(format!("position {raw:?} is not a finite number")))
+}
+
+pub(crate) fn not_ifc_section(id: &str, extension: &str) -> IonError {
+    element_error(
+        StatusCode::NOT_FOUND,
+        "ASSET_HAS_NO_MESH_SOURCE",
+        format!(
+            "asset {id}'s source is a .{extension}, and only an IFC has element ids to section"
+        ),
+    )
 }
 
 pub(crate) type Ring = Vec<[f64; 3]>;
@@ -81,9 +91,9 @@ pub(crate) struct ElementPolygon {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Section {
-    axis: Axis,
+    pub(crate) axis: Axis,
     position: f64,
-    open_chains_dropped: u64,
+    pub(crate) open_chains_dropped: u64,
     pub(crate) polygons: Vec<ElementPolygon>,
 }
 
@@ -479,14 +489,7 @@ async fn get_section(
     let position = parsed_position(parameters.position.as_deref())?;
     let source = mesh_source(&state, &asset, &id).await?;
     if source.extension != "ifc" {
-        return Err(element_error(
-            StatusCode::NOT_FOUND,
-            "ASSET_HAS_NO_MESH_SOURCE",
-            format!(
-                "asset {id}'s source is a .{}, and only an IFC has element ids to section",
-                source.extension
-            ),
-        ));
+        return Err(not_ifc_section(&id, &source.extension));
     }
 
     // the mesh readers hold the whole model in memory, the same load an upload's preparation budgets for

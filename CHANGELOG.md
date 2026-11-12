@@ -134,6 +134,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 2026-11-12: `GET /v1/assets/{id}/dxf?axis=&position=` writes each closed ring of
+  that section as an `LWPOLYLINE` in the plane, XY for z, YZ for x and ZX for
+  y. `cutHeight` still writes `3DFACE` and answers 400 together with `axis` or
+  `position`. A section of a source other than IFC answers 404. The mesh reader
+  skips `LWPOLYLINE`, and a section export is not a mesh upload.
 - 2026-11-12: an `.ifc` or `.ifczip` upload can include an `.ids` file in the
   multipart field `ids`, up to 16 MiB. The check starts when the tiling job
   sets the asset ready. A new version with no `ids` field is checked against

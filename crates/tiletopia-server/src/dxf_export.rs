@@ -17,6 +17,7 @@ use crate::elements::{element_error, invalid_parameter, permitted_asset, server_
 use crate::elevation::JOB_BUDGET_BYTES;
 use crate::ion_compat::IonError;
 use crate::job_queue::{Tiler, job_with_input_in_asset_dir, move_into_tileset_frame, tiler_for};
+use crate::section::{Axis, Section, not_ifc_section, parsed_axis, parsed_position, section_of};
 use crate::upload::lowercase_extension;
 use crate::{AppState, Asset, AssetStatus, may_view_asset, scratch_files};
 
@@ -34,6 +35,14 @@ pub fn dxf_export_routes() -> Router<Arc<AppState>> {
 struct DxfParameters {
     #[serde(rename = "cutHeight")]
     cut_height: Option<String>,
+    axis: Option<String>,
+    position: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct SectionPlane {
+    axis: Axis,
+    position: f64,
 }
 
 fn parsed_cut_height(raw: Option<&str>) -> Result<Option<f64>, IonError> {
@@ -298,34 +307,46 @@ fn write_groups(output: &mut impl Write, groups: Groups) -> std::io::Result<()> 
     Ok(())
 }
 
-struct DxfFaces {
+struct WrittenDxf {
     written: u64,
     skipped_not_finite: u64,
+    open_chains_dropped: u64,
 }
 
 const FIRST_FACE_HANDLE: u64 = 0x1B;
 
-fn write_dxf(
-    path: &Path,
-    meshes: &[MeshData],
-    source_is_z_up: bool,
-    cut_height: Option<f64>,
-) -> std::io::Result<DxfFaces> {
-    let triangles: u64 = meshes
-        .iter()
-        .map(|mesh| mesh.indices.len() as u64 / 3)
-        .sum();
+fn begin_dxf(path: &Path, entity_count: u64) -> std::io::Result<BufWriter<std::fs::File>> {
     // readers assign new handles from $HANDSEED up, and it has to exceed every handle written
-    let handle_seed = FIRST_FACE_HANDLE + triangles;
+    let handle_seed = FIRST_FACE_HANDLE + entity_count;
     let mut output = BufWriter::new(std::fs::File::create(path)?);
     write!(
         output,
         "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1015\n9\n$HANDSEED\n5\n{handle_seed:X}\n9\n$INSUNITS\n70\n{INSUNITS_METRES}\n0\nENDSEC\n"
     )?;
     write_groups(&mut output, CLASSES_TABLES_AND_BLOCKS)?;
-    let mut faces = DxfFaces {
+    Ok(output)
+}
+
+fn finish_dxf(mut output: BufWriter<std::fs::File>) -> std::io::Result<()> {
+    write_groups(&mut output, OBJECTS_AND_END)?;
+    output.flush()
+}
+
+fn write_dxf(
+    path: &Path,
+    meshes: &[MeshData],
+    source_is_z_up: bool,
+    cut_height: Option<f64>,
+) -> std::io::Result<WrittenDxf> {
+    let triangles: u64 = meshes
+        .iter()
+        .map(|mesh| mesh.indices.len() as u64 / 3)
+        .sum();
+    let mut output = begin_dxf(path, triangles)?;
+    let mut faces = WrittenDxf {
         written: 0,
         skipped_not_finite: 0,
+        open_chains_dropped: 0,
     };
     for mesh in meshes {
         for triangle in mesh.indices.as_chunks::<3>().0 {
@@ -352,9 +373,65 @@ fn write_dxf(
             faces.written += 1;
         }
     }
-    write_groups(&mut output, OBJECTS_AND_END)?;
-    output.flush()?;
+    finish_dxf(output)?;
     Ok(faces)
+}
+
+fn write_polyline(
+    output: &mut impl Write,
+    handle: u64,
+    plane_axes: [usize; 2],
+    ring: &[[f64; 3]],
+) -> std::io::Result<()> {
+    // group 70 value 1 closes an LWPOLYLINE without a repeated first point
+    write!(
+        output,
+        "0\nLWPOLYLINE\n5\n{handle:X}\n330\n{MODEL_SPACE_RECORD}\n100\nAcDbEntity\n8\n0\n100\nAcDbPolyline\n90\n{}\n70\n1\n",
+        ring.len()
+    )?;
+    for point in ring {
+        write!(
+            output,
+            "10\n{}\n20\n{}\n",
+            point[plane_axes[0]], point[plane_axes[1]]
+        )?;
+    }
+    Ok(())
+}
+
+fn write_section_dxf(path: &Path, section: &Section) -> std::io::Result<WrittenDxf> {
+    let plane_axes = section.axis.plane_axes();
+    let ring_count: u64 = section
+        .polygons
+        .iter()
+        .map(|polygon| polygon.rings.len() as u64)
+        .sum();
+    let mut output = begin_dxf(path, ring_count)?;
+    let mut drawing = WrittenDxf {
+        written: 0,
+        skipped_not_finite: 0,
+        open_chains_dropped: section.open_chains_dropped,
+    };
+    for polygon in &section.polygons {
+        for ring in &polygon.rings {
+            let finite = ring
+                .iter()
+                .all(|point| plane_axes.iter().all(|&axis| point[axis].is_finite()));
+            if !finite {
+                drawing.skipped_not_finite += 1;
+                continue;
+            }
+            write_polyline(
+                &mut output,
+                FIRST_FACE_HANDLE + drawing.written,
+                plane_axes,
+                ring,
+            )?;
+            drawing.written += 1;
+        }
+    }
+    finish_dxf(output)?;
+    Ok(drawing)
 }
 
 async fn export_dxf(
@@ -364,12 +441,28 @@ async fn export_dxf(
     Query(parameters): Query<DxfParameters>,
 ) -> Result<Response, IonError> {
     let (asset, ion_id) = permitted_asset(&state, &headers, &id, may_view_asset).await?;
+    let section = if parameters.axis.is_some() || parameters.position.is_some() {
+        if parameters.cut_height.is_some() {
+            return Err(invalid_parameter(
+                "cutHeight clips the model's faces, so it is not sent with axis and position",
+            ));
+        }
+        Some(SectionPlane {
+            axis: parsed_axis(parameters.axis.as_deref())?,
+            position: parsed_position(parameters.position.as_deref())?,
+        })
+    } else {
+        None
+    };
     let cut_height = parsed_cut_height(parameters.cut_height.as_deref())?;
     let MeshSource {
         job,
         extension,
         source_is_z_up,
     } = mesh_source(&state, &asset, &id).await?;
+    if section.is_some() && extension != "ifc" {
+        return Err(not_ifc_section(&id, &extension));
+    }
 
     let scratch = scratch_files::new_scratch_dir(&state.data_dir)
         .await
@@ -382,8 +475,15 @@ async fn export_dxf(
     let written = tokio::task::spawn_blocking(move || {
         let _build_slot = build_slot;
         let meshes = read_meshes_in_tileset_frame(&job, &extension)?;
-        write_dxf(&output_path, &meshes, source_is_z_up, cut_height)
-            .map_err(|error| format!("writing the DXF failed: {error}"))
+        match section {
+            Some(plane) => {
+                let cut = section_of(&meshes, plane.axis, plane.position);
+                write_section_dxf(&output_path, &cut)
+                    .map_err(|error| format!("writing the DXF failed: {error}"))
+            }
+            None => write_dxf(&output_path, &meshes, source_is_z_up, cut_height)
+                .map_err(|error| format!("writing the DXF failed: {error}")),
+        }
     })
     .await
     .map_err(|error| server_failure("the DXF export could not be written", error))
@@ -399,16 +499,42 @@ async fn export_dxf(
         }
     };
     if faces.skipped_not_finite > 0 {
+        let kind = if section.is_some() {
+            "rings"
+        } else {
+            "triangles"
+        };
         tracing::warn!(
-            "asset {id}: left {} triangles with non-finite coordinates out of the DXF",
+            "asset {id}: left {} {kind} with non-finite coordinates out of the DXF",
             faces.skipped_not_finite
+        );
+    }
+    if faces.open_chains_dropped > 0 {
+        tracing::warn!(
+            "asset {id}: left {} open chains out of the DXF",
+            faces.open_chains_dropped
         );
     }
     if faces.written == 0 {
         remove_scratch(&scratch).await;
-        return Err(invalid_parameter(match cut_height {
-            Some(height) => format!("no geometry of asset {id} lies at or below height {height}"),
-            None => format!("asset {id} has no triangles"),
+        return Err(invalid_parameter(match section {
+            Some(plane) => {
+                let axis = match plane.axis {
+                    Axis::X => "x",
+                    Axis::Y => "y",
+                    Axis::Z => "z",
+                };
+                format!(
+                    "no closed outline of asset {id} lies on {axis} = {}",
+                    plane.position
+                )
+            }
+            None => match cut_height {
+                Some(height) => {
+                    format!("no geometry of asset {id} lies at or below height {height}")
+                }
+                None => format!("asset {id} has no triangles"),
+            },
         }));
     }
 
@@ -594,5 +720,136 @@ mod tests {
         let read_back = tiletopia_ingest::dxf_reader::read(&path, u64::MAX, None).unwrap();
         let triangles: usize = read_back.iter().map(|mesh| mesh.indices.len() / 3).sum();
         assert_eq!(triangles, 2);
+    }
+
+    fn box_mesh(minimum: [f64; 3], maximum: [f64; 3]) -> MeshData {
+        let corner = |index: usize| -> [f64; 3] {
+            std::array::from_fn(|axis| {
+                if (index >> axis) & 1 == 1 {
+                    maximum[axis]
+                } else {
+                    minimum[axis]
+                }
+            })
+        };
+        let faces: [[usize; 4]; 6] = [
+            [0, 2, 3, 1],
+            [4, 5, 7, 6],
+            [0, 1, 5, 4],
+            [2, 6, 7, 3],
+            [0, 4, 6, 2],
+            [1, 3, 7, 5],
+        ];
+        let indices = faces
+            .iter()
+            .flat_map(|face| [face[0], face[1], face[2], face[0], face[2], face[3]])
+            .map(|index| index as u32)
+            .collect();
+        MeshData {
+            positions: (0..8).map(corner).collect(),
+            normals: Vec::new(),
+            texcoords: Vec::new(),
+            indices,
+            name: "box".to_string(),
+            material: None,
+            asset_id: Some("0box000000000000000000".to_string()),
+            class: None,
+            storey: None,
+            element_color: None,
+        }
+    }
+
+    fn polyline_vertices(path: &Path) -> Vec<Vec<[f64; 2]>> {
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(!text.contains("\n3DFACE\n"), "{text}");
+        let lines: Vec<&str> = text.lines().collect();
+        let groups: Vec<(&str, &str)> = lines.chunks(2).map(|pair| (pair[0], pair[1])).collect();
+        let mut polylines = Vec::new();
+        let mut index = 0;
+        while index < groups.len() {
+            if groups[index] != ("0", "LWPOLYLINE") {
+                index += 1;
+                continue;
+            }
+            let body: Vec<(&str, &str)> = groups[index + 1..]
+                .iter()
+                .copied()
+                .take_while(|&(code, _)| code != "0")
+                .collect();
+            assert_eq!(
+                body.iter()
+                    .find(|(code, _)| *code == "70")
+                    .map(|(_, flag)| *flag),
+                Some("1")
+            );
+            assert_eq!(
+                body.iter()
+                    .find(|(code, _)| *code == "8")
+                    .map(|(_, layer)| *layer),
+                Some("0")
+            );
+            let count: usize = body
+                .iter()
+                .find(|(code, _)| *code == "90")
+                .unwrap()
+                .1
+                .parse()
+                .unwrap();
+            let mut points = Vec::new();
+            let mut pending_x = None;
+            for (code, value) in &body {
+                if *code == "10" {
+                    pending_x = Some(value.parse::<f64>().unwrap());
+                }
+                if *code == "20" {
+                    points.push([pending_x.unwrap(), value.parse().unwrap()]);
+                }
+            }
+            assert_eq!(points.len(), count);
+            assert_ne!(points.first(), points.last());
+            polylines.push(points);
+            index += 1 + body.len();
+        }
+        polylines
+    }
+
+    #[test]
+    fn a_section_is_closed_polylines_in_the_planes_two_axes() {
+        let mesh = box_mesh([0.0, 0.0, 0.0], [4.0, 0.3, 2.5]);
+        let directory = tempfile::tempdir().unwrap();
+        let cuts = [
+            (Axis::Z, 1.25, [[0.0, 0.0], [4.0, 0.3]]),
+            (Axis::X, 2.0, [[0.0, 0.0], [0.3, 2.5]]),
+            (Axis::Y, 0.15, [[0.0, 0.0], [2.5, 4.0]]),
+        ];
+        for (axis, position, [minimum, maximum]) in cuts {
+            let section = section_of(std::slice::from_ref(&mesh), axis, position);
+            assert_eq!(section.open_chains_dropped, 0);
+            assert_eq!(section.polygons.len(), 1);
+            let rings = &section.polygons[0].rings;
+            assert_eq!(rings.len(), 1);
+            let plane_axes = axis.plane_axes();
+            let expected: Vec<[f64; 2]> = rings[0]
+                .iter()
+                .map(|point| [point[plane_axes[0]], point[plane_axes[1]]])
+                .collect();
+            let corners = [
+                [minimum[0], minimum[1]],
+                [minimum[0], maximum[1]],
+                [maximum[0], minimum[1]],
+                [maximum[0], maximum[1]],
+            ];
+            for corner in corners {
+                assert!(
+                    expected.contains(&corner),
+                    "{corner:?} missing from {axis:?} {expected:?}"
+                );
+            }
+            let path = directory.path().join(format!("{position}.dxf"));
+            let drawing = write_section_dxf(&path, &section).unwrap();
+            assert_eq!(drawing.written, 1);
+            assert_eq!(drawing.skipped_not_finite, 0);
+            assert_eq!(polyline_vertices(&path), vec![expected]);
+        }
     }
 }

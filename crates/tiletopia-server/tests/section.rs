@@ -342,9 +342,120 @@ async fn an_asset_that_is_not_a_tiled_ifc_answers_404() {
         .unwrap();
 
     for ion_id in [mesh.ion_id, never_tiled] {
-        let uri = format!("/v1/assets/{ion_id}/section?axis=z&position=0.5");
-        let (status, body) = get_as(&state, &uri, OWNER).await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-        assert_eq!(body["code"], "ASSET_HAS_NO_MESH_SOURCE");
+        for uri in [
+            format!("/v1/assets/{ion_id}/section?axis=z&position=0.5"),
+            format!("/v1/assets/{ion_id}/dxf?axis=z&position=0.5"),
+        ] {
+            let (status, body) = get_as(&state, &uri, OWNER).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
+            assert_eq!(body["code"], "ASSET_HAS_NO_MESH_SOURCE", "{uri}");
+        }
     }
+}
+
+async fn get_bytes(state: &Arc<AppState>, uri: &str) -> (StatusCode, Vec<u8>) {
+    let request = Request::builder()
+        .uri(uri)
+        .header(
+            "authorization",
+            format!("Bearer {}", token(OWNER, "viewer")),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = router(Arc::clone(state)).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, bytes.to_vec())
+}
+
+fn section_polylines(bytes: &[u8]) -> Vec<Vec<[f64; 2]>> {
+    let text = std::str::from_utf8(bytes).unwrap();
+    assert!(!text.contains("\n3DFACE\n"), "{text}");
+    let lines: Vec<&str> = text.lines().collect();
+    let groups: Vec<(&str, &str)> = lines.chunks(2).map(|pair| (pair[0], pair[1])).collect();
+    let mut polylines = Vec::new();
+    let mut index = 0;
+    while index < groups.len() {
+        if groups[index] != ("0", "LWPOLYLINE") {
+            index += 1;
+            continue;
+        }
+        let body: Vec<(&str, &str)> = groups[index + 1..]
+            .iter()
+            .copied()
+            .take_while(|&(code, _)| code != "0")
+            .collect();
+        assert_eq!(body.iter().find(|(code, _)| *code == "70").unwrap().1, "1");
+        let mut points = Vec::new();
+        let mut pending_x = None;
+        for (code, value) in &body {
+            if *code == "10" {
+                pending_x = Some(value.parse::<f64>().unwrap());
+            }
+            if *code == "20" {
+                points.push([pending_x.unwrap(), value.parse::<f64>().unwrap()]);
+            }
+        }
+        assert_ne!(points.first(), points.last());
+        polylines.push(points);
+        index += 1 + body.len();
+    }
+    polylines
+}
+
+#[tokio::test]
+async fn a_section_dxf_writes_the_cuts_closed_polylines() {
+    let state = test_state().await;
+    let model = upload_and_tile(&state, "section.ifc", WALL_WITH_AN_OPENING_IFC).await;
+
+    let combined = format!(
+        "/v1/assets/{}/dxf?axis=z&position=0.25&cutHeight=1",
+        model.ion_id
+    );
+    let (status, body) = get_as(&state, &combined, OWNER).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["message"].as_str().unwrap().contains("cutHeight"),
+        "{body}"
+    );
+
+    let missing_position = format!("/v1/assets/{}/dxf?axis=z", model.ion_id);
+    let (status, body) = get_as(&state, &missing_position, OWNER).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("position is required"),
+        "{body}"
+    );
+
+    let uri = format!("/v1/assets/{}/dxf?axis=z&position=0.25", model.ion_id);
+    let (status, bytes) = get_bytes(&state, &uri).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{uri}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let polylines = section_polylines(&bytes);
+    assert_eq!(polylines.len(), 1, "{polylines:?}");
+    let ring: Vec<[f64; 3]> = polylines[0]
+        .iter()
+        .map(|point| [point[0], point[1], 0.0])
+        .collect();
+    assert_outlines_rectangle(&ring, [X, Y], [-2.0, -0.15], [2.0, 0.15]);
+
+    let outside = format!("/v1/assets/{}/dxf?axis=z&position=10", model.ion_id);
+    let (status, body) = get_as(&state, &outside, OWNER).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("no closed outline"),
+        "{body}"
+    );
 }
