@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use tiletopia_core::mesh_tiler::MeshData;
 use tiletopia_ingest::IngestError;
 use tiletopia_ingest::ifc_elements::{
-    ElementLocation, ElementProperty, ExtractedElement, ExtractionWarnings, ModelOrigin,
-    PropertyValue, element_locations, extract_elements,
+    ElementLocation, ElementProperty, ExtractedElement, ExtractionWarnings, IfcScan, ModelOrigin,
+    PropertyValue, element_locations, extract_elements, extract_elements_from_scan,
 };
 use tiletopia_ingest::ifc_reader::MapConversionPlacement;
 
@@ -350,6 +350,7 @@ pub fn build_store_and_label_meshes(
     origin: ModelOrigin,
     east_north_up_placement: Option<&MapConversionPlacement>,
     mut meshes: Vec<MeshData>,
+    scan: Option<&IfcScan>,
 ) -> Result<Vec<MeshData>, String> {
     let locations = element_locations(
         meshes
@@ -370,27 +371,38 @@ pub fn build_store_and_label_meshes(
         .block_on(StoreWriter::create(&building, mesh_hashes))
         .map_err(write_failure)?;
     let mut mesh_labels: HashMap<String, (String, Option<String>)> = HashMap::new();
-    let warnings = extract_elements(
-        source,
-        &locations,
-        origin,
-        east_north_up_placement,
-        |element| {
-            if locations.contains_key(&element.global_id) {
-                mesh_labels.insert(
-                    element.global_id.clone(),
-                    (element.class.clone(), element.storey.clone()),
-                );
-            }
-            writer.push(element);
-            if !writer.is_full() {
-                return Ok(());
-            }
-            runtime
-                .block_on(writer.flush())
-                .map_err(|error| IngestError::ElementRefused(write_failure(error)))
-        },
-    )
+    let mut on_element = |element: ExtractedElement| {
+        if locations.contains_key(&element.global_id) {
+            mesh_labels.insert(
+                element.global_id.clone(),
+                (element.class.clone(), element.storey.clone()),
+            );
+        }
+        writer.push(element);
+        if !writer.is_full() {
+            return Ok(());
+        }
+        runtime
+            .block_on(writer.flush())
+            .map_err(|error| IngestError::ElementRefused(write_failure(error)))
+    };
+    let warnings = match scan {
+        Some(scan) => extract_elements_from_scan(
+            source,
+            scan,
+            &locations,
+            origin,
+            east_north_up_placement,
+            &mut on_element,
+        ),
+        None => extract_elements(
+            source,
+            &locations,
+            origin,
+            east_north_up_placement,
+            &mut on_element,
+        ),
+    }
     .map_err(|error| format!("element extraction failed: {error}"))?;
     runtime
         .block_on(writer.finish(&warnings, requested_at))

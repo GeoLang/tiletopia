@@ -6587,6 +6587,8 @@ dependencies = [
  "percent-encoding",
  "ply-rs",
  "quick-xml 0.39.4",
+ "rayon",
+ "rustc-hash",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",

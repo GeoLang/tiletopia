@@ -127,7 +127,8 @@ async fn build_store(
 ) -> Vec<MeshData> {
     tokio::task::spawn_blocking(move || {
         let labelled =
-            build_store_and_label_meshes(ifc.as_ref(), &asset_dir, ORIGIN, None, meshes).unwrap();
+            build_store_and_label_meshes(ifc.as_ref(), &asset_dir, ORIGIN, None, meshes, None)
+                .unwrap();
         finish_build(&asset_dir, true).unwrap();
         labelled
     })

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 2026-11-12: IFC products are meshed together on the geometry pool. The
+  element store reads that same entity index, instead of scanning the file
+  a second time.
+- 2026-11-12: a window's glass and frame are separate meshes when the IFC
+  styles them apart. Parts of one element that share a colour stay one mesh.
 - 2026-11-12: draco-gltf 0.8 reads a tile whose `NORMAL` is a normalized byte
   under `KHR_mesh_quantization`. Meshopt tile tests decode through
   `read_primitive`, the call 0.7 rejected.

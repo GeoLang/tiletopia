@@ -739,11 +739,13 @@ fn tile_native(
     let mut origin = mesh_origin(ifc_source.as_deref(), &job.placement)?;
 
     let mut dropped_elements = None;
+    let mut ifc_scan = None;
     let mut read = if let Some(source) = &ifc_source {
-        tiletopia_ingest::ifc_reader::read_elements(source, JOB_BUDGET_BYTES).map(|elements| {
-            dropped_elements = elements.dropped.summary();
-            elements.meshes
-        })
+        let elements = tiletopia_ingest::ifc_reader::read_elements(source, JOB_BUDGET_BYTES)
+            .map_err(|e| e.to_string())?;
+        dropped_elements = elements.dropped.summary();
+        ifc_scan = Some(elements.scan);
+        elements.meshes
     } else if extension == "dxf" {
         let upload_unit = job
             .placement
@@ -753,10 +755,10 @@ fn tile_native(
             .transpose()
             .map_err(|e| e.to_string())?;
         tiletopia_ingest::dxf_reader::read(input_path, JOB_BUDGET_BYTES, upload_unit)
+            .map_err(|e| e.to_string())?
     } else {
-        tiletopia_ingest::read_mesh(input_path, JOB_BUDGET_BYTES)
-    }
-    .map_err(|e| e.to_string())?;
+        tiletopia_ingest::read_mesh(input_path, JOB_BUDGET_BYTES).map_err(|e| e.to_string())?
+    };
     if read.is_empty() {
         return Err(match dropped_elements {
             Some(dropped_elements) => {
@@ -788,6 +790,7 @@ fn tile_native(
             },
             east_north_up_placement.as_ref(),
             meshes,
+            ifc_scan.as_ref(),
         )?,
         None => meshes,
     };

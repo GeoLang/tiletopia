@@ -1,9 +1,10 @@
 use crate::IngestError;
 use crate::ifc_reader::MapConversionPlacement;
+#[cfg(test)]
+use ifc_lite_core::build_entity_index;
 use ifc_lite_core::{
-    DecodedEntity, EXPORTER_STRATUM_ALIASES, EntityDecoder, EntityScanner, IfcType, ProjectUnits,
-    build_entity_index, find_project_id, ifc_type_from_keyword, keyword_eq, resolve_unit_by_ref,
-    slot,
+    DecodedEntity, EntityDecoder, EntityIndex, IfcType, ProjectUnits, find_project_id,
+    resolve_unit_by_ref, slot,
 };
 use ifc_lite_geometry::GeometryRouter;
 use ifc_lite_processing::data_model::property::PropertyDecoder;
@@ -255,6 +256,27 @@ fn capped_references(mut references: Vec<u32>, warnings: &mut ExtractionWarnings
     references
 }
 
+pub(crate) struct ScannedSpan {
+    pub express_id: u32,
+    pub start: usize,
+    pub end: usize,
+}
+
+pub(crate) struct ScannedRelation {
+    pub express_id: u32,
+    pub start: usize,
+    pub end: usize,
+    pub record: RelationRecord,
+}
+
+pub struct IfcScan {
+    pub(crate) index: Arc<EntityIndex>,
+    pub(crate) products: Vec<ScannedSpan>,
+    pub(crate) relations: Vec<ScannedRelation>,
+    pub(crate) georef_types: Vec<(u32, IfcType)>,
+    pub(crate) true_north_context: Option<u32>,
+}
+
 #[derive(Default)]
 struct ModelRelations {
     parent_of: HashMap<u32, u32>,
@@ -265,15 +287,11 @@ struct ModelRelations {
     storey_names: HashMap<u32, String>,
 }
 
-const RELATION_KEYWORDS: [&str; 7] = [
-    "IFCRELCONTAINEDINSPATIALSTRUCTURE",
-    "IFCRELAGGREGATES",
-    "IFCRELNESTS",
-    "IFCRELVOIDSELEMENT",
-    "IFCRELDEFINESBYPROPERTIES",
-    "IFCRELDEFINESBYTYPE",
-    "IFCRELASSOCIATESMATERIAL",
-];
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelationRecord {
+    Storey,
+    Link,
+}
 
 impl ModelRelations {
     fn record_parent(&mut self, child: u32, parent: u32, warnings: &mut ExtractionWarnings) {
@@ -402,34 +420,26 @@ impl ModelRelations {
         Ok(())
     }
 
-    fn scan(
-        content: &[u8],
+    fn from_spans(
         decoder: &EntityDecoder<'_>,
+        spans: &[ScannedRelation],
         link_budget: u64,
         warnings: &mut ExtractionWarnings,
     ) -> Result<Self, IngestError> {
         let mut relations = Self::default();
-        let mut scanner = EntityScanner::new(content);
-        while let Some((id, type_name, start, end)) = scanner.next_entity() {
-            let is_storey = keyword_eq(type_name, "IFCBUILDINGSTOREY");
-            let is_relation = RELATION_KEYWORDS
-                .iter()
-                .any(|keyword| keyword_eq(type_name, keyword));
-            if !is_storey && !is_relation {
-                continue;
-            }
-            let Ok(entity) = decoder.decode_at_uncached(start, end) else {
+        for span in spans {
+            let Ok(entity) = decoder.decode_at_uncached(span.start, span.end) else {
                 warn(warnings, WARNING_UNDECODABLE_RELATION);
                 continue;
             };
-            if is_relation {
+            if span.record == RelationRecord::Link {
                 relations.record_relation(&entity, link_budget, warnings)?;
                 continue;
             }
             let label = text_at(&entity, slot::IfcRoot::NAME.index(), warnings)
                 .or_else(|| text_at(&entity, slot::IfcRoot::GLOBAL_ID.index(), warnings));
             if let Some(label) = label {
-                relations.storey_names.insert(id, label);
+                relations.storey_names.insert(span.express_id, label);
             }
         }
         Ok(relations)
@@ -1189,8 +1199,28 @@ pub fn extract_elements(
     east_north_up_placement: Option<&MapConversionPlacement>,
     on_element: impl FnMut(ExtractedElement) -> Result<(), IngestError>,
 ) -> Result<ExtractionWarnings, IngestError> {
+    let scanned = crate::ifc_reader::scan_ifc(source);
+    extract_elements_from_scan(
+        source,
+        &scanned.scan,
+        locations,
+        origin,
+        east_north_up_placement,
+        on_element,
+    )
+}
+
+pub fn extract_elements_from_scan(
+    source: &[u8],
+    scan: &IfcScan,
+    locations: &HashMap<String, ElementLocation>,
+    origin: ModelOrigin,
+    east_north_up_placement: Option<&MapConversionPlacement>,
+    on_element: impl FnMut(ExtractedElement) -> Result<(), IngestError>,
+) -> Result<ExtractionWarnings, IngestError> {
     extract_elements_within(
         source,
+        scan,
         locations,
         origin,
         east_north_up_placement,
@@ -1201,6 +1231,7 @@ pub fn extract_elements(
 
 fn extract_elements_within(
     source: &[u8],
+    scan: &IfcScan,
     locations: &HashMap<String, ElementLocation>,
     origin: ModelOrigin,
     east_north_up_placement: Option<&MapConversionPlacement>,
@@ -1208,14 +1239,17 @@ fn extract_elements_within(
     mut on_element: impl FnMut(ExtractedElement) -> Result<(), IngestError>,
 ) -> Result<ExtractionWarnings, IngestError> {
     // ifc_reader resizes the meshes the locations come from by these factors
-    let axis_factors =
-        crate::ifc_reader::axis_factors_resizing_the_model(source)?.unwrap_or([1.0; 3]);
-    let index = build_entity_index(source);
-    let mut decoder = EntityDecoder::with_index(source, index);
+    let axis_factors = crate::ifc_reader::axis_factors_of_scan(source, scan)?.unwrap_or([1.0; 3]);
+    let mut decoder = EntityDecoder::with_arc_index(source, Arc::clone(&scan.index));
     // ifc_reader places the meshes through a router built the same way, with no RTC shift
     let router = GeometryRouter::with_units(source, &mut decoder);
     let mut warnings = ExtractionWarnings::new();
-    let relations = ModelRelations::scan(source, &decoder, budgets.property_rows, &mut warnings)?;
+    let relations = ModelRelations::from_spans(
+        &decoder,
+        &scan.relations,
+        budgets.property_rows,
+        &mut warnings,
+    )?;
 
     let project_id = find_project_id(source);
     let units = match project_id {
@@ -1241,19 +1275,12 @@ fn extract_elements_within(
 
     let mut property_rows = 0u64;
     let mut seen_global_ids = HashSet::new();
-    let mut scanner = EntityScanner::new(source);
-    while let Some((express_id, type_name, start, end)) = scanner.next_entity() {
-        let class = ifc_type_from_keyword(type_name);
-        let is_stratum_alias = EXPORTER_STRATUM_ALIASES
-            .iter()
-            .any(|alias| keyword_eq(type_name, alias));
-        if class != IfcType::IfcProject
-            && !class.is_subtype_of(IfcType::IfcProduct)
-            && !is_stratum_alias
-        {
-            continue;
-        }
-        let Ok(entity) = reader.decoder.decode_at_uncached(start, end) else {
+    for product in &scan.products {
+        let express_id = product.express_id;
+        let Ok(entity) = reader
+            .decoder
+            .decode_at_uncached(product.start, product.end)
+        else {
             warn(&mut reader.warnings, WARNING_UNDECODABLE_ELEMENT);
             continue;
         };
@@ -1418,6 +1445,28 @@ END-ISO-10303-21;
             .iter()
             .find(|property| property.key == key)
             .unwrap_or_else(|| panic!("no {key} in {:?}", element.properties))
+    }
+
+    #[test]
+    fn the_reader_scan_extracts_the_same_elements() {
+        let (direct, direct_warnings) = extracted(LEGACY_DOOR_IFC);
+        let scanned =
+            crate::ifc_reader::read_elements(LEGACY_DOOR_IFC.as_bytes(), u64::MAX).unwrap();
+        let mut from_scan = Vec::new();
+        let warnings = extract_elements_from_scan(
+            LEGACY_DOOR_IFC.as_bytes(),
+            &scanned.scan,
+            &HashMap::new(),
+            MODEL_ORIGIN,
+            None,
+            |element| {
+                from_scan.push(element);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(from_scan, direct);
+        assert_eq!(warnings, direct_warnings);
     }
 
     #[test]
@@ -1753,8 +1802,10 @@ END-ISO-10303-21;
         budgets: ExtractionBudgets,
     ) -> Result<(Vec<ExtractedElement>, ExtractionWarnings), IngestError> {
         let mut elements = Vec::new();
+        let scanned = crate::ifc_reader::scan_ifc(ifc.as_bytes());
         let warnings = extract_elements_within(
             ifc.as_bytes(),
+            &scanned.scan,
             &HashMap::new(),
             MODEL_ORIGIN,
             None,

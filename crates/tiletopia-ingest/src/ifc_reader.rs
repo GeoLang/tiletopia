@@ -2,21 +2,28 @@
 
 use crate::crs_detect::{WGS84_GEODETIC_EPSG, parse_epsg_code};
 use crate::dxf_reader::cross;
+use crate::ifc_elements::{IfcScan, RelationRecord, ScannedRelation, ScannedSpan};
 use crate::{BYTES_HELD_PER_MESH, BYTES_HELD_PER_VERTEX, IngestError, MeshData};
 use ifc_lite_core::{
-    AttributeValue, EntityDecoder, EntityScanner, GeoRefExtractor, GeoRefSource, GeoReference,
-    GeoReferenceDetails, IfcType, build_entity_index, is_geometry_job, keyword_eq, slot,
+    AttributeValue, EXPORTER_STRATUM_ALIASES, EntityDecoder, EntityIndex, EntityScanner,
+    GeoRefExtractor, GeoRefSource, GeoReference, GeoReferenceDetails, IfcType, build_entity_index,
+    ifc_type_from_keyword, is_geometry_job, keyword_eq, slot,
 };
 use ifc_lite_geometry::representation::{Select, product_shape};
 use ifc_lite_geometry::{
-    GeometryRouter, Mesh, format_unsupported_breakdown, void_index_from_content,
+    GeometryRouter, Mesh, SubMeshCollection, format_unsupported_breakdown, resolve_void_index,
 };
 use ifc_lite_processing::prepass::{PrepassSpans, ResolveOptions, resolve_prepass};
 use ifc_lite_processing::style::{
-    Rgba, default_color_for_type, element_material_fallback_color, resolve_element_color,
+    Rgba, build_material_style_index, default_color_for_type, element_material_fallback_color,
+    resolve_element_color, resolve_submesh_color,
 };
 use memmap2::Mmap;
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tiletopia_core::bounding_volume::Aabb;
 use tiletopia_core::crs::{Coord3D, CrsDef, Route, Transformer};
 use tiletopia_core::spatial::{enu_to_ecef_matrix, geodetic_to_ecef};
@@ -55,6 +62,7 @@ impl DroppedElements {
 pub struct IfcElements {
     pub meshes: Vec<MeshData>,
     pub dropped: DroppedElements,
+    pub scan: IfcScan,
 }
 
 pub fn mapped_ifc(path: &Path) -> Result<Mmap, IngestError> {
@@ -74,10 +82,19 @@ pub fn read(path: &Path, max_bytes_held: u64) -> Result<Vec<MeshData>, IngestErr
 // UTM's central scale of 0.9996 is below this, and it moves a vertex 40 cm per km
 const MOST_IGNORED_AXIS_FACTOR_DEVIATION: f64 = 0.001;
 
-pub(crate) fn axis_factors_resizing_the_model(
+pub(crate) fn axis_factors_of_scan(
     source: &[u8],
+    scan: &IfcScan,
 ) -> Result<Option<[f64; 3]>, IngestError> {
-    let declared = read_declared_georeference(source)?;
+    let mut decoder = EntityDecoder::with_arc_index(source, Arc::clone(&scan.index));
+    axis_factors_of(&declared_from_lists(
+        &mut decoder,
+        scan.georef_types.clone(),
+        scan.true_north_context,
+    )?)
+}
+
+fn axis_factors_of(declared: &DeclaredGeoreference) -> Result<Option<[f64; 3]>, IngestError> {
     let Some((georef, _)) = &declared.map_conversion else {
         return Ok(None);
     };
@@ -132,49 +149,165 @@ fn bytes_held_by_mesh(mesh: &MeshData) -> u64 {
         .saturating_add(BYTES_HELD_PER_MESH)
 }
 
-pub fn read_elements(source: &[u8], max_bytes_held: u64) -> Result<IfcElements, IngestError> {
-    let index = build_entity_index(source);
-    let mut decoder = EntityDecoder::with_index(source, index).with_strict_reals();
-    let router = GeometryRouter::with_units(source, &mut decoder);
-    if router.length_unit_refused() {
-        return Err(IngestError::ParseError(
-            "the IFC's length unit has no usable conversion factor".to_string(),
-        ));
+fn stored_element_color(color: [f32; 4]) -> [u8; 4] {
+    let rgba = Rgba::from_array(color);
+    let mut bytes = rgba.to_rgba8();
+    // ifc-lite draws alpha from 0.95 up as opaque
+    if !rgba.is_transparent() {
+        bytes[3] = u8::MAX;
     }
-    let axis_factors = axis_factors_resizing_the_model(source)?;
-    let void_index = void_index_from_content(source, &mut decoder);
+    bytes
+}
 
-    let mut style_spans = PrepassSpans::default();
-    let mut style_scanner = EntityScanner::new(source);
-    while let Some((id, type_name, start, end)) = style_scanner.next_entity() {
-        style_spans.stash(type_name, id, start, end);
-    }
-    let styles = resolve_prepass(
-        &style_spans,
-        &mut decoder,
-        ResolveOptions {
-            collect_indexed_colour_full: false,
-            defer_attached_styles: false,
-        },
+fn append_part(mesh: &mut MeshData, part: &Mesh) {
+    let start = u32::try_from(mesh.positions.len()).expect("a part starts past u32::MAX");
+    mesh.positions.extend(
+        part.positions.as_chunks::<3>().0.iter().map(|position| {
+            std::array::from_fn(|axis| f64::from(position[axis]) + part.origin[axis])
+        }),
     );
-    let geometry_colors = styles
-        .geometry_style_index
-        .iter()
-        .map(|(geometry_id, style)| (*geometry_id, style.color))
-        .collect();
+    mesh.normals
+        .extend(part.normals.as_chunks::<3>().0.iter().copied());
+    mesh.indices
+        .extend(part.indices.iter().map(|index| index + start));
+}
 
-    let mut meshes = Vec::new();
-    let mut bytes_held = 0u64;
-    let mut dropped = DroppedElements::default();
+fn meshes_of_styled_parts(
+    parts: &SubMeshCollection,
+    mut direct_color: impl FnMut(u32) -> Option<[f32; 4]>,
+    material_colors: Option<&[[f32; 4]]>,
+    element_color: [f32; 4],
+    name: String,
+    asset_id: Option<String>,
+) -> Vec<MeshData> {
+    let mut cursor = 0usize;
+    let mut meshes: Vec<MeshData> = Vec::new();
+    for part in parts.sub_meshes.iter().filter(|part| !part.mesh.is_empty()) {
+        let color = stored_element_color(resolve_submesh_color(
+            direct_color(part.geometry_id),
+            material_colors,
+            &mut cursor,
+            element_color,
+        ));
+        if let Some(mesh) = meshes
+            .iter_mut()
+            .find(|mesh| mesh.element_color == Some(color))
+        {
+            append_part(mesh, &part.mesh);
+            continue;
+        }
+        let mut mesh = MeshData {
+            positions: Vec::new(),
+            normals: Vec::new(),
+            texcoords: Vec::new(),
+            indices: Vec::new(),
+            name: name.clone(),
+            material: None,
+            asset_id: asset_id.clone(),
+            class: None,
+            storey: None,
+            element_color: Some(color),
+        };
+        append_part(&mut mesh, &part.mesh);
+        meshes.push(mesh);
+    }
+    meshes
+}
+
+struct GeometryJob {
+    id: u32,
+    ifc_type: IfcType,
+}
+
+struct MeshOutcome {
+    id: u32,
+    meshes: Vec<MeshData>,
+    dropped: Option<String>,
+}
+
+pub(crate) struct ScannedIfc {
+    pub scan: IfcScan,
+    style_spans: PrepassSpans,
+    geometry_jobs: Vec<GeometryJob>,
+    void_spans: Vec<(u32, usize, usize)>,
+    aggregate_spans: Vec<(u32, usize, usize)>,
+}
+
+const RELATION_KEYWORDS: [&str; 7] = [
+    "IFCRELCONTAINEDINSPATIALSTRUCTURE",
+    "IFCRELAGGREGATES",
+    "IFCRELNESTS",
+    "IFCRELVOIDSELEMENT",
+    "IFCRELDEFINESBYPROPERTIES",
+    "IFCRELDEFINESBYTYPE",
+    "IFCRELASSOCIATESMATERIAL",
+];
+
+pub(crate) fn scan_ifc(source: &[u8]) -> ScannedIfc {
+    let mut index = EntityIndex::default();
+    let mut style_spans = PrepassSpans::default();
+    let mut products = Vec::new();
+    let mut relations = Vec::new();
+    let mut geometry_jobs = Vec::new();
+    let mut void_spans = Vec::new();
+    let mut aggregate_spans = Vec::new();
+    let mut georef_types = Vec::new();
+    let mut true_north_context = None;
     let mut scanner = EntityScanner::new(source);
-
     while let Some((id, type_name, start, end)) = scanner.next_entity() {
+        index.insert(id, (start, end));
+        style_spans.stash(type_name, id, start, end);
+        if GEOREFERENCE_KEYWORDS
+            .iter()
+            .any(|keyword| keyword_eq(type_name, keyword))
+        {
+            georef_types.push((id, IfcType::from_str(type_name)));
+        } else if true_north_context.is_none()
+            && keyword_eq(type_name, "IFCGEOMETRICREPRESENTATIONCONTEXT")
+        {
+            true_north_context = Some(id);
+        }
+        let ifc_type = ifc_type_from_keyword(type_name);
+        if ifc_type == IfcType::IfcProject
+            || ifc_type.is_subtype_of(IfcType::IfcProduct)
+            || EXPORTER_STRATUM_ALIASES
+                .iter()
+                .any(|alias| keyword_eq(type_name, alias))
+        {
+            products.push(ScannedSpan {
+                express_id: id,
+                start,
+                end,
+            });
+        }
+        let record = if keyword_eq(type_name, "IFCBUILDINGSTOREY") {
+            Some(RelationRecord::Storey)
+        } else if RELATION_KEYWORDS
+            .iter()
+            .any(|keyword| keyword_eq(type_name, keyword))
+        {
+            Some(RelationRecord::Link)
+        } else {
+            None
+        };
+        if let Some(record) = record {
+            relations.push(ScannedRelation {
+                express_id: id,
+                start,
+                end,
+                record,
+            });
+        }
+        if keyword_eq(type_name, "IFCRELVOIDSELEMENT") {
+            void_spans.push((id, start, end));
+        } else if keyword_eq(type_name, "IFCRELAGGREGATES") {
+            aggregate_spans.push((id, start, end));
+        }
         // is_geometry_job follows the EXPRESS inheritance graph, so an IfcProduct
         // subtype no hardcoded list names still reaches the router
         if !is_geometry_job(type_name, &source[start..end]) {
             continue;
         }
-        let ifc_type = IfcType::from_str(type_name);
         // ifc-lite meshes these volumes as solids that fill the rooms and holes they describe
         if ifc_type.is_subtype_of(IfcType::IfcOpeningElement)
             || ifc_type.is_subtype_of(IfcType::IfcSpace)
@@ -182,87 +315,230 @@ pub fn read_elements(source: &[u8], max_bytes_held: u64) -> Result<IfcElements, 
         {
             continue;
         }
+        geometry_jobs.push(GeometryJob { id, ifc_type });
+    }
+    ScannedIfc {
+        scan: IfcScan {
+            index: Arc::new(index),
+            products,
+            relations,
+            georef_types,
+            true_north_context,
+        },
+        style_spans,
+        geometry_jobs,
+        void_spans,
+        aggregate_spans,
+    }
+}
 
-        let entity = match decoder.decode_by_id(id) {
-            Ok(entity) => entity,
-            Err(error) => {
-                dropped.record(format!("{type_name} #{id}: {error}"));
-                continue;
-            }
-        };
+const WORKER_DECODED_ENTITIES: usize = 1 << 14;
 
-        let outcome = router.process_element_with_voids_parts(&entity, &mut decoder, &void_index);
-        let unsupported_items = router.take_unsupported_items();
-        let failed_cuts: usize = router.take_csg_failures().values().map(Vec::len).sum();
-        let parts = match outcome {
-            Ok(parts) => parts,
-            Err(error) => {
-                dropped.record(format!("{type_name} #{id}: {error}"));
-                continue;
-            }
-        };
-
-        let meshed_nothing = parts.iter().all(Mesh::is_empty)
-            && !router.host_consumed_by_void(id)
-            && product_shape(&entity, &mut decoder)
-                .ok()
-                .flatten()
-                .is_some_and(|shape| shape.select(&entity, Select::Meshed).next().is_some());
-        if !unsupported_items.is_empty() {
-            let breakdown = format_unsupported_breakdown(&unsupported_items);
-            dropped.record(format!("{type_name} #{id}: items dropped: {breakdown}"));
-        } else if failed_cuts > 0 {
-            dropped.record(format!(
-                "{type_name} #{id}: {failed_cuts} opening cuts failed"
-            ));
-        } else if meshed_nothing {
-            dropped.record(format!("{type_name} #{id}: no triangles"));
-        }
-
-        let color = resolve_element_color(&entity, &geometry_colors, &mut decoder)
-            .or_else(|| {
-                styles
-                    .element_material_colors
-                    .get(&id)
-                    .and_then(|colors| element_material_fallback_color(colors))
-            })
-            .map_or_else(|| default_color_for_type(ifc_type), Rgba::from_array);
-        let mut element_color = color.to_rgba8();
-        // ifc-lite draws alpha from 0.95 up as opaque
-        if !color.is_transparent() {
-            element_color[3] = u8::MAX;
-        }
-
-        for part in parts.into_iter().filter(|part| !part.is_empty()) {
-            let mesh = MeshData {
-                // ifc-lite stores vertices relative to Mesh.origin for far or void-cut hosts
-                positions: part
-                    .positions
-                    .as_chunks::<3>()
-                    .0
-                    .iter()
-                    .map(|position| {
-                        std::array::from_fn(|axis| f64::from(position[axis]) + part.origin[axis])
-                    })
-                    .collect(),
-                normals: part.normals.as_chunks::<3>().0.to_vec(),
-                texcoords: Vec::new(),
-                indices: part.indices,
-                name: entity
-                    .get_string(NAME_INDEX)
-                    .unwrap_or("ifc_element")
-                    .to_string(),
-                material: None,
-                asset_id: entity.get_string(GLOBAL_ID_INDEX).map(str::to_string),
-                class: None,
-                storey: None,
-                element_color: Some(element_color),
+fn mesh_geometry(
+    decoder: &mut EntityDecoder<'_>,
+    router: &GeometryRouter,
+    job: &GeometryJob,
+    void_index: &FxHashMap<u32, Vec<u32>>,
+    geometry_colors: &FxHashMap<u32, [f32; 4]>,
+    material_styles: &FxHashMap<u32, Vec<[f32; 4]>>,
+    element_material_colors: &FxHashMap<u32, Vec<[f32; 4]>>,
+) -> MeshOutcome {
+    let entity = match decoder.decode_by_id(job.id) {
+        Ok(entity) => entity,
+        Err(error) => {
+            return MeshOutcome {
+                id: job.id,
+                meshes: Vec::new(),
+                dropped: Some(format!("{} #{}: {error}", job.ifc_type.name(), job.id)),
             };
+        }
+    };
+    let openings = void_index
+        .get(&job.id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let outcome = if openings.is_empty() {
+        router.process_element_with_submeshes(&entity, decoder)
+    } else {
+        router.process_element_with_submeshes_and_voids(&entity, decoder, void_index)
+    };
+    let unsupported_items = router.take_unsupported_items();
+    let failed_cuts: usize = router.take_csg_failures().values().map(Vec::len).sum();
+    let parts = match outcome {
+        Ok(parts) => parts,
+        Err(error) => {
+            return MeshOutcome {
+                id: job.id,
+                meshes: Vec::new(),
+                dropped: Some(format!("{} #{}: {error}", job.ifc_type.name(), job.id)),
+            };
+        }
+    };
+    let meshed_nothing = parts.sub_meshes.iter().all(|part| part.mesh.is_empty())
+        && !router.host_consumed_by_void(job.id)
+        && product_shape(&entity, decoder)
+            .ok()
+            .flatten()
+            .is_some_and(|shape| shape.select(&entity, Select::Meshed).next().is_some());
+    let dropped = if !unsupported_items.is_empty() {
+        let breakdown = format_unsupported_breakdown(&unsupported_items);
+        Some(format!(
+            "{} #{}: items dropped: {breakdown}",
+            job.ifc_type.name(),
+            job.id
+        ))
+    } else if failed_cuts > 0 {
+        Some(format!(
+            "{} #{}: {failed_cuts} opening cuts failed",
+            job.ifc_type.name(),
+            job.id
+        ))
+    } else if meshed_nothing {
+        Some(format!("{} #{}: no triangles", job.ifc_type.name(), job.id))
+    } else {
+        None
+    };
+    let element_color = resolve_element_color(&entity, geometry_colors, decoder)
+        .or_else(|| {
+            element_material_colors
+                .get(&job.id)
+                .and_then(|colors| element_material_fallback_color(colors))
+        })
+        .map_or_else(
+            || default_color_for_type(job.ifc_type.clone()),
+            Rgba::from_array,
+        )
+        .to_array();
+    let name = entity
+        .get_string(NAME_INDEX)
+        .unwrap_or("ifc_element")
+        .to_string();
+    let asset_id = entity.get_string(GLOBAL_ID_INDEX).map(str::to_string);
+    let ids_are_materials = parts.ids_are_materials;
+    let meshes = meshes_of_styled_parts(
+        &parts,
+        |geometry_id| {
+            if ids_are_materials {
+                material_styles
+                    .get(&geometry_id)
+                    .and_then(|colors| colors.first().copied())
+            } else {
+                geometry_colors.get(&geometry_id).copied()
+            }
+        },
+        element_material_colors.get(&job.id).map(Vec::as_slice),
+        element_color,
+        name,
+        asset_id,
+    );
+    MeshOutcome {
+        id: job.id,
+        meshes,
+        dropped,
+    }
+}
+
+pub fn read_elements(source: &[u8], max_bytes_held: u64) -> Result<IfcElements, IngestError> {
+    let scanned = scan_ifc(source);
+    let index = Arc::clone(&scanned.scan.index);
+    let mut decoder = EntityDecoder::with_arc_index(source, Arc::clone(&index)).with_strict_reals();
+    let router = GeometryRouter::with_units(source, &mut decoder);
+    if router.length_unit_refused() {
+        return Err(IngestError::ParseError(
+            "the IFC's length unit has no usable conversion factor".to_string(),
+        ));
+    }
+    let axis_factors = axis_factors_of_scan(source, &scanned.scan)?;
+    let void_index =
+        resolve_void_index(&scanned.void_spans, &scanned.aggregate_spans, &mut decoder);
+    let styles = resolve_prepass(
+        &scanned.style_spans,
+        &mut decoder,
+        ResolveOptions {
+            collect_indexed_colour_full: false,
+            defer_attached_styles: false,
+        },
+    );
+    let geometry_colors: FxHashMap<u32, [f32; 4]> = styles
+        .geometry_style_index
+        .iter()
+        .map(|(geometry_id, style)| (*geometry_id, style.color))
+        .collect();
+    let material_styles = build_material_style_index(
+        &styles.material_def_reprs,
+        &styles.orphan_styled_items,
+        &mut decoder,
+    );
+    drop(router);
+    drop(decoder);
+
+    let dedup = GeometryRouter::new_dedup_cache();
+    let mapped = GeometryRouter::new_mapped_item_cache();
+    let bytes_so_far = AtomicU64::new(0);
+    let jobs = scanned.geometry_jobs;
+    let mesh_on_pool = || {
+        jobs.par_iter()
+            .map_init(
+                || {
+                    let mut worker_decoder =
+                        EntityDecoder::with_arc_index(source, Arc::clone(&index))
+                            .with_strict_reals();
+                    let mut worker_router = GeometryRouter::with_units(source, &mut worker_decoder);
+                    worker_router.enable_content_dedup_shared(Arc::clone(&dedup));
+                    worker_router.enable_shared_mapped_item_cache(Arc::clone(&mapped));
+                    (worker_decoder, worker_router)
+                },
+                |(worker_decoder, worker_router), job| {
+                    if bytes_so_far.load(Ordering::Relaxed) > max_bytes_held {
+                        return MeshOutcome {
+                            id: job.id,
+                            meshes: Vec::new(),
+                            dropped: None,
+                        };
+                    }
+                    let outcome = mesh_geometry(
+                        worker_decoder,
+                        worker_router,
+                        job,
+                        &void_index,
+                        &geometry_colors,
+                        &material_styles,
+                        &styles.element_material_colors,
+                    );
+                    let mesh_bytes: u64 = outcome.meshes.iter().map(bytes_held_by_mesh).sum();
+                    bytes_so_far.fetch_add(mesh_bytes, Ordering::Relaxed);
+                    if worker_decoder.cache_size() > WORKER_DECODED_ENTITIES {
+                        // EntityDecoder's cache includes every decoded entity
+                        worker_decoder.clear_entity_cache();
+                    }
+                    outcome
+                },
+            )
+            .collect::<Vec<_>>()
+    };
+    let outcomes = if rayon::current_thread_index().is_some() {
+        mesh_on_pool()
+    } else {
+        // process_element recurses on rayon's default 2 MiB worker stack
+        ifc_lite_processing::run_on_geometry_pool(mesh_on_pool).map_err(|error| {
+            IngestError::ParseError(format!("could not start the geometry threads: {error}"))
+        })?
+    };
+
+    let mut meshes = Vec::new();
+    let mut bytes_held = 0u64;
+    let mut dropped = DroppedElements::default();
+    for outcome in outcomes {
+        if let Some(reason) = outcome.dropped {
+            dropped.record(reason);
+        }
+        for mesh in outcome.meshes {
             bytes_held = bytes_held.saturating_add(bytes_held_by_mesh(&mesh));
             if bytes_held > max_bytes_held {
                 return Err(IngestError::ParseError(format!(
-                    "the IFC's meshes hold {bytes_held} bytes after #{id}, \
-                     past the {max_bytes_held} byte limit"
+                    "the IFC's meshes hold {bytes_held} bytes after #{}, \
+                     past the {max_bytes_held} byte limit",
+                    outcome.id
                 )));
             }
             meshes.push(mesh);
@@ -282,7 +558,11 @@ pub fn read_elements(source: &[u8], max_bytes_held: u64) -> Result<IfcElements, 
         dropped.count,
     );
 
-    Ok(IfcElements { meshes, dropped })
+    Ok(IfcElements {
+        meshes,
+        dropped,
+        scan: scanned.scan,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -321,22 +601,36 @@ fn read_declared_georeference(source: &[u8]) -> Result<DeclaredGeoreference, Ing
     let mut decoder = EntityDecoder::with_index(source, build_entity_index(source));
     let mut scanner = EntityScanner::new(source);
     let mut entity_types = Vec::new();
-    let mut true_north_direction = None;
+    let mut true_north_context = None;
     while let Some((id, type_name, _start, _end)) = scanner.next_entity() {
         if GEOREFERENCE_KEYWORDS
             .iter()
             .any(|keyword| keyword_eq(type_name, keyword))
         {
             entity_types.push((id, IfcType::from_str(type_name)));
-        } else if true_north_direction.is_none()
+        } else if true_north_context.is_none()
             && keyword_eq(type_name, "IFCGEOMETRICREPRESENTATIONCONTEXT")
         {
-            true_north_direction = decoder
-                .decode_by_id(id)
-                .map_err(parse_error)?
-                .ref_at(slot::IfcGeometricRepresentationContext::TRUE_NORTH);
+            true_north_context = Some(id);
         }
     }
+    declared_from_lists(&mut decoder, entity_types, true_north_context)
+}
+
+fn declared_from_lists(
+    decoder: &mut EntityDecoder<'_>,
+    entity_types: Vec<(u32, IfcType)>,
+    true_north_context: Option<u32>,
+) -> Result<DeclaredGeoreference, IngestError> {
+    let true_north_direction = true_north_context
+        .map(|id| {
+            decoder
+                .decode_by_id(id)
+                .map_err(parse_error)
+                .map(|context| context.ref_at(slot::IfcGeometricRepresentationContext::TRUE_NORTH))
+        })
+        .transpose()?
+        .flatten();
 
     let true_north_from_y_axis_radians = match true_north_direction {
         Some(id) => {
@@ -356,7 +650,7 @@ fn read_declared_georeference(source: &[u8]) -> Result<DeclaredGeoreference, Ing
         None => 0.0,
     };
 
-    let map_conversion = GeoRefExtractor::extract_with_details(&mut decoder, &entity_types)
+    let map_conversion = GeoRefExtractor::extract_with_details(decoder, &entity_types)
         .map_err(parse_error)?
         .filter(|(georef, _)| {
             matches!(
@@ -370,7 +664,7 @@ fn read_declared_georeference(source: &[u8]) -> Result<DeclaredGeoreference, Ing
         .filter(|(_, ifc_type)| *ifc_type == IfcType::IfcSite)
         .cloned()
         .collect();
-    let site = GeoRefExtractor::extract(&mut decoder, &site_types).map_err(parse_error)?;
+    let site = GeoRefExtractor::extract(decoder, &site_types).map_err(parse_error)?;
 
     Ok(DeclaredGeoreference {
         map_conversion,
@@ -953,6 +1247,50 @@ END-ISO-10303-21;
     }
 
     #[test]
+    fn a_windows_glass_and_frame_are_separate_meshes() {
+        let source = ifc_file(
+            "#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCLOCALPLACEMENT($,#11);
+#13=IFCDIRECTION((0.,0.,1.));
+#20=IFCRECTANGLEPROFILEDEF(.AREA.,$,#11,1.2,0.08);
+#21=IFCEXTRUDEDAREASOLID(#20,#11,#13,1.4);
+#22=IFCRECTANGLEPROFILEDEF(.AREA.,$,#11,1.0,0.02);
+#23=IFCEXTRUDEDAREASOLID(#22,#11,#13,1.2);
+#30=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#21,#23));
+#31=IFCPRODUCTDEFINITIONSHAPE($,$,(#30));
+#40=IFCWINDOW('window',$,'Window',$,$,#12,#31,$,$,$,$,$,$);
+#50=IFCCOLOURRGB($,0.55,0.35,0.2);
+#51=IFCSURFACESTYLERENDERING(#50,0.0,$,$,$,$,$,$,.NOTDEFINED.);
+#52=IFCSURFACESTYLE('frame',.BOTH.,(#51));
+#53=IFCSTYLEDITEM(#21,(#52),$);
+#60=IFCCOLOURRGB($,0.7,0.85,0.95);
+#61=IFCSURFACESTYLERENDERING(#60,0.7,$,$,$,$,$,$,.NOTDEFINED.);
+#62=IFCSURFACESTYLE('glass',.BOTH.,(#61));
+#63=IFCSTYLEDITEM(#23,(#62),$);",
+        );
+
+        let meshes: Vec<_> = read_elements(&source, u64::MAX)
+            .expect("the window should read")
+            .meshes
+            .into_iter()
+            .filter(|mesh| mesh.asset_id.as_deref() == Some("window"))
+            .collect();
+
+        let mut colors: Vec<[u8; 4]> = meshes
+            .iter()
+            .filter_map(|mesh| mesh.element_color)
+            .collect();
+        colors.sort();
+        assert_eq!(
+            colors,
+            vec![[140, 89, 51, 255], [179, 217, 242, 77]],
+            "the frame stays opaque and the glass stays translucent"
+        );
+        assert!(meshes.iter().all(|mesh| !mesh.indices.is_empty()));
+    }
+
+    #[test]
     fn an_opening_cuts_its_wall_and_is_no_mesh_of_its_own() {
         let uncut = read_elements(
             &ifc_file(&format!("{PROJECT_IN_METRES}{WALL}{OPENING}")),
@@ -1353,8 +1691,9 @@ END-ISO-10303-21;
              #61=IFCMAPCONVERSIONSCALED(#10,#60,500000.,0.,0.,1.,0.,0.001,0.5,0.5,0.5);\n"
         ));
 
+        let scanned = scan_ifc(&source);
         assert_eq!(
-            axis_factors_resizing_the_model(&source).unwrap(),
+            axis_factors_of_scan(&source, &scanned.scan).unwrap(),
             Some([0.5, 0.5, 0.5])
         );
     }
