@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 2026-11-12: draco-gltf 0.8 reads a tile whose `NORMAL` is a normalized byte
+  under `KHR_mesh_quantization`. Meshopt tile tests decode through
+  `read_primitive`, the call 0.7 rejected.
 - 2026-11-06: a mesh whose corner normals all lie within 2.5° of their face
   normal, or that has no normals, is welded by position and texture coordinate
   and written without `NORMAL`. Curved elements keep their normals. The

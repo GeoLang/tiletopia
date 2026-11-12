@@ -1618,9 +1618,9 @@ dependencies = [
 
 [[package]]
 name = "draco-gltf"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3ca6004358cdcb402246bae12c958fe885283b67f73fbd671ff063a9de60fca"
+checksum = "7621fc4962197dd5e132e738df672446226d1b4efcced3c6d3e01ef68c845352"
 dependencies = [
  "draco-core",
  "thiserror 2.0.20",

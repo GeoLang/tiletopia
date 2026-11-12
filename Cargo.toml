@@ -59,7 +59,7 @@ projicio-core = { git = "https://github.com/GeoLang/projicio.git", branch = "mas
 # Mesh compression
 meshopt = "0.7"
 bytemuck = { version = "1", features = ["derive"] }
-draco-gltf = { version = "0.7", default-features = false, features = ["draco-encode"] }
+draco-gltf = { version = "0.8", default-features = false, features = ["draco-encode"] }
 
 # OBJ loading
 tobj = { version = "4", features = ["use_f64"] }

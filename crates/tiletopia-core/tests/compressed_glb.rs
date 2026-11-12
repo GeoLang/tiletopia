@@ -275,63 +275,28 @@ fn positions_in_node_parent_frame(
 fn decoded_mesh_geometry(glb: &[u8], mesh: usize) -> DecodedPrimitive {
     let import =
         draco_gltf::parse(glb, ValidationProfile::Gltf20).expect("draco-gltf parses the tile");
-    let (document, _) = glb_document(glb);
-    let primitive = &document["meshes"][mesh]["primitives"][0];
-    let (attributes, indices) = if primitive["extensions"]
-        .get("KHR_draco_mesh_compression")
-        .is_some()
-    {
-        let geometry = import
-            .read_primitive(PrimitiveIndex::new(MeshIndex::from(mesh), 0))
-            .expect("draco-gltf reads the primitive");
-        let attributes: Vec<DecodedAttribute> = geometry
-            .attributes()
-            .iter()
-            .map(|attribute| DecodedAttribute {
-                semantic: attribute.semantic().to_string(),
-                component_type: attribute.component_type() as u32,
-                bytes: attribute.bytes().to_vec(),
-            })
-            .collect();
-        let indices =
-            bytemuck::pod_collect_to_vec(geometry.indices().expect("decoded indices").bytes());
-        (attributes, indices)
-    } else {
-        // draco-gltf's read_primitive allows only float normals under Gltf20, even with KHR_mesh_quantization required
-        let source = import.accessor_source();
-        let read = |accessor: &Value| {
-            source
-                .read_accessor(accessor.as_u64().expect("an accessor index") as usize)
-                .expect("draco-gltf reads the accessor")
-        };
-        let attributes: Vec<DecodedAttribute> = primitive["attributes"]
-            .as_object()
-            .expect("an attributes object")
-            .iter()
-            .map(|(semantic, accessor)| {
-                let data = read(accessor);
-                DecodedAttribute {
-                    semantic: semantic.clone(),
-                    component_type: data.component_type,
-                    bytes: data.bytes,
-                }
-            })
-            .collect();
-        let index_data = read(&primitive["indices"]);
-        let indices = match index_data.component_type {
-            code if code == ComponentType::U32 as u32 => {
-                bytemuck::pod_collect_to_vec(&index_data.bytes)
-            }
-            code if code == ComponentType::U16 as u32 => {
-                bytemuck::pod_collect_to_vec::<u8, u16>(&index_data.bytes)
-                    .into_iter()
-                    .map(u32::from)
-                    .collect()
-            }
-            other => panic!("indices decoded with component type {other}"),
-        };
-        (attributes, indices)
+    let geometry = import
+        .read_primitive(PrimitiveIndex::new(MeshIndex::from(mesh), 0))
+        .expect("draco-gltf reads the primitive");
+    let attributes: Vec<DecodedAttribute> = geometry
+        .attributes()
+        .iter()
+        .map(|attribute| DecodedAttribute {
+            semantic: attribute.semantic().to_string(),
+            component_type: attribute.component_type() as u32,
+            bytes: attribute.bytes().to_vec(),
+        })
+        .collect();
+    let packed_indices = geometry.indices().expect("decoded indices");
+    let indices = match packed_indices.component_type() {
+        ComponentType::U32 => bytemuck::pod_collect_to_vec(packed_indices.bytes()),
+        ComponentType::U16 => bytemuck::pod_collect_to_vec::<u8, u16>(packed_indices.bytes())
+            .into_iter()
+            .map(u32::from)
+            .collect(),
+        other => panic!("indices decoded with component type {other:?}"),
     };
+    let (document, _) = glb_document(glb);
     let position = attributes
         .iter()
         .find(|attribute| attribute.semantic == "POSITION")
