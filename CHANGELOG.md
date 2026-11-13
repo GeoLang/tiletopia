@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 2026-11-13: a mesh upload other than an IFC may name `crs` as an EPSG code. Vertices are easting, northing and ellipsoidal height, and the job places them in an east-north-up frame. Longitude and latitude together with `crs` answer 400, and so does `crs` on an IFC.
 - 2026-11-13: `GET /v1/assets/{id}/drawing` projects visible and hidden edges. A section position keeps the side of the cut and adds the cut as visible lines.
 - 2026-11-13: `GET /v1/assets/{id}/alignments` returns `IfcAlignment` stations in the section frame. A line and a circular arc are sampled. Any other curve is drawn straight and marked approximate.
 - 2026-11-13: `POST /v1/assets/{id}/edits` moves, yaws, replaces, adds or deletes an IFC element, or edits a containment or aggregate. `GET .../element-edits` returns the preview meshes. `GET .../elements/{id}/volume` is the mesh volume.

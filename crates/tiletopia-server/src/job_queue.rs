@@ -747,8 +747,6 @@ pub(crate) fn move_into_tileset_frame(
 const IFC_GEOMETRY_PEAK_PER_SOURCE_BYTE: u64 = 10;
 const MAX_IFC_PIECE_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Tile a mesh with this repository's own readers and mesh tiler. The source
-/// coordinates are metres, placed by longitude and latitude alone.
 fn tile_native(
     job: &JobRecord,
     asset_dir: &Path,
@@ -783,7 +781,6 @@ fn tile_native(
         return tile_ifc(job, asset_dir, &source, source_is_z_up);
     }
 
-    let mut origin = mesh_origin(None, &job.placement)?;
     let mut read = if extension == "dxf" {
         let upload_unit = job
             .placement
@@ -800,16 +797,47 @@ fn tile_native(
     if read.is_empty() {
         return Err(format!("the {extension} holds no geometry"));
     }
-    let east_north_up_placement = move_into_tileset_frame(&job.placement, None, &mut read)?;
-    if let Some(placement) = &east_north_up_placement {
-        origin = SitePlacement {
-            x_axis_from_east_radians: 0.0,
-            ..placement.origin
-        };
-    }
-
-    let meshes: Vec<TiledMesh> = read.into_iter().map(Into::into).collect();
-    let config = mesh_tiling_config(job, &origin, source_is_z_up, extension);
+    let (meshes, config) = match job.placement.crs.as_deref() {
+        Some(crs) => {
+            let epsg = tiletopia_ingest::crs_detect::parse_epsg_code(crs).ok_or_else(|| {
+                format!("crs {crs}: meshes take an EPSG code, such as EPSG:32632")
+            })?;
+            let root_transform = crate::photogrammetry::placement::place_in_east_north_up(
+                &mut read,
+                &crate::photogrammetry::placement::Georeference {
+                    epsg,
+                    east_offset: 0.0,
+                    north_offset: 0.0,
+                },
+            )?;
+            let config = tiletopia_core::mesh_tiler::MeshTilingConfig {
+                root_transform: Some(root_transform),
+                content_y_up: true,
+                mesh_compression: job.mesh_compression,
+                texture_compression: job.texture_compression,
+                ..Default::default()
+            };
+            (
+                read.into_iter().map(Into::into).collect::<Vec<TiledMesh>>(),
+                config,
+            )
+        }
+        None => {
+            let mut origin = mesh_origin(None, &job.placement)?;
+            let east_north_up_placement = move_into_tileset_frame(&job.placement, None, &mut read)?;
+            if let Some(placement) = &east_north_up_placement {
+                origin = SitePlacement {
+                    x_axis_from_east_radians: 0.0,
+                    ..placement.origin
+                };
+            }
+            let config = mesh_tiling_config(job, &origin, source_is_z_up, extension);
+            (
+                read.into_iter().map(Into::into).collect::<Vec<TiledMesh>>(),
+                config,
+            )
+        }
+    };
     let stats = tiletopia_core::mesh_tiler::tile_meshes(&meshes, asset_dir, &config)
         .map_err(|e| e.to_string())?;
     Ok(TiledAsset {

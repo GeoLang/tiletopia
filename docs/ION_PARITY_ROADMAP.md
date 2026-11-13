@@ -48,7 +48,8 @@ Each item below says whether it is done or still open.
 
 ### 2.1 Automatic CRS reprojection
 - **Done for point clouds**: the tiling job calls `read_point_cloud_ecef`, which takes the CRS from `crs_detect` (a LAS GeoKey VLR, GeoTIFF tags or a `.prj` sidecar) or else from the upload's `crs` field, and reprojects to ECEF through projicio. A point cloud with no CRS from either is tiled in its own coordinates, with a warning naming the file
-- **Left**: the native mesh path places a mesh by longitude and latitude alone, and an upload with `crs` answers 400. Reprojecting a mesh needs f64 positions, since f32 keeps about 0.5 m at a UTM northing, and a rule for which axis is up in a y-up format
+- **Done for meshes other than IFC**: an upload `crs` that is an EPSG code reprojects vertex easting, northing and ellipsoidal height through `photogrammetry::placement::place_in_east_north_up` (`crs_detect::reproject_to_ecef` and projicio) into a z-up east-north-up frame. Ingest mesh positions are `[f64; 3]`. Longitude and latitude together with `crs` answer 400
+- **Left**: an IFC upload that names `crs` answers 400. Its placement stays the map conversion or longitude and latitude
 
 ### 2.2 DEM tile download & caching
 - **Done**: `/api/v1/terrain/` reads DEM files under `<data-dir>/dem` first, then downloads and caches SRTM tiles. A failed download answers 503 naming the tile rather than a flat mesh. Analysis tiles can read Copernicus GLO-30 over STAC instead, see `TILETOPIA_ANALYSIS_DEM_BBOX`. A DEM upload builds a quantized-mesh bundle named after the asset id

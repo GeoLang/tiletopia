@@ -5523,7 +5523,7 @@ END-ISO-10303-21;
     }
 
     #[tokio::test]
-    async fn a_native_mesh_upload_with_a_crs_is_refused_naming_it() {
+    async fn a_native_mesh_upload_with_longitude_and_a_crs_is_refused() {
         let state = test_state().await;
         let token = bootstrap_editor(&state, "native-crs-editor@example.com").await;
 
@@ -5542,11 +5542,105 @@ END-ISO-10303-21;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let message = String::from_utf8_lossy(&body);
-        assert!(
-            message.contains("cube.obj") && message.contains("crs"),
-            "{message}"
-        );
+        assert!(message.contains("cube.obj"), "{message}");
+        assert!(message.contains("already places"), "{message}");
         assert!(state.db.list_assets().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_ifc_upload_with_a_crs_is_refused() {
+        let state = test_state().await;
+        let token = bootstrap_editor(&state, "ifc-crs-editor@example.com").await;
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "wall.ifc",
+            WALL_IFC,
+            &[("crs", "EPSG:32632")],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = String::from_utf8_lossy(&body);
+        assert!(message.contains("wall.ifc"), "{message}");
+        assert!(message.contains("map conversion"), "{message}");
+        assert!(state.db.list_assets().await.unwrap().is_empty());
+    }
+
+    const UTM_DIAMOND_OBJ: &str = "\
+v 499990 10 15\nv 500010 10 15\nv 500000 0 15\nv 500000 20 15\n\
+f 1 2 4\nf 1 3 2\n";
+
+    #[tokio::test]
+    async fn a_native_mesh_upload_with_a_crs_is_placed_on_that_crs() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "native-crs-placed@example.com").await;
+
+        let (status, body) = upload_with_fields(
+            &state,
+            &token,
+            "diamond.obj",
+            UTM_DIAMOND_OBJ,
+            &[("crs", "EPSG:32632")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(
+            settled.status,
+            JobStatus::Done,
+            "error: {:?}",
+            settled.error
+        );
+
+        let (status, body) = get_with_token(
+            &state,
+            &format!("/api/v1/assets/{asset_id}/tileset.json"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let longitude = 9.0_f64.to_radians();
+        let radius = tiletopia_core::spatial::WGS84_A + 15.0;
+        let expected = [
+            radius * longitude.cos(),
+            radius * longitude.sin(),
+            10.0 / 0.9996,
+        ];
+        let written =
+            root_translation(&serde_json::from_slice::<serde_json::Value>(&body).unwrap());
+        for axis in 0..3 {
+            assert!(
+                (written[axis] - expected[axis]).abs() < 0.01,
+                "axis {axis}: {written:?} is not {expected:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_native_mesh_upload_with_a_crs_that_is_not_an_epsg_code_fails_the_job() {
+        use tiletopia_server::db::JobStatus;
+
+        let state = state_with_external_tiler(None).await;
+        let token = bootstrap_editor(&state, "native-crs-bad@example.com").await;
+
+        let (status, body) =
+            upload_with_fields(&state, &token, "cube.obj", CUBE_OBJ, &[("crs", "WGS84")]).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+
+        let settled = settle_only_job(&state, asset_id).await;
+        assert_eq!(settled.status, JobStatus::Failed);
+        let error = settled.error.expect("a failed job says why");
+        assert!(error.contains("WGS84"), "{error}");
+        assert!(error.contains("EPSG:32632"), "{error}");
     }
 
     #[tokio::test]

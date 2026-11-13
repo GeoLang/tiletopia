@@ -9,10 +9,10 @@ const UTM_SOUTH_EPSG_BASE: u32 = 32700;
 const UTM_ZONES: std::ops::RangeInclusive<u32> = 1..=60;
 
 #[derive(Debug, PartialEq)]
-pub(super) struct Georeference {
-    pub(super) epsg: u32,
-    pub(super) east_offset: f64,
-    pub(super) north_offset: f64,
+pub(crate) struct Georeference {
+    pub(crate) epsg: u32,
+    pub(crate) east_offset: f64,
+    pub(crate) north_offset: f64,
 }
 
 pub(super) fn parse_coords(text: &str) -> Result<Georeference, String> {
@@ -97,7 +97,7 @@ fn difference(to: [f64; 3], from: [f64; 3]) -> [f64; 3] {
     [to[0] - from[0], to[1] - from[1], to[2] - from[2]]
 }
 
-pub(super) fn place_in_east_north_up(
+pub(crate) fn place_in_east_north_up(
     meshes: &mut [MeshData],
     georeference: &Georeference,
 ) -> Result<[f64; 16], String> {

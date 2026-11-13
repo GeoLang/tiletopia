@@ -269,13 +269,24 @@ pub async fn upload_asset(
     }
     let tiles_natively = matches!(tiler_for(&extension), Ok(Tiler::Native { .. }));
     if crs.is_some() && tiles_natively {
-        return Err(discard(
-            &asset_dir,
-            bad_request(format!(
-                "{asset_name}: crs does not apply to meshes the native tiler takes, which are placed by longitude and latitude"
-            )),
-        )
-        .await);
+        if extension == "ifc" || extension == "ifczip" {
+            return Err(discard(
+                &asset_dir,
+                bad_request(format!(
+                    "{asset_name}: crs does not apply to an IFC, which is placed by its map conversion or by longitude and latitude"
+                )),
+            )
+            .await);
+        }
+        if longitude.is_some() || latitude.is_some() {
+            return Err(discard(
+                &asset_dir,
+                bad_request(format!(
+                    "{asset_name}: crs already places the mesh, so longitude and latitude do not apply"
+                )),
+            )
+            .await);
+        }
     }
     if texture_compression != TextureCompression::None && !tiles_natively {
         return Err(discard(

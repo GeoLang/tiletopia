@@ -1,6 +1,6 @@
 mod node_odm;
 mod photo_set;
-mod placement;
+pub(crate) mod placement;
 
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
