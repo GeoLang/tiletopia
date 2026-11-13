@@ -262,7 +262,7 @@ These exist in the code or answer on a route, and do not do what their names say
 | Splat re-tile | `POST /api/v1/assets/{id}/tile` on a Gaussian splat capture queues a job without the upload's longitude and latitude, so the job fails naming them, as it does for a mesh |
 | Splat CLI | `tiletopia tile` reads a Gaussian splat PLY as a point cloud and writes its centres as black points |
 | DXF solids | A DXF upload with a known unit answers 201 whatever entities it holds. Its job fails on 3DSOLID, BODY or REGION, and skips 2D entities extruded by a thickness |
-| Global terrain below level 7 | `/api/v1/terrain/global/` answers levels 0 to 6 with the geoid surface and no relief |
+| Global terrain below level 7 | `/api/v1/terrain/global/` answers levels 0 to 6 with the geoid surface and no relief, unless `TILETOPIA_GLOBAL_TERRAIN_COARSE_URL` names one global DEM |
 
 The `gui/` globe extrudes OpenStreetMap building footprints in the browser from Overpass. That path does not use the server.
 
@@ -437,6 +437,7 @@ A DEM upload writes that bundle itself. `POST /api/v1/assets` with a tif, tiff, 
 
 - `TILETOPIA_GLOBAL_TERRAIN_DEM_URL`: root of the GLO-30 COGs, `https://copernicus-dem-30m.s3.amazonaws.com` for the AWS Open Data bucket. A cell is read from `<root>/<name>/<name>.tif`, with names like `Copernicus_DSM_COG_10_N46_00_E007_00_DEM`.
 - `TILETOPIA_GLOBAL_TERRAIN_GEOID_URL`: a geoid undulation grid covering the globe, as a pixel-is-point COG, read whole into memory on first use. `https://cdn.proj.org/us_nga_egm96_15.tif` is EGM96 at 15 minutes, 1440x721 samples in 2.7 MB. A grid over 2,000,000 samples is refused, which rules out EGM2008 at 2.5 minutes.
+- `TILETOPIA_GLOBAL_TERRAIN_COARSE_URL`: optional. One COG of orthometric heights covering the globe, the same layout as the geoid grid. Levels 0 to 6 sample it instead of the geoid alone, from the coarsest overview still as fine as the tile, and add the geoid. A sample with no height is sea level. Unset, those levels stay the geoid surface. A file that does not cover the globe, or that answers 404, makes those tiles answer 503 naming the file.
 - `TILETOPIA_GLOBAL_TERRAIN_CACHE_DIR`: where generated tiles are written, as `{z}/{x}/{y}.terrain`.
 - `TILETOPIA_GLOBAL_TERRAIN_CACHE_MB`: size cap of that directory, 1024 by default. Past it the oldest tiles are deleted. A value that is not a whole number above 0 refuses startup.
 - `TILETOPIA_GLOBAL_TERRAIN_ION_ASSET_ID`: an Ion asset id that resolves to this layer. New assets never take it, and startup is refused, naming the variable and the asset, when an asset already holds it. `Cesium.createWorldTerrainAsync()` asks for id 1 in the CesiumJS 1.147 source, so with `1` this layer answers that request once `Cesium.Ion.defaultServer` points at this server. `GET /v1/assets/{that id}/endpoint` is the one Ion asset read that takes no token. No CesiumJS run has loaded it yet.
@@ -449,7 +450,7 @@ const terrain = await Cesium.CesiumTerrainProvider.fromUrl(
 )
 ```
 
-- Levels 7 to 14 read the DEM. Level 14 is the first whose samples are finer than GLO-30's one arc-second, and CesiumJS upsamples past it. Levels 0 to 6 carry the geoid alone, sea level with no relief: a level 6 tile spans up to 16 cells and a level 0 tile 32,400.
+- Levels 7 to 14 read the one-degree DEM. Level 14 is the first whose samples are finer than GLO-30's one arc-second, and CesiumJS upsamples past it. Levels 0 to 6 read `TILETOPIA_GLOBAL_TERRAIN_COARSE_URL` when it is set, and otherwise carry the geoid alone. A level 6 tile spans up to 16 one-degree cells and a level 0 tile 32,400, which is why those levels do not open a cell each.
 - Ocean has no Copernicus cell, and the [AWS registry entry](https://registry.opendata.aws/copernicus-dem/) says to take its height as 0. A cell that answers 404 is read that way. Cells Copernicus has not released to the public answer 404 too, so they read as sea level, N40 E044 over Yerevan among them.
 - Copernicus heights are on EGM2008 and the suggested grid is EGM96, so the difference between the two geoid models stays in the heights.
 - One tile build reads at most nine cells, one after another. Counted from its buffers it peaks near 30 MB: the compressed internal tiles of one cell, about 10 MB at full resolution, and one decoded 1024-pixel tile, 16 MB. Fetched bytes are kept in memory up to 96 MiB, so neighbouring tiles share their reads, and the EGM96 grid takes 8 MB. A build takes one of the two slots the SRTM terrain builds share.
@@ -628,7 +629,7 @@ The server sets `user_id` on every collaboration message to the sender's JWT `su
 | MCP server | None | Hosted, since 2026-10-12 |
 | Self-hosting | AGPL-3.0 binary or Docker image | Cesium ion Self-Hosted, for commercial buyers, on Kubernetes |
 | Presence, cursors, chat | WebSocket relay | Not found in Ion's docs |
-| Global base terrain | Copernicus GLO-30 quantized-mesh generated on request, levels 0 to 14, sea level below level 7, no normals or water mask | Cesium World Terrain, the asset `createWorldTerrainAsync` loads |
+| Global base terrain | Copernicus GLO-30 quantized-mesh generated on request, levels 0 to 14. Below level 7 the geoid surface, or the coarse DEM when `TILETOPIA_GLOBAL_TERRAIN_COARSE_URL` is set. No normals or water mask | Cesium World Terrain, the asset `createWorldTerrainAsync` loads |
 | Global buildings | None | Cesium OSM Buildings, the asset `createOsmBuildingsAsync` loads |
 
 TileTopia is one AGPL binary you run. The Cesium Ion column was read on 2026-11-04 from [tiler data formats](https://cesium.com/learn/3d-tiling/tiler-data-formats/), [pricing](https://cesium.com/platform/cesium-ion/pricing/) and the [Cesium blog](https://cesium.com/blog/). The Gaussian splats row was read on 2026-11-05 from [3D reconstruction](https://cesium.com/learn/reality-data/reconstruction/), the [forum answer on PLY uploads](https://community.cesium.com/t/converting-3dgs-ply-to-3d-tiles-via-cesium-ion-rest-api/42003/2) and the tiles in CesiumJS's own `Specs/Data/Cesium3DTiles/GaussianSplats`, which ion wrote.

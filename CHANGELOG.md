@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 2026-11-13: global terrain levels 0 to 6 read `TILETOPIA_GLOBAL_TERRAIN_COARSE_URL` when it names one global DEM, and still carry the geoid alone when it does not.
 - 2026-11-13: a mesh upload other than an IFC may name `crs` as an EPSG code. Vertices are easting, northing and ellipsoidal height, and the job places them in an east-north-up frame. Longitude and latitude together with `crs` answer 400, and so does `crs` on an IFC.
 - 2026-11-13: `GET /v1/assets/{id}/drawing` projects visible and hidden edges. A section position keeps the side of the cut and adds the cut as visible lines.
 - 2026-11-13: `GET /v1/assets/{id}/alignments` returns `IfcAlignment` stations in the section frame. A line and a circular arc are sampled. Any other curve is drawn straight and marked approximate.

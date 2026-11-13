@@ -85,6 +85,15 @@ fn geoid_grid() -> Vec<u8> {
     geoid_samples((-180.5, 90.5))
 }
 
+fn coarse_dem(value_at: impl Fn(f64, f64) -> f64) -> Vec<u8> {
+    let pixel = 1.0;
+    float_cog(360, 181, (-180.5, 90.5), pixel, 0, |row, column| {
+        let latitude = 90.5 - (row as f64 + 0.5) * pixel;
+        let longitude = -180.5 + (column as f64 + 0.5) * pixel;
+        value_at(latitude, longitude)
+    })
+}
+
 const RASTER_TYPE_GEO_KEY: u16 = 1025;
 const GEO_KEY_DIRECTORY_TAG: u16 = 34735;
 
@@ -172,16 +181,31 @@ impl Harness {
         cache_bytes: u64,
         ion_asset_id: Option<i64>,
     ) -> Harness {
+        Self::open(dem_cell, geoid_grid, None, cache_bytes, ion_asset_id).await
+    }
+
+    async fn open(
+        dem_cell: Vec<u8>,
+        geoid_grid: Vec<u8>,
+        coarse: Option<Vec<u8>>,
+        cache_bytes: u64,
+        ion_asset_id: Option<i64>,
+    ) -> Harness {
         let dem_cell_bytes = dem_cell.len();
-        let files = HashMap::from([
+        let mut files = HashMap::from([
             (cell_path(), dem_cell),
             ("/geoid.tif".to_string(), geoid_grid),
         ]);
+        let coarse_is_set = coarse.is_some();
+        if let Some(bytes) = coarse {
+            files.insert("/coarse.tif".to_string(), bytes);
+        }
         let (base, requests) = serve_files(files).await;
         let cache = tempfile::tempdir().unwrap();
         let global_terrain = GlobalTerrain::new(GlobalTerrainSettings {
             dem_url: Some(base.clone()),
             geoid_url: Some(format!("{base}/geoid.tif")),
+            coarse_url: coarse_is_set.then(|| format!("{base}/coarse.tif")),
             cache_dir: Some(cache.path().to_path_buf()),
             cache_bytes,
             ion_asset_id,
@@ -381,6 +405,78 @@ async fn levels_below_seven_carry_the_geoid_alone() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn levels_below_seven_read_the_coarse_dem() {
+    let harness = Harness::open(
+        dem_cell(),
+        geoid_grid(),
+        Some(coarse_dem(dem_height)),
+        1 << 30,
+        None,
+    )
+    .await;
+    let coord = tile_containing(3, 7.5, 46.5);
+    let bytes = harness.tile(&coord).await;
+    assert_heights(&bytes, &coord, |latitude, longitude| {
+        dem_height(latitude, longitude) + geoid_undulation(latitude)
+    });
+    assert!(
+        harness.requests_for(&cell_path()).is_empty(),
+        "a coarse tile does not open one-degree cells"
+    );
+    assert!(!harness.requests_for("/coarse.tif").is_empty());
+
+    let (status, body) = harness.get("/api/v1/terrain/global/layer.json").await;
+    assert_eq!(status, StatusCode::OK);
+    let layer: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        layer["description"]
+            .as_str()
+            .unwrap()
+            .contains("configured coarse DEM"),
+        "{}",
+        layer["description"]
+    );
+
+    let detailed = harness.tile(&INSIDE_CELL).await;
+    assert_heights(&detailed, &INSIDE_CELL, |latitude, longitude| {
+        dem_height(latitude, longitude) + geoid_undulation(latitude)
+    });
+    assert_eq!(harness.requests_for(&cell_path()).len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gap_in_the_coarse_dem_is_sea_level_on_the_geoid() {
+    let harness = Harness::open(
+        dem_cell(),
+        geoid_grid(),
+        Some(coarse_dem(|_, _| f64::NAN)),
+        1 << 30,
+        None,
+    )
+    .await;
+    let coord = tile_containing(3, 7.5, 46.5);
+    let bytes = harness.tile(&coord).await;
+    assert_heights(&bytes, &coord, |latitude, _| geoid_undulation(latitude));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_coarse_dem_that_does_not_cover_the_globe_names_the_file() {
+    let local = float_cog(8, 8, (7.0, 47.0), 0.01, 0, |_, _| 10.0);
+    let harness = Harness::open(dem_cell(), geoid_grid(), Some(local), 1 << 30, None).await;
+    let coord = tile_containing(3, 7.5, 46.5);
+    let (status, body) = harness
+        .get(&format!(
+            "/api/v1/terrain/global/{}/{}/{}.terrain",
+            coord.zoom, coord.x, coord.y
+        ))
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let message = String::from_utf8_lossy(&body);
+    assert!(message.contains("/coarse.tif"), "{message}");
+    assert!(message.contains("does not cover the globe"), "{message}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_cache_drops_the_oldest_tile_past_its_cap() {
     let first = TerrainTileCoord {
         zoom: 2,
@@ -432,6 +528,7 @@ async fn an_unconfigured_layer_names_what_is_missing() {
     let partly_configured = GlobalTerrain::new(GlobalTerrainSettings {
         dem_url: Some("http://dem.test".to_string()),
         geoid_url: None,
+        coarse_url: None,
         cache_dir: None,
         cache_bytes: 1 << 30,
         ion_asset_id: None,
@@ -580,6 +677,7 @@ async fn startup_refuses_an_ion_id_an_asset_already_holds() {
     let global_terrain = GlobalTerrain::new(GlobalTerrainSettings {
         dem_url: None,
         geoid_url: None,
+        coarse_url: None,
         cache_dir: None,
         cache_bytes: 1 << 30,
         ion_asset_id: Some(1),

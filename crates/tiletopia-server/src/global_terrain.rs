@@ -23,6 +23,7 @@ use crate::terrain_bundle::cache_headers;
 
 pub const DEM_URL_VAR: &str = "TILETOPIA_GLOBAL_TERRAIN_DEM_URL";
 pub const GEOID_URL_VAR: &str = "TILETOPIA_GLOBAL_TERRAIN_GEOID_URL";
+pub const COARSE_URL_VAR: &str = "TILETOPIA_GLOBAL_TERRAIN_COARSE_URL";
 pub const CACHE_DIR_VAR: &str = "TILETOPIA_GLOBAL_TERRAIN_CACHE_DIR";
 pub const CACHE_MEGABYTES_VAR: &str = "TILETOPIA_GLOBAL_TERRAIN_CACHE_MB";
 pub const ION_ASSET_ID_VAR: &str = "TILETOPIA_GLOBAL_TERRAIN_ION_ASSET_ID";
@@ -62,6 +63,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct GlobalTerrainSettings {
     pub dem_url: Option<String>,
     pub geoid_url: Option<String>,
+    pub coarse_url: Option<String>,
     pub cache_dir: Option<PathBuf>,
     pub cache_bytes: u64,
     pub ion_asset_id: Option<i64>,
@@ -96,6 +98,7 @@ impl GlobalTerrainSettings {
         Ok(GlobalTerrainSettings {
             dem_url: text(DEM_URL_VAR),
             geoid_url: text(GEOID_URL_VAR),
+            coarse_url: text(COARSE_URL_VAR),
             cache_dir: text(CACHE_DIR_VAR).map(PathBuf::from),
             cache_bytes: cache_megabytes * 1024 * 1024,
             ion_asset_id,
@@ -114,6 +117,7 @@ impl GlobalTerrain {
             (Some(dem_url), Some(geoid_url), Some(cache_dir)) => Ok(Arc::new(TerrainSource {
                 dem_url: dem_url.trim_end_matches('/').to_string(),
                 geoid_url,
+                coarse_url: settings.coarse_url,
                 cache: TileCache {
                     directory: cache_dir,
                     capacity_bytes: settings.cache_bytes,
@@ -170,6 +174,10 @@ impl GlobalTerrain {
         self.source.as_ref().err().map(String::as_str)
     }
 
+    pub(crate) fn uses_coarse_dem(&self) -> bool {
+        matches!(&self.source, Ok(source) if source.coarse_url.is_some())
+    }
+
     fn source(&self) -> Result<Arc<TerrainSource>, TileFailure> {
         self.source
             .as_ref()
@@ -188,10 +196,15 @@ async fn global_layer_json(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, TileFailure> {
     state.global_terrain.source()?;
+    let relief = if state.global_terrain.uses_coarse_dem() {
+        "Levels below 7 read the configured coarse DEM"
+    } else {
+        "Levels below 7 carry the geoid alone"
+    };
     let layer = json!({
         "tilejson": "2.1.0",
         "name": "TileTopia Global Terrain",
-        "description": "Copernicus DEM GLO-30 as heights above the WGS84 ellipsoid through the configured geoid. Levels below 7 carry the geoid alone",
+        "description": format!("Copernicus DEM GLO-30 as heights above the WGS84 ellipsoid through the configured geoid. {relief}"),
         "version": "1.0.0",
         "format": "quantized-mesh-1.0",
         "attribution": COPERNICUS_NOTICE,
@@ -274,6 +287,7 @@ fn tile_coord(z: u32, x: u32, y_segment: &str) -> Result<TerrainTileCoord, TileF
 struct TerrainSource {
     dem_url: String,
     geoid_url: String,
+    coarse_url: Option<String>,
     cache: TileCache,
     ranges: Arc<Mutex<RangeCache>>,
     absent_cells: Mutex<HashSet<(i32, i32)>>,
@@ -285,9 +299,17 @@ impl TerrainSource {
         let geoid = self.geoid()?;
         let grid = terrain_grid_size(coord.zoom);
         let mesh = if coord.zoom < FIRST_DEM_LEVEL {
-            sampled_terrain_tile(coord, grid, |latitude, longitude| {
-                geoid.undulation(latitude, longitude)
-            })
+            match &self.coarse_url {
+                Some(url) => {
+                    let window = self.read_coarse(url, coord, grid)?;
+                    sampled_terrain_tile(coord, grid, |latitude, longitude| {
+                        window.height(latitude, longitude) + geoid.undulation(latitude, longitude)
+                    })
+                }
+                None => sampled_terrain_tile(coord, grid, |latitude, longitude| {
+                    geoid.undulation(latitude, longitude)
+                }),
+            }
         } else {
             let cells = self.read_cells(coord, grid)?;
             sampled_terrain_tile(coord, grid, |latitude, longitude| {
@@ -349,15 +371,57 @@ impl TerrainSource {
             lock(&self.absent_cells).insert((latitude, longitude));
             return Ok(None);
         };
+        let (level, window) = self.sample_window(&reader, &url, overlap, spacing)?;
+        if window.heights.iter().any(|height| !height.is_finite()) {
+            return Err(unavailable(format!(
+                "{url} has no height somewhere in rows {} to {} and columns {} to {} of level {level}",
+                window.first_row,
+                window.first_row + window.rows - 1,
+                window.first_column,
+                window.first_column + window.columns - 1
+            )));
+        }
+        Ok(Some(window))
+    }
+
+    fn read_coarse(
+        &self,
+        url: &str,
+        coord: &TerrainTileCoord,
+        grid: u32,
+    ) -> Result<CellWindow, TileFailure> {
+        let reader = self
+            .open_cog(url)?
+            .ok_or_else(|| unavailable(format!("{url} answered 404")))?;
+        require_globe(&reader, url)?;
+        let [west, south, east, north] = coord.bounds();
+        let spacing = (north - south) / (grid - 1) as f64;
+        let (_, mut window) =
+            self.sample_window(&reader, url, [west, south, east, north], spacing)?;
+        for height in &mut window.heights {
+            if !height.is_finite() {
+                *height = 0.0;
+            }
+        }
+        Ok(window)
+    }
+
+    fn sample_window(
+        &self,
+        reader: &CogReader<RemoteCog>,
+        url: &str,
+        overlap: [f64; 4],
+        spacing: f64,
+    ) -> Result<(usize, CellWindow), TileFailure> {
         let level = (0..reader.levels().len())
-            .filter(|&level| PointGrid::of_level(&reader, level).step_y <= spacing * (1.0 + 1e-9))
+            .filter(|&level| PointGrid::of_level(reader, level).step_y <= spacing * (1.0 + 1e-9))
             .max_by(|&a, &b| {
-                PointGrid::of_level(&reader, a)
+                PointGrid::of_level(reader, a)
                     .step_y
-                    .total_cmp(&PointGrid::of_level(&reader, b).step_y)
+                    .total_cmp(&PointGrid::of_level(reader, b).step_y)
             })
             .unwrap_or(0);
-        let grid = PointGrid::of_level(&reader, level);
+        let grid = PointGrid::of_level(reader, level);
         let [west, south, east, north] = overlap;
         let first_column = grid.column(west).floor() as usize;
         let last_column = grid.column(east).ceil() as usize;
@@ -368,19 +432,17 @@ impl TerrainSource {
             .read_window(level, first_column, first_row, columns, rows)
             .map_err(|e| unavailable(format!("{url} could not be read: {e}")))?
             .into_data();
-        if heights.iter().any(|height| !height.is_finite()) {
-            return Err(unavailable(format!(
-                "{url} has no height somewhere in rows {first_row} to {last_row} and columns {first_column} to {last_column} of level {level}"
-            )));
-        }
-        Ok(Some(CellWindow {
-            grid,
-            first_column,
-            first_row,
-            columns,
-            rows,
-            heights,
-        }))
+        Ok((
+            level,
+            CellWindow {
+                grid,
+                first_column,
+                first_row,
+                columns,
+                rows,
+                heights,
+            },
+        ))
     }
 
     fn open_cog(&self, url: &str) -> Result<Option<CogReader<RemoteCog>>, TileFailure> {
@@ -503,6 +565,21 @@ impl PointGrid {
     }
 }
 
+fn require_globe<R: RangeRead>(reader: &CogReader<R>, url: &str) -> Result<(), TileFailure> {
+    let level = &reader.levels()[0];
+    let grid = PointGrid::of_level(reader, 0);
+    let covers_globe = (level.width as f64 * grid.step_x - 360.0).abs() < GLOBE_TOLERANCE_DEGREES
+        && (grid.first_y - 90.0).abs() < GLOBE_TOLERANCE_DEGREES
+        && ((level.height - 1) as f64 * grid.step_y - 180.0).abs() < GLOBE_TOLERANCE_DEGREES;
+    if covers_globe {
+        Ok(())
+    } else {
+        Err(unavailable(format!(
+            "{url} does not cover the globe from pole to pole and all the way round"
+        )))
+    }
+}
+
 struct Geoid {
     grid: PointGrid,
     width: usize,
@@ -519,15 +596,8 @@ impl Geoid {
                 "{url} holds {width}x{height} undulations, more than the {MAX_GEOID_SAMPLES} kept in memory, use a coarser grid such as EGM96 at 15 minutes"
             )));
         }
+        require_globe(reader, url)?;
         let grid = PointGrid::of_level(reader, 0);
-        let covers_globe = (width as f64 * grid.step_x - 360.0).abs() < GLOBE_TOLERANCE_DEGREES
-            && (grid.first_y - 90.0).abs() < GLOBE_TOLERANCE_DEGREES
-            && ((height - 1) as f64 * grid.step_y - 180.0).abs() < GLOBE_TOLERANCE_DEGREES;
-        if !covers_globe {
-            return Err(unavailable(format!(
-                "{url} does not cover the globe from pole to pole and all the way round"
-            )));
-        }
         let undulations = reader
             .read_window(0, 0, 0, width, height)
             .map_err(|e| unavailable(format!("{url} could not be read: {e}")))?

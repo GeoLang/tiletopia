@@ -460,6 +460,7 @@ async fn state_with_global_terrain() -> Arc<AppState> {
     test_state_with_global_terrain(GlobalTerrain::new(GlobalTerrainSettings {
         dem_url: Some("http://dem.test".to_string()),
         geoid_url: Some("http://geoid.test/geoid.tif".to_string()),
+        coarse_url: None,
         cache_dir: Some(std::env::temp_dir().join(format!("asset_access_{}", Uuid::new_v4()))),
         cache_bytes: 1 << 20,
         ion_asset_id: Some(GLOBAL_TERRAIN_ION_ID),

@@ -275,6 +275,7 @@ fn unconfigured_global_terrain() -> tiletopia_server::global_terrain::GlobalTerr
         tiletopia_server::global_terrain::GlobalTerrainSettings {
             dem_url: None,
             geoid_url: None,
+            coarse_url: None,
             cache_dir: None,
             cache_bytes: 1 << 30,
             ion_asset_id: None,

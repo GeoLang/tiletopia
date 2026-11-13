@@ -703,6 +703,7 @@ mod tests {
         let global_terrain = GlobalTerrain::new(crate::global_terrain::GlobalTerrainSettings {
             dem_url: None,
             geoid_url: None,
+            coarse_url: None,
             cache_dir: None,
             cache_bytes: 1,
             ion_asset_id: Some(1),

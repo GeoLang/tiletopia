@@ -54,7 +54,8 @@ Each item below says whether it is done or still open.
 ### 2.2 DEM tile download & caching
 - **Done**: `/api/v1/terrain/` reads DEM files under `<data-dir>/dem` first, then downloads and caches SRTM tiles. A failed download answers 503 naming the tile rather than a flat mesh. Analysis tiles can read Copernicus GLO-30 over STAC instead, see `TILETOPIA_ANALYSIS_DEM_BBOX`. A DEM upload builds a quantized-mesh bundle named after the asset id
 - **Done**: `/api/v1/terrain/global/` serves the whole Earth from Copernicus GLO-30 COGs read by `Range`, with ellipsoidal heights through a geoid grid and a capped disk cache, the counterpart of Cesium World Terrain
-- **Left**: levels 0 to 6 carry the geoid alone, since a tile there touches up to 16 one-degree cells at level 6 and 32,400 at level 0. Relief there needs an offline pyramid, or a global coarse DEM in one COG. No vertex normals or water mask
+- **Done**: levels 0 to 6 read `TILETOPIA_GLOBAL_TERRAIN_COARSE_URL` when it names one global COG of orthometric heights, sampled from the overview that matches the tile, and carry the geoid alone when it is unset. A missing height in that COG is sea level
+- **Left**: that coarse COG is not built or shipped. No vertex normals or water mask
 
 ### 2.3 3D Tiles Next output (EXT_structural_metadata)
 - **Done**: `glb_writer` declares `EXT_structural_metadata` and writes per-feature properties into the tile. An IFC element's GlobalId rides there as `asset_id`, so a client picking a tile feature reads the id back
