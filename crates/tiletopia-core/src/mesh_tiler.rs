@@ -1096,7 +1096,16 @@ impl InstancedElements<'_> {
 fn split_instanced_parts<'p>(
     group: &MaterialGroup,
     parts: &'p [TilePart<'_>],
+    cad_edges: bool,
 ) -> (Vec<u32>, Vec<InstancedElements<'p>>) {
+    if cad_edges {
+        let mut direct_indices = Vec::new();
+        for part in parts {
+            direct_indices.extend_from_slice(&part.indices);
+        }
+        return (direct_indices, Vec::new());
+    }
+
     let mut direct_indices = Vec::new();
     let mut by_first_occurrence: BTreeMap<usize, InstancedElements<'p>> = BTreeMap::new();
     for part in parts {
@@ -1459,7 +1468,8 @@ impl<'a> GroupTiler<'a> {
         if total_triangles(parts) == 0 {
             return Ok(None);
         }
-        let (direct_indices, instanced) = split_instanced_parts(self.group, parts);
+        let (direct_indices, instanced) =
+            split_instanced_parts(self.group, parts, self.config.cad_edges);
         let mut mesh = make_glb_mesh(self.group, &direct_indices, &instanced, self.config);
         if self.config.texture_compression == TextureCompression::Ktx2 {
             mesh.texture = mesh.texture.as_ref().map(ktx2_texture).transpose()?;
@@ -4309,7 +4319,7 @@ mod tests {
     }
 
     #[test]
-    fn cad_edges_skip_instanced_geometry() {
+    fn cad_edges_expand_repeated_elements_so_each_copy_keeps_its_edges() {
         let mut meshes = numbered_doors(6);
         meshes.push(shaded_by_its_normals(triangle_at(-20.0, Some("wall"))));
         let config = MeshTilingConfig {
@@ -4317,18 +4327,42 @@ mod tests {
             ..Default::default()
         };
         let written = write_tileset(&meshes, &config);
-        let (json, _) = written.glb(&written.tileset.root);
+        let (json, views) = written.glb(&written.tileset.root);
 
-        let nodes = instanced_nodes(&json);
-        assert_eq!(nodes.len(), 1);
-        let instanced_mesh_index = nodes[0]["mesh"].as_u64().unwrap() as usize;
-        assert_ne!(instanced_mesh_index, 0);
-        let instanced_primitive = &json["meshes"][instanced_mesh_index]["primitives"][0];
-        assert!(
-            instanced_primitive["extensions"]
-                .get("EXT_mesh_primitive_edge_visibility")
-                .is_none()
+        assert!(instanced_nodes(&json).is_empty());
+        assert_eq!(json["meshes"].as_array().unwrap().len(), 1);
+        let extension = edge_visibility_extension(&json);
+        assert!(extension.get("silhouetteNormals").is_none());
+        let visibility = &extension["visibility"];
+        let indices = index_values(&json, &views);
+        assert_eq!(
+            json["accessors"][visibility.as_u64().unwrap() as usize]["count"],
+            indices.len().div_ceil(4)
         );
-        assert!(edge_visibility_extension(&json).is_object());
+
+        let positions: Vec<[f32; 3]> =
+            attribute_values(&json, &views, "POSITION").expect("positions");
+        let (min_x, max_x) = positions
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(min_x, max_x), position| {
+                (min_x.min(position[0]), max_x.max(position[0]))
+            });
+        assert!(
+            max_x - min_x > 20.0,
+            "the six doors stay apart, span {min_x} to {max_x}"
+        );
+
+        let rows = asset_ids(&json, &views);
+        let mut reached: Vec<&str> = referenced_feature_ids(&json, &views)
+            .iter()
+            .map(|feature_id| rows[*feature_id as usize].as_str())
+            .collect();
+        reached.sort_unstable();
+        assert_eq!(
+            reached,
+            [
+                "door-0", "door-1", "door-2", "door-3", "door-4", "door-5", "wall",
+            ]
+        );
     }
 }

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 2026-11-13: CAD edges cover repeated elements. A tile that asks for edges writes
+  those elements as ordinary triangles instead of `EXT_mesh_gpu_instancing`.
+  CesiumJS 1.147 draws instanced edges without the instance transforms, so
+  the edges would sit on the prototype instead of on each copy.
 - 2026-11-12: IFC products are meshed together on the geometry pool. The
   element store reads that same entity index, instead of scanning the file
   a second time.
