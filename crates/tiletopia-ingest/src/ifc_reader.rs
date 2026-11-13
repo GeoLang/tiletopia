@@ -968,7 +968,7 @@ fn bounds_of<'a>(positions: impl IntoIterator<Item = &'a [f64; 3]>) -> Option<Aa
 }
 
 impl MapConversionPlacement {
-    pub(crate) fn east_north_up_of(&self, local: [f64; 3]) -> Result<[f64; 3], IngestError> {
+    pub fn east_north_up_of(&self, local: [f64; 3]) -> Result<[f64; 3], IngestError> {
         let [x, y, up] = local;
         let [abscissa, ordinate] = self.x_axis;
         let geodetic = self.to_geodetic.apply(Coord3D {

@@ -24,6 +24,10 @@ pub fn section_routes() -> Router<Arc<AppState>> {
 struct SectionParameters {
     axis: Option<String>,
     position: Option<String>,
+    nx: Option<String>,
+    ny: Option<String>,
+    nz: Option<String>,
+    offset: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -35,7 +39,7 @@ pub(crate) enum Axis {
 }
 
 impl Axis {
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         match self {
             Axis::X => 0,
             Axis::Y => 1,
@@ -85,6 +89,7 @@ pub(crate) type Ring = Vec<[f64; 3]>;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ElementPolygon {
     pub(crate) element_id: String,
+    pub(crate) ifc_class: Option<String>,
     pub(crate) rings: Vec<Ring>,
 }
 
@@ -93,6 +98,10 @@ pub(crate) struct ElementPolygon {
 pub(crate) struct Section {
     pub(crate) axis: Axis,
     position: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) normal: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) offset: Option<f64>,
     pub(crate) open_chains_dropped: u64,
     pub(crate) polygons: Vec<ElementPolygon>,
 }
@@ -240,6 +249,31 @@ impl WeldedPoints {
                 .iter()
                 .map(|&axis| (welded[axis] - point[axis]).powi(2))
                 .sum();
+            squared <= WELD_DISTANCE_METRES * WELD_DISTANCE_METRES
+        };
+        let near = (-1..=1)
+            .flat_map(|across| (-1..=1).map(move |up| (cell.0 + across, cell.1 + up)))
+            .filter_map(|neighbour| self.by_cell.get(&neighbour))
+            .flatten()
+            .copied()
+            .find(|index| is_near(index));
+        if let Some(index) = near {
+            return index;
+        }
+        let index = self.points.len();
+        self.points.push(point);
+        self.by_cell.entry(cell).or_default().push(index);
+        index
+    }
+
+    fn index_of_flat(&mut self, point: [f64; 3], flat: [f64; 2]) -> usize {
+        let cell_of = |coordinate: f64| (coordinate / WELD_DISTANCE_METRES).floor() as i64;
+        let cell = (cell_of(flat[0]), cell_of(flat[1]));
+        let is_near = |index: &usize| {
+            let welded = self.points[*index];
+            let squared = (0..3)
+                .map(|axis| (welded[axis] - point[axis]).powi(2))
+                .sum::<f64>();
             squared <= WELD_DISTANCE_METRES * WELD_DISTANCE_METRES
         };
         let near = (-1..=1)
@@ -409,11 +443,323 @@ fn runs_against_its_faces(
     signed_area(flat) * (agreement as f64) < 0.0
 }
 
+struct CutPlane {
+    normal: [f64; 3],
+    offset: f64,
+    tangent: [f64; 3],
+    bitangent: [f64; 3],
+}
+
+fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
+    left.iter().zip(right).map(|(one, other)| one * other).sum()
+}
+
+fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
+}
+
+fn sub(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|axis| left[axis] - right[axis])
+}
+
+fn scale(vector: [f64; 3], factor: f64) -> [f64; 3] {
+    std::array::from_fn(|axis| vector[axis] * factor)
+}
+
+fn unit(vector: [f64; 3]) -> Option<[f64; 3]> {
+    let length = dot(vector, vector).sqrt();
+    (length > 0.0 && length.is_finite()).then(|| scale(vector, 1.0 / length))
+}
+
+fn cut_plane(normal: [f64; 3], offset: f64) -> Option<CutPlane> {
+    let length = dot(normal, normal).sqrt();
+    let normal = unit(normal)?;
+    let offset = offset / length;
+    let mut axis = 0;
+    for candidate in 1..3 {
+        if normal[candidate].abs() > normal[axis].abs() {
+            axis = candidate;
+        }
+    }
+    let mut helper = [0.0; 3];
+    helper[(axis + 1) % 3] = 1.0;
+    let tangent = unit(cross(helper, normal))?;
+    let bitangent = cross(normal, tangent);
+    Some(CutPlane {
+        normal,
+        offset,
+        tangent,
+        bitangent,
+    })
+}
+
+fn project(plane: &CutPlane, point: [f64; 3]) -> [f64; 2] {
+    [dot(point, plane.tangent), dot(point, plane.bitangent)]
+}
+
+fn signed_distance(plane: &CutPlane, point: [f64; 3]) -> f64 {
+    dot(point, plane.normal) - plane.offset
+}
+
+fn side_of_cut(plane: &CutPlane, point: [f64; 3]) -> Side {
+    let signed = signed_distance(plane, point);
+    if signed.abs() <= WELD_DISTANCE_METRES {
+        Side::On
+    } else if signed < 0.0 {
+        Side::Below
+    } else {
+        Side::Above
+    }
+}
+
+fn snap_to_cut(plane: &CutPlane, point: [f64; 3]) -> [f64; 3] {
+    sub(point, scale(plane.normal, signed_distance(plane, point)))
+}
+
+fn cross_cut(plane: &CutPlane, first: [f64; 3], second: [f64; 3]) -> [f64; 3] {
+    let start = signed_distance(plane, first);
+    let end = signed_distance(plane, second);
+    let along = start / (start - end);
+    let point = std::array::from_fn(|axis| first[axis] + along * (second[axis] - first[axis]));
+    snap_to_cut(plane, point)
+}
+
+fn solid_on_the_left(
+    plane: &CutPlane,
+    ends: [[f64; 3]; 2],
+    corners: &[[f64; 3]; 3],
+) -> [[f64; 3]; 2] {
+    let face = cross(sub(corners[1], corners[0]), sub(corners[2], corners[0]));
+    let right = cross(sub(ends[1], ends[0]), plane.normal);
+    if dot(face, right) < 0.0 {
+        [ends[1], ends[0]]
+    } else {
+        ends
+    }
+}
+
+fn cut_on_plane(mesh: &MeshData, plane: &CutPlane) -> PlaneCut {
+    let mut cut = PlaneCut {
+        crossings: Vec::new(),
+        edges_in_plane: Vec::new(),
+    };
+    for triangle in mesh.indices.as_chunks::<3>().0 {
+        let corners: [[f64; 3]; 3] =
+            std::array::from_fn(|corner| mesh.positions[triangle[corner] as usize]);
+        let all_finite = corners
+            .iter()
+            .flatten()
+            .all(|coordinate| coordinate.is_finite());
+        if !all_finite {
+            continue;
+        }
+        let sides = corners.map(|corner| side_of_cut(plane, corner));
+        let corners_on_plane = sides.iter().filter(|side| **side == Side::On).count();
+        if corners_on_plane == 3 {
+            continue;
+        }
+        if corners_on_plane == 2 {
+            let off = sides
+                .iter()
+                .position(|side| *side != Side::On)
+                .expect("one corner is off the plane");
+            cut.edges_in_plane.push(solid_on_the_left(
+                plane,
+                [
+                    snap_to_cut(plane, corners[(off + 1) % 3]),
+                    snap_to_cut(plane, corners[(off + 2) % 3]),
+                ],
+                &corners,
+            ));
+            continue;
+        }
+        let mut ends = [[0.0; 3]; 2];
+        let mut end_count = 0;
+        for index in 0..3 {
+            let next = (index + 1) % 3;
+            if sides[index] == Side::On {
+                ends[end_count] = snap_to_cut(plane, corners[index]);
+                end_count += 1;
+            } else if sides[next] != Side::On && sides[index] != sides[next] {
+                ends[end_count] = cross_cut(plane, corners[index], corners[next]);
+                end_count += 1;
+            }
+        }
+        if end_count == 2 {
+            cut.crossings.push(solid_on_the_left(plane, ends, &corners));
+        }
+    }
+    cut
+}
+
+fn polygons_from_flats(rings: Vec<CutRing>, flat: &[Vec<[f64; 2]>]) -> Vec<Vec<Ring>> {
+    let areas: Vec<f64> = flat.iter().map(|ring| signed_area(ring).abs()).collect();
+    let hole_flags: Vec<bool> = rings.iter().map(|ring| ring.is_hole).collect();
+    let mut polygon_of_ring: Vec<Option<usize>> = vec![None; rings.len()];
+    let mut polygons: Vec<Vec<Ring>> = Vec::new();
+    let mut holes = Vec::new();
+    for (index, ring) in rings.into_iter().enumerate() {
+        if ring.is_hole {
+            holes.push((index, ring.points));
+        } else {
+            polygon_of_ring[index] = Some(polygons.len());
+            polygons.push(vec![ring.points]);
+        }
+    }
+    for (index, hole) in holes {
+        let smallest_container = (0..flat.len())
+            .filter(|&other| {
+                !hole_flags[other]
+                    && areas[other] > areas[index]
+                    && contains(&flat[other], flat[index][0])
+            })
+            .min_by(|left, right| areas[*left].total_cmp(&areas[*right]));
+        match smallest_container {
+            Some(outer) => {
+                let polygon = polygon_of_ring[outer].expect("every outer ring starts a polygon");
+                polygons[polygon].push(hole);
+            }
+            None => polygons.push(vec![hole]),
+        }
+    }
+    polygons
+}
+
+fn parsed_plane(parameters: &SectionParameters) -> Result<Option<([f64; 3], f64)>, IonError> {
+    let given = [
+        parameters.nx.as_deref(),
+        parameters.ny.as_deref(),
+        parameters.nz.as_deref(),
+        parameters.offset.as_deref(),
+    ];
+    if given.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    if given.iter().any(Option::is_none) {
+        return Err(invalid_parameter(
+            "a plane takes nx, ny, nz and offset together",
+        ));
+    }
+    let number = |raw: &str, name: &str| {
+        raw.parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| invalid_parameter(format!("{name} {raw:?} is not a finite number")))
+    };
+    let normal = [
+        number(given[0].expect("nx is present"), "nx")?,
+        number(given[1].expect("ny is present"), "ny")?,
+        number(given[2].expect("nz is present"), "nz")?,
+    ];
+    let offset = number(given[3].expect("offset is present"), "offset")?;
+    if unit(normal).is_none() {
+        return Err(invalid_parameter("the plane normal has no direction"));
+    }
+    Ok(Some((normal, offset)))
+}
+
+pub(crate) fn section_on_plane(meshes: &[MeshData], normal: [f64; 3], offset: f64) -> Section {
+    let plane = cut_plane(normal, offset).expect("the normal was checked");
+    let dominant = (0..3)
+        .max_by(|&left, &right| {
+            plane.normal[left]
+                .abs()
+                .total_cmp(&plane.normal[right].abs())
+        })
+        .unwrap_or(2);
+    let axis = match dominant {
+        0 => Axis::X,
+        1 => Axis::Y,
+        _ => Axis::Z,
+    };
+    let mut section = Section {
+        axis,
+        position: plane.offset,
+        normal: Some(plane.normal),
+        offset: Some(plane.offset),
+        open_chains_dropped: 0,
+        polygons: Vec::new(),
+    };
+    let smallest_ring_area = WELD_DISTANCE_METRES * WELD_DISTANCE_METRES;
+    let mut meshes_without_id = 0usize;
+    for mesh in meshes {
+        let Some(element_id) = &mesh.asset_id else {
+            meshes_without_id += 1;
+            continue;
+        };
+        let cut = cut_on_plane(mesh, &plane);
+        let mut welded = WeldedPoints::default();
+        let mut votes: HashMap<(usize, usize), i64> = HashMap::new();
+        let mut segments: Vec<[usize; 2]> = Vec::new();
+        for ends in cut.crossings {
+            let [first, second] = ends.map(|end| welded.index_of_flat(end, project(&plane, end)));
+            *votes.entry((first, second)).or_default() += 1;
+            segments.push([first, second]);
+        }
+        let mut edges_in_plane = HashSet::new();
+        for ends in cut.edges_in_plane {
+            let [first, second] = ends.map(|end| welded.index_of_flat(end, project(&plane, end)));
+            *votes.entry((first, second)).or_default() += 1;
+            if edges_in_plane.insert((first.min(second), first.max(second))) {
+                segments.push([first, second]);
+            }
+        }
+        segments.retain(|ends| ends[0] != ends[1]);
+        let chains = chained(&segments, welded.points.len());
+        section.open_chains_dropped += chains.open;
+        let rings: Vec<CutRing> = chains
+            .closed
+            .into_iter()
+            .filter_map(|ring| {
+                let flat: Vec<[f64; 2]> = ring
+                    .iter()
+                    .map(|&point| project(&plane, welded.points[point]))
+                    .collect();
+                if ring.len() < 3 || signed_area(&flat).abs() < smallest_ring_area {
+                    return None;
+                }
+                Some(CutRing {
+                    is_hole: runs_against_its_faces(&ring, &flat, &votes),
+                    points: ring.iter().map(|&point| welded.points[point]).collect(),
+                })
+            })
+            .collect();
+        let flats: Vec<Vec<[f64; 2]>> = rings
+            .iter()
+            .map(|ring| {
+                ring.points
+                    .iter()
+                    .map(|&point| project(&plane, point))
+                    .collect()
+            })
+            .collect();
+        for polygon_rings in polygons_from_flats(rings, &flats) {
+            section.polygons.push(ElementPolygon {
+                element_id: element_id.clone(),
+                ifc_class: mesh.class.clone(),
+                rings: polygon_rings,
+            });
+        }
+    }
+    if meshes_without_id > 0 {
+        tracing::warn!(
+            "{meshes_without_id} meshes carry no GlobalId and are left out of the section"
+        );
+    }
+    section
+}
+
 pub(crate) fn section_of(meshes: &[MeshData], axis: Axis, position: f64) -> Section {
     let plane_axes = axis.plane_axes();
     let mut section = Section {
         axis,
         position,
+        normal: None,
+        offset: None,
         open_chains_dropped: 0,
         polygons: Vec::new(),
     };
@@ -466,6 +812,7 @@ pub(crate) fn section_of(meshes: &[MeshData], axis: Axis, position: f64) -> Sect
         for polygon_rings in polygons_by_orientation(rings, plane_axes) {
             section.polygons.push(ElementPolygon {
                 element_id: element_id.clone(),
+                ifc_class: mesh.class.clone(),
                 rings: polygon_rings,
             });
         }
@@ -485,8 +832,14 @@ async fn get_section(
     Query(parameters): Query<SectionParameters>,
 ) -> Result<Json<Section>, IonError> {
     let (asset, _) = permitted_asset(&state, &headers, &id, may_view_asset).await?;
-    let axis = parsed_axis(parameters.axis.as_deref())?;
-    let position = parsed_position(parameters.position.as_deref())?;
+    let plane = parsed_plane(&parameters)?;
+    let axis_cut = match plane {
+        Some(_) => None,
+        None => Some((
+            parsed_axis(parameters.axis.as_deref())?,
+            parsed_position(parameters.position.as_deref())?,
+        )),
+    };
     let source = mesh_source(&state, &asset, &id).await?;
     if source.extension != "ifc" {
         return Err(not_ifc_section(&id, &source.extension));
@@ -497,7 +850,11 @@ async fn get_section(
     let section = tokio::task::spawn_blocking(move || {
         let _build_slot = build_slot;
         let meshes = read_meshes_in_tileset_frame(&source.job, &source.extension)?;
-        Ok::<_, String>(section_of(&meshes, axis, position))
+        Ok::<_, String>(match (plane, axis_cut) {
+            (Some((normal, offset)), _) => section_on_plane(&meshes, normal, offset),
+            (None, Some((axis, position))) => section_of(&meshes, axis, position),
+            (None, None) => unreachable!("a missing plane asks for an axis"),
+        })
     })
     .await
     .map_err(|error| server_failure("the section could not be computed", error))?
@@ -554,6 +911,50 @@ mod tests {
         let mut corners = rings[0].clone();
         corners.sort_by(|left, right| left.partial_cmp(right).unwrap());
         corners
+    }
+
+    #[test]
+    fn a_cut_keeps_the_mesh_class() {
+        let mut mesh = box_mesh([0.0, 0.0, 0.0], [4.0, 0.3, 2.5]);
+        mesh.class = Some("IfcWall".to_string());
+
+        let section = section_of(&[mesh], Axis::Z, 1.0);
+
+        assert_eq!(section.polygons[0].ifc_class.as_deref(), Some("IfcWall"));
+    }
+
+    #[test]
+    fn a_tilted_plane_cuts_the_same_box_an_axis_plane_does_and_a_diagonal() {
+        let mesh = box_mesh([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
+        let along_x = section_on_plane(&[mesh.clone()], [2.0, 0.0, 0.0], 2.0);
+        let axis = section_of(&[mesh.clone()], Axis::X, 1.0);
+        assert_eq!(single_ring_corners(&along_x), single_ring_corners(&axis));
+        assert_eq!(along_x.normal, Some([1.0, 0.0, 0.0]));
+        assert_eq!(along_x.offset, Some(1.0));
+
+        let diagonal = section_on_plane(&[mesh], [1.0, 1.0, 0.0], 2.0);
+        let corners = single_ring_corners(&diagonal);
+        assert!(
+            corners
+                .iter()
+                .all(|point| (point[0] + point[1] - 2.0).abs() < 1e-6)
+        );
+        for expected in [
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [2.0, 0.0, 2.0],
+            [0.0, 2.0, 2.0],
+        ] {
+            assert!(
+                corners.iter().any(|point| {
+                    point
+                        .iter()
+                        .zip(expected)
+                        .all(|(got, want)| (got - want).abs() < 1e-6)
+                }),
+                "{expected:?} missing from {corners:?}"
+            );
+        }
     }
 
     #[test]

@@ -834,6 +834,147 @@ pub async fn load_property(
     }))
 }
 
+pub struct StoredElementId {
+    pub element_row: i64,
+    pub express_id: i64,
+}
+
+pub async fn stored_element_id(
+    connection: &mut SqliteConnection,
+    global_id: &str,
+) -> Result<Option<StoredElementId>, sqlx::Error> {
+    let Some(element) =
+        sqlx::query("SELECT element_row, express_id FROM elements WHERE global_id = ? LIMIT 1")
+            .bind(global_id)
+            .fetch_optional(&mut *connection)
+            .await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(StoredElementId {
+        element_row: element.try_get("element_row")?,
+        express_id: element.try_get("express_id")?,
+    }))
+}
+
+async fn rewrite_store_copy<T>(
+    asset_dir: &Path,
+    edit: impl AsyncFnOnce(&mut SqliteConnection) -> Result<T, PropertyStoreError>,
+) -> Result<T, PropertyStoreError> {
+    let source = store_path(asset_dir);
+    let editing = asset_dir.join("elements.sqlite.editing");
+    tokio::fs::copy(&source, &editing)
+        .await
+        .map_err(PropertyStoreError::Io)?;
+    let mut connection = SqliteConnectOptions::new()
+        .filename(&editing)
+        .journal_mode(SqliteJournalMode::Off)
+        .synchronous(SqliteSynchronous::Off)
+        .connect()
+        .await
+        .map_err(PropertyStoreError::Database)?;
+    let stored = edit(&mut connection).await;
+    connection
+        .close()
+        .await
+        .map_err(PropertyStoreError::Database)?;
+    if stored.is_err() {
+        let _ = tokio::fs::remove_file(&editing).await;
+        return stored;
+    }
+    if let Err(error) = tokio::fs::rename(&editing, &source).await {
+        let _ = tokio::fs::remove_file(&editing).await;
+        return Err(PropertyStoreError::Io(error));
+    }
+    stored
+}
+
+pub async fn delete_stored_element(
+    asset_dir: &Path,
+    global_id: &str,
+) -> Result<bool, PropertyStoreError> {
+    let Some(mut connection) = open_store(asset_dir)
+        .await
+        .map_err(PropertyStoreError::Database)?
+    else {
+        return Err(PropertyStoreError::Missing);
+    };
+    let Some(identity) = stored_element_id(&mut connection, global_id)
+        .await
+        .map_err(PropertyStoreError::Database)?
+    else {
+        return Ok(false);
+    };
+    drop(connection);
+    rewrite_store_copy(asset_dir, async move |connection| {
+        sqlx::query("DELETE FROM properties WHERE element_row = ?")
+            .bind(identity.element_row)
+            .execute(&mut *connection)
+            .await
+            .map_err(PropertyStoreError::Database)?;
+        sqlx::query("DELETE FROM element_search WHERE rowid = ?")
+            .bind(identity.element_row)
+            .execute(&mut *connection)
+            .await
+            .map_err(PropertyStoreError::Database)?;
+        sqlx::query("DELETE FROM elements WHERE element_row = ?")
+            .bind(identity.element_row)
+            .execute(&mut *connection)
+            .await
+            .map_err(PropertyStoreError::Database)?;
+        Ok(true)
+    })
+    .await
+}
+
+pub async fn insert_stored_proxy(
+    asset_dir: &Path,
+    express_id: i64,
+    global_id: &str,
+) -> Result<(), PropertyStoreError> {
+    rewrite_store_copy(asset_dir, async move |connection| {
+        let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM elements WHERE global_id = ?")
+            .bind(global_id)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(PropertyStoreError::Database)?;
+        if existing > 0 {
+            return Err(PropertyStoreError::Database(sqlx::Error::Protocol(
+                "the element is already in the store".into(),
+            )));
+        }
+        let element_row: i64 =
+            sqlx::query_scalar("SELECT COALESCE(MAX(element_row), 0) + 1 FROM elements")
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(PropertyStoreError::Database)?;
+        sqlx::query(
+            "INSERT INTO elements (element_row, express_id, global_id, class, name, tree_kind, \
+             parent_express_id, storey, longitude, latitude, height, radius, mesh_hash, base_height) \
+             VALUES (?, ?, ?, 'IfcBuildingElementProxy', 'Added element', 'element', \
+             NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
+        )
+        .bind(element_row)
+        .bind(express_id)
+        .bind(global_id)
+        .execute(&mut *connection)
+        .await
+        .map_err(PropertyStoreError::Database)?;
+        sqlx::query(
+            "INSERT INTO element_search (rowid, global_id, name, class, property_values) VALUES (?, ?, ?, ?, '')",
+        )
+        .bind(element_row)
+        .bind(global_id)
+        .bind(with_word_parts("Added element"))
+        .bind(with_word_parts("IfcBuildingElementProxy"))
+        .execute(&mut *connection)
+        .await
+        .map_err(PropertyStoreError::Database)?;
+        Ok(())
+    })
+    .await
+}
+
 pub async fn store_edited_property(
     asset_dir: &Path,
     element_row: i64,

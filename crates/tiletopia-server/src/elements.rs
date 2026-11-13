@@ -178,7 +178,7 @@ pub(crate) async fn open_readable_store(
     })
 }
 
-fn no_element_store(id: &str, status: &AssetStatus) -> IonError {
+pub(crate) fn no_element_store(id: &str, status: &AssetStatus) -> IonError {
     element_error(
         StatusCode::NOT_FOUND,
         "ASSET_HAS_NO_ELEMENT_STORE",

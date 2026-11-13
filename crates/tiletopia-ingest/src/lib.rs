@@ -9,6 +9,8 @@ pub mod e57_reader;
 pub mod fbx_reader;
 pub mod gltf_reader;
 pub mod hgt_reader;
+pub mod ifc_alignment;
+pub mod ifc_edit;
 pub mod ifc_elements;
 pub mod ifc_property_write;
 pub mod ifc_reader;

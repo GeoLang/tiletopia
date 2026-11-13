@@ -4,6 +4,7 @@
 //! view-dependent LOD, and provides WebSocket for real-time data.
 
 pub mod admin;
+pub mod alignment;
 pub mod analysis;
 pub mod analysis_tiles;
 pub mod api_keys;
@@ -17,7 +18,9 @@ pub mod cicd;
 pub mod cog;
 pub mod czml;
 pub mod db;
+pub mod drawing;
 pub mod dxf_export;
+pub mod edits;
 pub(crate) mod element_query;
 pub mod element_store;
 pub mod elements;
@@ -350,6 +353,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(change_reports::change_report_routes())
         .merge(dxf_export::dxf_export_routes())
         .merge(section::section_routes())
+        .merge(drawing::drawing_routes())
+        .merge(alignment::alignment_routes())
+        .merge(edits::edit_routes())
         .merge(ids_check::ids_check_routes())
         .merge(model_versions::model_version_routes());
 
