@@ -205,7 +205,8 @@ pub fn replace_mesh(
     positions: &[f64],
     indices: &[u32],
 ) -> Result<Vec<u8>, EditError> {
-    if positions.len() % 3 != 0 || indices.len() % 3 != 0 || indices.is_empty() {
+    if !positions.len().is_multiple_of(3) || !indices.len().is_multiple_of(3) || indices.is_empty()
+    {
         return Err(EditError::InvalidMesh);
     }
     let vertices = positions.len() / 3;
@@ -234,7 +235,9 @@ pub fn replace_mesh(
     let point_list = next;
     next += 1;
     let coords = positions
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|point| {
             format!(
                 "({},{},{})",
@@ -249,7 +252,7 @@ pub fn replace_mesh(
         "#{point_list}=IFCCARTESIANPOINTLIST3D(({coords}));\n"
     ));
     let mut faces = Vec::new();
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         let face_id = next;
         next += 1;
         faces.push(face_id);
@@ -304,7 +307,7 @@ pub fn change_relation(
 
 pub fn mesh_volume(positions: &[[f64; 3]], indices: &[u32]) -> f64 {
     let mut sum = 0.0;
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         let Some(a) = positions.get(triangle[0] as usize) else {
             continue;
         };
@@ -404,10 +407,10 @@ fn entity_span(source: &[u8], id: u32) -> Option<std::ops::Range<usize>> {
         if found != id {
             continue;
         }
-        if end == 0 || source.get(end - 1) != Some(&b';') {
-            if let Some(semi) = source[end..].iter().position(|byte| *byte == b';') {
-                end += semi + 1;
-            }
+        if (end == 0 || source.get(end - 1) != Some(&b';'))
+            && let Some(semi) = source[end..].iter().position(|byte| *byte == b';')
+        {
+            end += semi + 1;
         }
         while matches!(source.get(end), Some(b'\n' | b'\r')) {
             end += 1;
@@ -911,7 +914,7 @@ mod tests {
             point[0] += 100.0;
             point[1] += 50.0;
         }
-        for triangle in indices.chunks_exact_mut(3) {
+        for triangle in indices.as_mut_slice().as_chunks_mut::<3>().0 {
             triangle.swap(0, 1);
         }
         assert!((mesh_volume(&positions, &indices) - 6.0).abs() < 1.0e-6);

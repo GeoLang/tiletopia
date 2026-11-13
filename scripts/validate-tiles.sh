@@ -83,8 +83,21 @@ if [ "$compression" = none ]; then
   uv run --with ezdxf==1.4.5 "$repo_root/scripts/check_dxf.py" "$work_dir/twin_boxes.dxf"
 fi
 tile_and_validate "$work_dir/repeated_boxes.ifc" -F longitude=13.4 -F latitude=52.5
+# forty boxes five metres apart span about two hundred metres
 node -e 'const glb = require("fs").readFileSync(process.argv[1]); console.log(glb.subarray(20, 20 + glb.readUInt32LE(12)).toString())' "$data_dir/$tiled_asset_id/tiles/root.glb" |
-  jq -e '[.nodes[].extensions.EXT_instance_features // empty] | length > 0' >/dev/null || {
-  echo "repeated_boxes.ifc: no instanced node in the root tile" >&2
+  jq -e '
+    ([.nodes[]?.extensions.EXT_instance_features // empty] | length == 0)
+    and ((.extensionsUsed // []) | index("EXT_mesh_primitive_edge_visibility") != null)
+    and (
+      . as $root
+      | [
+          $root.meshes[].primitives[].attributes.POSITION
+          | $root.accessors[.]
+          | .max[0] - .min[0]
+        ]
+      | max > 100
+    )
+  ' >/dev/null || {
+  echo "repeated_boxes.ifc: repeated elements were not expanded with cad edges" >&2
   exit 1
 }

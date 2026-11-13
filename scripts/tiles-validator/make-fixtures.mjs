@@ -178,7 +178,6 @@ function texturedGlb() {
   return Buffer.concat([header, jsonChunk, binaryChunk]);
 }
 
-// enough copies of one box that tiletopia writes them through EXT_mesh_gpu_instancing and EXT_instance_features
 const REPEATED_BOX_COUNT = 40;
 
 function repeatedBoxesIfc() {
