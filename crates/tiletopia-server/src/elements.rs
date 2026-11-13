@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::dxf_export::mesh_source;
+use crate::edits::{lock_asset_for_edit, replace_file};
 use crate::element_query::{parse_aggregation_keys, parse_filter, parse_group_by, parse_search};
 use crate::element_store::{
     self, EditableProperty, ElementPropertyView, LoadedProperty, MAX_GROUPS, MAX_TREE_CHILDREN,
@@ -523,6 +524,7 @@ async fn update_property(
         return Err(invalid_parameter("a property value cannot be null"));
     }
     let (asset, _) = permitted_asset(&state, &headers, &id, may_modify_asset).await?;
+    let (_writes, asset) = lock_asset_for_edit(&state, asset.id, &id).await?;
     let slot = OPEN_STORE_SLOTS
         .acquire()
         .await
@@ -559,6 +561,7 @@ async fn update_property(
         LoadedProperty::Found(found) => found,
     };
     let literal = stored_literal(&found, &update.key, &update.value)?;
+    let (text, number, boolean) = columns_for(&literal);
     let express_id = u32::try_from(found.express_id).map_err(|_| ifc_element_gone(&element_id))?;
     let source = mesh_source(&state, &asset, &id).await?;
     if source.extension != "ifc" {
@@ -573,13 +576,19 @@ async fn update_property(
     }
 
     let path = PathBuf::from(source.job.input_path);
+    let source_path = path.clone();
     let key = update.key.clone();
-    let rewritten =
-        tokio::task::spawn_blocking(move || rewrite_on_disk(path, express_id, key, literal))
-            .await
-            .map_err(|error| server_failure("the property could not be written", error))?;
-    let (path, previous) = match rewritten {
-        Ok(written) => written,
+    let _build_slot = state.elevation_store.build_slot().await;
+    let rewritten = tokio::task::spawn_blocking(move || {
+        let previous = std::fs::read(&source_path).map_err(WriteFailure::Io)?;
+        let next = rewrite_property(&previous, express_id, &key, &literal)
+            .map_err(WriteFailure::Refused)?;
+        Ok::<_, WriteFailure>((previous, next))
+    })
+    .await
+    .map_err(|error| server_failure("the property could not be written", error))?;
+    let (previous, next) = match rewritten {
+        Ok(rewritten) => rewritten,
         Err(WriteFailure::Io(error)) => {
             return Err(server_failure("the property could not be written", error));
         }
@@ -587,8 +596,11 @@ async fn update_property(
             return Err(refused_property(&update.key, &element_id, error));
         }
     };
+    replace_file(&path, &next)
+        .await
+        .map_err(|error| server_failure("the property could not be written", error))?;
+    drop(next);
 
-    let (text, number, boolean) = columns_for(&update.value);
     match store_edited_property(
         &asset_dir,
         found.element_row,
@@ -601,8 +613,7 @@ async fn update_property(
     {
         Ok(view) => Ok(Json(view)),
         Err(error) => {
-            let restored = tokio::task::spawn_blocking(move || restore_ifc(&path, &previous)).await;
-            if let Err(error) = restored.unwrap_or_else(|error| Err(std::io::Error::other(error))) {
+            if let Err(error) = replace_file(&path, &previous).await {
                 tracing::error!(
                     "the IFC could not be restored after the element store refused the edit: {error}"
                 );
@@ -652,59 +663,17 @@ fn stored_literal(
     }
 }
 
-fn columns_for(value: &serde_json::Value) -> (Option<String>, Option<f64>, Option<bool>) {
-    match value {
-        serde_json::Value::String(text) => (Some(text.clone()), None, None),
-        serde_json::Value::Number(number) => (None, number.as_f64(), None),
-        serde_json::Value::Bool(boolean) => (None, None, Some(*boolean)),
-        _ => (None, None, None),
+fn columns_for(literal: &PropertyLiteral) -> (Option<String>, Option<f64>, Option<bool>) {
+    match literal {
+        PropertyLiteral::Text(text) => (Some(text.clone()), None, None),
+        PropertyLiteral::Number(number) => (None, Some(*number), None),
+        PropertyLiteral::Boolean(boolean) => (None, None, Some(*boolean)),
     }
 }
 
 enum WriteFailure {
     Io(std::io::Error),
     Refused(PropertyWriteError),
-}
-
-fn rewrite_on_disk(
-    path: PathBuf,
-    express_id: u32,
-    key: String,
-    value: PropertyLiteral,
-) -> Result<(PathBuf, Vec<u8>), WriteFailure> {
-    let previous = std::fs::read(&path).map_err(WriteFailure::Io)?;
-    let rewritten =
-        rewrite_property(&previous, express_id, &key, &value).map_err(WriteFailure::Refused)?;
-    let writing = writing_path(&path).map_err(WriteFailure::Io)?;
-    std::fs::write(&writing, &rewritten).map_err(WriteFailure::Io)?;
-    if let Err(error) = std::fs::rename(&writing, &path) {
-        let _ = std::fs::remove_file(&writing);
-        return Err(WriteFailure::Io(error));
-    }
-    Ok((path, previous))
-}
-
-fn restore_ifc(path: &std::path::Path, previous: &[u8]) -> std::io::Result<()> {
-    let writing = writing_path(path)?;
-    std::fs::write(&writing, previous)?;
-    if let Err(error) = std::fs::rename(&writing, path) {
-        let _ = std::fs::remove_file(&writing);
-        return Err(error);
-    }
-    Ok(())
-}
-
-fn writing_path(path: &std::path::Path) -> std::io::Result<PathBuf> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "the IFC path has no file name",
-            )
-        })?;
-    Ok(path.with_file_name(format!(".{file_name}.writing")))
 }
 
 fn ifc_element_gone(element_id: &str) -> IonError {
@@ -754,6 +723,10 @@ fn refused_property(key: &str, element_id: &str, error: PropertyWriteError) -> I
         PropertyWriteError::TextTooLong => invalid_parameter(format!(
             "a property value is at most {MAX_TEXT_BYTES} bytes"
         )),
+        PropertyWriteError::UnreadableEntity => server_failure(
+            "the property could not be written",
+            format!("an entity around property {key} on element {element_id} does not parse"),
+        ),
     }
 }
 

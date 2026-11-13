@@ -52,10 +52,14 @@ async fn get_alignments(
         )));
     }
     let job = source.job;
-    let alignments = tokio::task::spawn_blocking(move || alignments_in_frame(&job))
-        .await
-        .map_err(|error| server_failure("the alignments could not be read", error))?
-        .map_err(|reason| server_failure("the alignments could not be read", reason))?;
+    let build_slot = state.elevation_store.build_slot().await;
+    let alignments = tokio::task::spawn_blocking(move || {
+        let _build_slot = build_slot;
+        alignments_in_frame(&job)
+    })
+    .await
+    .map_err(|error| server_failure("the alignments could not be read", error))?
+    .map_err(|reason| server_failure("the alignments could not be read", reason))?;
     Ok(Json(alignments))
 }
 

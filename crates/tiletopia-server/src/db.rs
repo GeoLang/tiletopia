@@ -231,24 +231,27 @@ impl Database {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS ion_id_counter (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                last_ion_id INTEGER NOT NULL,
-                reserved_ion_id INTEGER
+                last_ion_id INTEGER NOT NULL
             )",
         )
         .execute(&self.pool)
         .await?;
 
-        let has_reserved_ion_id = sqlx::query(
+        let has_reserved_ion_id_column = sqlx::query(
             "SELECT 1 FROM pragma_table_info('ion_id_counter') WHERE name = 'reserved_ion_id'",
         )
         .fetch_optional(&self.pool)
         .await?
         .is_some();
-        if !has_reserved_ion_id {
-            sqlx::query("ALTER TABLE ion_id_counter ADD COLUMN reserved_ion_id INTEGER")
+        if has_reserved_ion_id_column {
+            sqlx::query("ALTER TABLE ion_id_counter DROP COLUMN reserved_ion_id")
                 .execute(&self.pool)
                 .await?;
         }
+
+        sqlx::query("CREATE TABLE IF NOT EXISTS reserved_ion_ids (ion_id INTEGER PRIMARY KEY)")
+            .execute(&self.pool)
+            .await?;
 
         // the counter only ever climbs, so deleting an asset does not put its
         // number back in circulation for a client holding a stale link
@@ -664,11 +667,17 @@ impl Database {
 
         // one statement, so two creates at once take different numbers, and the
         // unique index on ion_id refuses a repeat rather than leaving two assets
-        // a client cannot tell apart. sqlite's IS answers 1 or 0, and 0 for a NULL
-        // reservation
+        // a client cannot tell apart. past a reserved run of ids, the first free id
+        // is one above a reserved id
         let ion_id: i64 = sqlx::query_scalar(
             "UPDATE ion_id_counter
-             SET last_ion_id = last_ion_id + 1 + (last_ion_id + 1 IS reserved_ion_id)
+             SET last_ion_id = CASE
+                 WHEN last_ion_id + 1 NOT IN (SELECT ion_id FROM reserved_ion_ids)
+                     THEN last_ion_id + 1
+                 ELSE (SELECT MIN(reserved.ion_id + 1) FROM reserved_ion_ids AS reserved
+                       WHERE reserved.ion_id > last_ion_id
+                         AND reserved.ion_id + 1 NOT IN (SELECT ion_id FROM reserved_ion_ids))
+             END
              WHERE id = 1 RETURNING last_ion_id",
         )
         .fetch_one(&self.pool)
@@ -695,12 +704,18 @@ impl Database {
         Ok(ion_id)
     }
 
-    pub async fn set_reserved_ion_id(&self, ion_id: Option<i64>) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE ion_id_counter SET reserved_ion_id = ? WHERE id = 1")
-            .bind(ion_id)
-            .execute(&self.pool)
+    pub async fn set_reserved_ion_ids(&self, ion_ids: &[i64]) -> Result<(), sqlx::Error> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM reserved_ion_ids")
+            .execute(&mut *transaction)
             .await?;
-        Ok(())
+        for ion_id in ion_ids {
+            sqlx::query("INSERT INTO reserved_ion_ids (ion_id) VALUES (?)")
+                .bind(ion_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await
     }
 
     pub async fn get_asset(&self, id: Uuid) -> Result<Option<Asset>, sqlx::Error> {

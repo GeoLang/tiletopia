@@ -13,6 +13,7 @@ use serde::Deserialize;
 use tiletopia_ingest::MeshData;
 
 use crate::db::JobRecord;
+use crate::drawing::paper;
 use crate::elements::{element_error, invalid_parameter, permitted_asset, server_failure};
 use crate::elevation::JOB_BUDGET_BYTES;
 use crate::ion_compat::IonError;
@@ -135,18 +136,21 @@ pub(crate) fn read_meshes_in_tileset_frame(
         if extension == "ifc" {
             let source = tiletopia_ingest::ifc_reader::mapped_ifc(path)
                 .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-            move_into_tileset_frame(&job.placement, Some(&*source), &mut meshes)?;
+            move_into_tileset_frame(&job.placement, &source, &mut meshes)?;
         }
         Ok(meshes)
     })
     .map_err(|error| format!("could not start the geometry threads: {error}"))?
 }
 
-fn z_up(position: [f64; 3], source_is_z_up: bool) -> [f64; 3] {
+pub(crate) fn z_up<T: Copy + std::ops::Neg<Output = T>>(
+    vector: [T; 3],
+    source_is_z_up: bool,
+) -> [T; 3] {
     if source_is_z_up {
-        return position;
+        return vector;
     }
-    [position[0], -position[2], position[1]]
+    [vector[0], -vector[2], vector[1]]
 }
 
 fn at_or_below(corners: [[f64; 3]; 3], height: f64) -> Vec<[f64; 3]> {
@@ -380,27 +384,30 @@ fn write_dxf(
 fn write_polyline(
     output: &mut impl Write,
     handle: u64,
-    plane_axes: [usize; 2],
+    section: &Section,
     ring: &[[f64; 3]],
 ) -> std::io::Result<()> {
     // group 70 value 1 closes an LWPOLYLINE without a repeated first point
     write!(
         output,
-        "0\nLWPOLYLINE\n5\n{handle:X}\n330\n{MODEL_SPACE_RECORD}\n100\nAcDbEntity\n8\n0\n100\nAcDbPolyline\n90\n{}\n70\n1\n",
-        ring.len()
+        "0\nLWPOLYLINE\n5\n{handle:X}\n330\n{MODEL_SPACE_RECORD}\n100\nAcDbEntity\n8\n0\n100\nAcDbPolyline\n90\n{}\n70\n1\n38\n{}\n",
+        ring.len(),
+        section.position
     )?;
     for point in ring {
-        write!(
-            output,
-            "10\n{}\n20\n{}\n",
-            point[plane_axes[0]], point[plane_axes[1]]
-        )?;
+        let [x, y] = paper(section.axis, *point);
+        write!(output, "10\n{x}\n20\n{y}\n")?;
     }
-    Ok(())
+    let mut extrusion = [0.0; 3];
+    extrusion[section.axis.index()] = 1.0;
+    write!(
+        output,
+        "210\n{}\n220\n{}\n230\n{}\n",
+        extrusion[0], extrusion[1], extrusion[2]
+    )
 }
 
 fn write_section_dxf(path: &Path, section: &Section) -> std::io::Result<WrittenDxf> {
-    let plane_axes = section.axis.plane_axes();
     let ring_count: u64 = section
         .polygons
         .iter()
@@ -414,9 +421,11 @@ fn write_section_dxf(path: &Path, section: &Section) -> std::io::Result<WrittenD
     };
     for polygon in &section.polygons {
         for ring in &polygon.rings {
-            let finite = ring
-                .iter()
-                .all(|point| plane_axes.iter().all(|&axis| point[axis].is_finite()));
+            let finite = ring.iter().all(|point| {
+                paper(section.axis, *point)
+                    .iter()
+                    .all(|coordinate| coordinate.is_finite())
+            });
             if !finite {
                 drawing.skipped_not_finite += 1;
                 continue;
@@ -424,7 +433,7 @@ fn write_section_dxf(path: &Path, section: &Section) -> std::io::Result<WrittenD
             write_polyline(
                 &mut output,
                 FIRST_FACE_HANDLE + drawing.written,
-                plane_axes,
+                section,
                 ring,
             )?;
             drawing.written += 1;
@@ -759,7 +768,14 @@ mod tests {
         }
     }
 
-    fn polyline_vertices(path: &Path) -> Vec<Vec<[f64; 2]>> {
+    #[derive(Debug, PartialEq)]
+    struct WrittenPolyline {
+        points: Vec<[f64; 2]>,
+        elevation: f64,
+        extrusion: [f64; 3],
+    }
+
+    fn written_polylines(path: &Path) -> Vec<WrittenPolyline> {
         let text = std::fs::read_to_string(path).unwrap();
         assert!(!text.contains("\n3DFACE\n"), "{text}");
         let lines: Vec<&str> = text.lines().collect();
@@ -807,32 +823,41 @@ mod tests {
             }
             assert_eq!(points.len(), count);
             assert_ne!(points.first(), points.last());
-            polylines.push(points);
+            let value = |wanted: &str| -> f64 {
+                body.iter()
+                    .find(|(code, _)| *code == wanted)
+                    .unwrap_or_else(|| panic!("the LWPOLYLINE has no group {wanted}"))
+                    .1
+                    .parse()
+                    .unwrap()
+            };
+            polylines.push(WrittenPolyline {
+                points,
+                elevation: value("38"),
+                extrusion: [value("210"), value("220"), value("230")],
+            });
             index += 1 + body.len();
         }
         polylines
     }
 
     #[test]
-    fn a_section_is_closed_polylines_in_the_planes_two_axes() {
+    fn a_section_is_upright_closed_polylines_at_the_cuts_elevation() {
         let mesh = box_mesh([0.0, 0.0, 0.0], [4.0, 0.3, 2.5]);
         let directory = tempfile::tempdir().unwrap();
         let cuts = [
-            (Axis::Z, 1.25, [[0.0, 0.0], [4.0, 0.3]]),
-            (Axis::X, 2.0, [[0.0, 0.0], [0.3, 2.5]]),
-            (Axis::Y, 0.15, [[0.0, 0.0], [2.5, 4.0]]),
+            (Axis::Z, 1.25, [[0.0, 0.0], [4.0, 0.3]], [0.0, 0.0, 1.0]),
+            (Axis::X, 2.0, [[0.0, 0.0], [0.3, 2.5]], [1.0, 0.0, 0.0]),
+            (Axis::Y, 0.15, [[-4.0, 0.0], [0.0, 2.5]], [0.0, 1.0, 0.0]),
         ];
-        for (axis, position, [minimum, maximum]) in cuts {
+        for (axis, position, [minimum, maximum], extrusion) in cuts {
             let section = section_of(std::slice::from_ref(&mesh), axis, position);
             assert_eq!(section.open_chains_dropped, 0);
             assert_eq!(section.polygons.len(), 1);
             let rings = &section.polygons[0].rings;
             assert_eq!(rings.len(), 1);
-            let plane_axes = axis.plane_axes();
-            let expected: Vec<[f64; 2]> = rings[0]
-                .iter()
-                .map(|point| [point[plane_axes[0]], point[plane_axes[1]]])
-                .collect();
+            let expected: Vec<[f64; 2]> =
+                rings[0].iter().map(|point| paper(axis, *point)).collect();
             let corners = [
                 [minimum[0], minimum[1]],
                 [minimum[0], maximum[1]],
@@ -849,7 +874,14 @@ mod tests {
             let drawing = write_section_dxf(&path, &section).unwrap();
             assert_eq!(drawing.written, 1);
             assert_eq!(drawing.skipped_not_finite, 0);
-            assert_eq!(polyline_vertices(&path), vec![expected]);
+            assert_eq!(
+                written_polylines(&path),
+                vec![WrittenPolyline {
+                    points: expected,
+                    elevation: position,
+                    extrusion,
+                }]
+            );
         }
     }
 }

@@ -16,9 +16,10 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::db::Database;
 use crate::{
-    AppState, AssetType, czml, global_terrain, imagery, ion_upload, may_view_asset, terrain_bundle,
-    users,
+    AppState, AssetType, czml, global_terrain, imagery, ion_upload, may_view_asset, osm_buildings,
+    terrain_bundle, users,
 };
 
 // ─── Ion-format response types ───────────────────────────────────────────────
@@ -261,6 +262,9 @@ async fn get_endpoint(
     if state.global_terrain.is_named_by_ion_id(&id) {
         return global_terrain_endpoint(&state);
     }
+    if state.osm_buildings.is_named_by_ion_id(&id) {
+        return osm_buildings_endpoint(&state);
+    }
     let claims = users::claims_from_headers(&headers).map_err(|status| {
         ion_error(
             status,
@@ -338,6 +342,47 @@ async fn get_endpoint(
     }))
 }
 
+pub(crate) fn ion_asset_id_setting(variable: &str) -> Result<Option<i64>, String> {
+    crate::tile_cache::setting_text(variable)
+        .map(|raw| {
+            raw.parse::<i64>()
+                .map_err(|_| format!("{variable} is {raw:?}, expected a whole number"))
+        })
+        .transpose()
+}
+
+pub async fn reserve_ion_ids(
+    db: &Database,
+    reservations: &[(&str, Option<i64>)],
+) -> Result<(), String> {
+    let mut reserved: Vec<(&str, i64)> = Vec::new();
+    for &(variable, ion_id) in reservations {
+        let Some(ion_id) = ion_id else {
+            continue;
+        };
+        if let Some((other, _)) = reserved.iter().find(|(_, taken)| *taken == ion_id) {
+            return Err(format!(
+                "{variable} and {other} are both {ion_id}: give each layer its own ion id"
+            ));
+        }
+        let holder = db
+            .get_asset_by_ion_id(ion_id)
+            .await
+            .map_err(|error| format!("reading the asset with ion id {ion_id} failed: {error}"))?;
+        if let Some((asset, _)) = holder {
+            return Err(format!(
+                "{variable} is {ion_id}, and asset {} ({:?}) already holds that ion id: set the variable to an id no asset holds, or unset it and delete that asset first",
+                asset.id, asset.name
+            ));
+        }
+        reserved.push((variable, ion_id));
+    }
+    let ion_ids: Vec<i64> = reserved.iter().map(|&(_, ion_id)| ion_id).collect();
+    db.set_reserved_ion_ids(&ion_ids)
+        .await
+        .map_err(|error| format!("storing the reserved ion ids failed: {error}"))
+}
+
 fn global_terrain_endpoint(state: &AppState) -> Result<Json<IonEndpoint>, IonError> {
     if let Some(missing) = state.global_terrain.missing_configuration() {
         return Err(ion_error(StatusCode::SERVICE_UNAVAILABLE, missing));
@@ -349,6 +394,23 @@ fn global_terrain_endpoint(state: &AppState) -> Result<Json<IonEndpoint>, IonErr
         // cesium shows an ion attribution on screen only when collapsible is false
         attributions: vec![json!({
             "html": global_terrain::COPERNICUS_NOTICE,
+            "collapsible": false,
+        })],
+        external_type: None,
+        options: None,
+    }))
+}
+
+fn osm_buildings_endpoint(state: &AppState) -> Result<Json<IonEndpoint>, IonError> {
+    if let Some(missing) = state.osm_buildings.missing_configuration() {
+        return Err(ion_error(StatusCode::SERVICE_UNAVAILABLE, missing));
+    }
+    Ok(Json(IonEndpoint {
+        endpoint_type: map_asset_type(&AssetType::Model),
+        url: format!("{}{}", state.ion_base_url, osm_buildings::TILESET_PATH),
+        access_token: String::new(),
+        attributions: vec![json!({
+            "html": osm_buildings::COPYRIGHT,
             "collapsible": false,
         })],
         external_type: None,

@@ -81,7 +81,7 @@ pub fn store_path(asset_dir: &Path) -> PathBuf {
     asset_dir.join(STORE_FILE_NAME)
 }
 
-fn remove_file_if_present(path: &Path) -> Result<(), String> {
+pub(crate) fn remove_file_if_present(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -141,35 +141,50 @@ fn indexed_property_values(properties: &[ElementProperty]) -> String {
 // mesh coordinates are metres, and two exports of one model differ below a millimetre
 const MESH_HASH_UNITS_PER_METRE: f64 = 1000.0;
 
-fn element_mesh_hashes(meshes: &[MeshData]) -> HashMap<String, String> {
-    let mut digests_by_element: HashMap<&str, Vec<Vec<u8>>> = HashMap::new();
-    for mesh in meshes {
-        let Some(element_id) = mesh.asset_id.as_deref() else {
-            continue;
-        };
-        let mut digest = Sha256::new();
-        for index in &mesh.indices {
-            for coordinate in mesh.positions[*index as usize] {
-                let rounded = (coordinate * MESH_HASH_UNITS_PER_METRE).round() as i64;
-                digest.update(rounded.to_le_bytes());
+#[derive(Default)]
+pub(crate) struct MeshHashes {
+    digests: HashMap<String, Vec<Vec<u8>>>,
+}
+
+impl MeshHashes {
+    pub(crate) fn add(&mut self, meshes: &[tiletopia_ingest::MeshData]) -> Result<(), String> {
+        for mesh in meshes {
+            let Some(element_id) = mesh.asset_id.as_deref() else {
+                continue;
+            };
+            let mut digest = Sha256::new();
+            for index in &mesh.indices {
+                let Some(position) = mesh.positions.get(*index as usize) else {
+                    return Err(format!(
+                        "element {element_id} indexes a vertex it does not have"
+                    ));
+                };
+                for coordinate in position {
+                    let rounded = (coordinate * MESH_HASH_UNITS_PER_METRE).round() as i64;
+                    digest.update(rounded.to_le_bytes());
+                }
             }
+            self.digests
+                .entry(element_id.to_string())
+                .or_default()
+                .push(digest.finalize().to_vec());
         }
-        digests_by_element
-            .entry(element_id)
-            .or_default()
-            .push(digest.finalize().to_vec());
+        Ok(())
     }
-    digests_by_element
-        .into_iter()
-        .map(|(element_id, mut digests)| {
-            digests.sort_unstable();
-            let mut combined = Sha256::new();
-            for digest in &digests {
-                combined.update(digest);
-            }
-            (element_id.to_string(), to_hex(&combined.finalize()))
-        })
-        .collect()
+
+    pub(crate) fn finish(self) -> HashMap<String, String> {
+        self.digests
+            .into_iter()
+            .map(|(element_id, mut digests)| {
+                digests.sort_unstable();
+                let mut combined = Sha256::new();
+                for digest in &digests {
+                    combined.update(digest);
+                }
+                (element_id, to_hex(&combined.finalize()))
+            })
+            .collect()
+    }
 }
 
 struct StoreWriter {
@@ -350,6 +365,7 @@ pub fn build_store_and_label_meshes(
     origin: ModelOrigin,
     east_north_up_placement: Option<&MapConversionPlacement>,
     mut meshes: Vec<MeshData>,
+    mesh_hashes: HashMap<String, String>,
     scan: Option<&IfcScan>,
 ) -> Result<Vec<MeshData>, String> {
     let locations = element_locations(
@@ -358,7 +374,6 @@ pub fn build_store_and_label_meshes(
             .filter_map(|mesh| Some((mesh.asset_id.as_deref()?, mesh.positions.as_slice()))),
         origin,
     );
-    let mesh_hashes = element_mesh_hashes(&meshes);
 
     std::fs::create_dir_all(asset_dir)
         .map_err(|error| format!("could not create {}: {error}", asset_dir.display()))?;
@@ -862,7 +877,7 @@ async fn rewrite_store_copy<T>(
     edit: impl AsyncFnOnce(&mut SqliteConnection) -> Result<T, PropertyStoreError>,
 ) -> Result<T, PropertyStoreError> {
     let source = store_path(asset_dir);
-    let editing = asset_dir.join("elements.sqlite.editing");
+    let editing = crate::edits::writing_path(&source).map_err(PropertyStoreError::Io)?;
     tokio::fs::copy(&source, &editing)
         .await
         .map_err(PropertyStoreError::Io)?;
@@ -975,6 +990,26 @@ pub async fn insert_stored_proxy(
     .await
 }
 
+pub async fn store_parent(
+    asset_dir: &Path,
+    global_id: &str,
+    parent_express_id: Option<i64>,
+) -> Result<(), PropertyStoreError> {
+    rewrite_store_copy(asset_dir, async move |connection| {
+        let updated = sqlx::query("UPDATE elements SET parent_express_id = ? WHERE global_id = ?")
+            .bind(parent_express_id)
+            .bind(global_id)
+            .execute(&mut *connection)
+            .await
+            .map_err(PropertyStoreError::Database)?;
+        if updated.rows_affected() == 0 {
+            return Err(PropertyStoreError::Missing);
+        }
+        Ok(())
+    })
+    .await
+}
+
 pub async fn store_edited_property(
     asset_dir: &Path,
     element_row: i64,
@@ -983,41 +1018,23 @@ pub async fn store_edited_property(
     number: Option<f64>,
     boolean: Option<bool>,
 ) -> Result<ElementPropertyView, PropertyStoreError> {
-    let source = store_path(asset_dir);
-    let editing = asset_dir.join("elements.sqlite.editing");
-    tokio::fs::copy(&source, &editing)
-        .await
-        .map_err(PropertyStoreError::Io)?;
-    let stored = update_edited_copy(&editing, element_row, key, text, number, boolean).await;
-    if stored.is_err() {
-        let _ = tokio::fs::remove_file(&editing).await;
-        return stored;
-    }
-    if let Err(error) = tokio::fs::rename(&editing, &source).await {
-        let _ = tokio::fs::remove_file(&editing).await;
-        return Err(PropertyStoreError::Io(error));
-    }
-    stored
+    rewrite_store_copy(asset_dir, async move |connection| {
+        update_edited_copy(connection, element_row, key, text, number, boolean).await
+    })
+    .await
 }
 
 async fn update_edited_copy(
-    path: &Path,
+    connection: &mut SqliteConnection,
     element_row: i64,
     key: &str,
     text: Option<String>,
     number: Option<f64>,
     boolean: Option<bool>,
 ) -> Result<ElementPropertyView, PropertyStoreError> {
-    let mut connection = SqliteConnectOptions::new()
-        .filename(path)
-        .journal_mode(SqliteJournalMode::Off)
-        .synchronous(SqliteSynchronous::Off)
-        .connect()
-        .await
-        .map_err(PropertyStoreError::Database)?;
     let listed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM element_search WHERE rowid = ?")
         .bind(element_row)
-        .fetch_one(&mut connection)
+        .fetch_one(&mut *connection)
         .await
         .map_err(PropertyStoreError::Database)?;
     if listed == 0 {
@@ -1032,7 +1049,7 @@ async fn update_edited_copy(
     .bind(boolean)
     .bind(element_row)
     .bind(key)
-    .execute(&mut connection)
+    .execute(&mut *connection)
     .await
     .map_err(PropertyStoreError::Database)?;
     if updated.rows_affected() == 0 {
@@ -1042,7 +1059,7 @@ async fn update_edited_copy(
         "SELECT value_text, value_number FROM properties WHERE element_row = ? ORDER BY rowid",
     )
     .bind(element_row)
-    .fetch_all(&mut connection)
+    .fetch_all(&mut *connection)
     .await
     .map_err(PropertyStoreError::Database)?;
     let mut indexed = Vec::new();
@@ -1062,7 +1079,7 @@ async fn update_edited_copy(
     sqlx::query("UPDATE element_search SET property_values = ? WHERE rowid = ?")
         .bind(indexed.join(" "))
         .bind(element_row)
-        .execute(&mut connection)
+        .execute(&mut *connection)
         .await
         .map_err(PropertyStoreError::Database)?;
     let property = sqlx::query(
@@ -1071,7 +1088,7 @@ async fn update_edited_copy(
     )
     .bind(element_row)
     .bind(key)
-    .fetch_one(&mut connection)
+    .fetch_one(&mut *connection)
     .await
     .map_err(PropertyStoreError::Database)?;
     property_view(&property).map_err(PropertyStoreError::Database)

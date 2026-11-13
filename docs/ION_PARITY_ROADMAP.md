@@ -122,7 +122,7 @@ Each item below says whether it is done or still open.
 ### 4.2 Curated open data catalog
 - **Current**: `catalog.rs` lists open datasets (Copernicus, SRTM, OSM and others) at `GET /api/v1/catalog`. `POST /api/v1/catalog/{id}/add` creates an asset and queues a job whose input is the dataset URL, and the job queue only reads local files, so that job fails. `POST /api/v1/assets/{id}/tile` on that asset answers 404
 - **Need**: One-click add of curated datasets to your workspace that fetches the data
-- **Work**: Wire catalog to DEM downloader, OSM Buildings extrusion. Global terrain needs no download, see 2.2. OSM Buildings is an offline per-region build, not built yet
+- **Work**: Wire catalog to DEM downloader. Global terrain needs no download, see 2.2, and neither do global buildings, which `/api/v1/buildings/osm/` extrudes from an Overpass server per tile
 
 ### 4.3 Real-time collaboration
 - **Current**: `/api/v1/realtime/{room}` relays six message types, presence and cursors among them. Nothing is persisted

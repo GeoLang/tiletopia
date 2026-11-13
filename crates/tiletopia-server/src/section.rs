@@ -97,7 +97,7 @@ pub(crate) struct ElementPolygon {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Section {
     pub(crate) axis: Axis,
-    position: f64,
+    pub(crate) position: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) normal: Option<[f64; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -639,6 +639,11 @@ fn parsed_plane(parameters: &SectionParameters) -> Result<Option<([f64; 3], f64)
     if given.iter().all(Option::is_none) {
         return Ok(None);
     }
+    if parameters.axis.is_some() || parameters.position.is_some() {
+        return Err(invalid_parameter(
+            "a plane given by nx, ny, nz and offset takes no axis or position",
+        ));
+    }
     if given.iter().any(Option::is_none) {
         return Err(invalid_parameter(
             "a plane takes nx, ny, nz and offset together",
@@ -926,8 +931,8 @@ mod tests {
     #[test]
     fn a_tilted_plane_cuts_the_same_box_an_axis_plane_does_and_a_diagonal() {
         let mesh = box_mesh([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
-        let along_x = section_on_plane(&[mesh.clone()], [2.0, 0.0, 0.0], 2.0);
-        let axis = section_of(&[mesh.clone()], Axis::X, 1.0);
+        let along_x = section_on_plane(std::slice::from_ref(&mesh), [2.0, 0.0, 0.0], 2.0);
+        let axis = section_of(std::slice::from_ref(&mesh), Axis::X, 1.0);
         assert_eq!(single_ring_corners(&along_x), single_ring_corners(&axis));
         assert_eq!(along_x.normal, Some([1.0, 0.0, 0.0]));
         assert_eq!(along_x.offset, Some(1.0));
@@ -1093,5 +1098,27 @@ mod tests {
         assert_eq!(section.polygons.len(), 1);
         assert_eq!(section.polygons[0].rings.len(), 2);
         assert!((net_area(&section) - 12.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_plane_with_an_axis_or_a_position_is_refused() {
+        let plane = |axis: Option<&str>, position: Option<&str>| SectionParameters {
+            axis: axis.map(str::to_string),
+            position: position.map(str::to_string),
+            nx: Some("0".to_string()),
+            ny: Some("0".to_string()),
+            nz: Some("1".to_string()),
+            offset: Some("1".to_string()),
+        };
+        assert!(parsed_plane(&plane(None, None)).unwrap().is_some());
+        for parameters in [
+            plane(Some("z"), None),
+            plane(None, Some("1")),
+            plane(Some("x"), Some("2")),
+        ] {
+            let refusal = parsed_plane(&parameters).unwrap_err();
+            assert_eq!(refusal.0, StatusCode::BAD_REQUEST);
+            assert_eq!(refusal.1.0["code"], "INVALID_PARAMETER");
+        }
     }
 }

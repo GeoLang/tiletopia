@@ -330,10 +330,26 @@ async fn main() -> anyhow::Result<()> {
                 tiletopia_server::global_terrain::GlobalTerrainSettings::from_env()
                     .map_err(anyhow::Error::msg)?,
             );
-            global_terrain
-                .reserve_ion_asset_id(&db)
-                .await
-                .map_err(anyhow::Error::msg)?;
+            let osm_buildings = tiletopia_server::osm_buildings::OsmBuildings::new(
+                tiletopia_server::osm_buildings::OsmBuildingsSettings::from_env()
+                    .map_err(anyhow::Error::msg)?,
+                &global_terrain,
+            );
+            tiletopia_server::ion_compat::reserve_ion_ids(
+                &db,
+                &[
+                    (
+                        tiletopia_server::global_terrain::ION_ASSET_ID_VAR,
+                        global_terrain.ion_asset_id(),
+                    ),
+                    (
+                        tiletopia_server::osm_buildings::ION_ASSET_ID_VAR,
+                        osm_buildings.ion_asset_id(),
+                    ),
+                ],
+            )
+            .await
+            .map_err(anyhow::Error::msg)?;
 
             let state = Arc::new(tiletopia_server::AppState {
                 db,
@@ -358,6 +374,7 @@ async fn main() -> anyhow::Result<()> {
                 analysis_engines: tiletopia_server::analysis_tiles::AnalysisEngines::new(),
                 imagery_layers: tiletopia_server::imagery::ImageryLayers::new(),
                 global_terrain,
+                osm_buildings,
                 entity_link_store: tiletopia_server::entity_linking::EntityLinkStore::new(),
                 ids_check,
                 #[cfg(feature = "martin")]

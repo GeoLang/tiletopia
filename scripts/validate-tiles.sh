@@ -91,9 +91,13 @@ node -e 'const glb = require("fs").readFileSync(process.argv[1]); console.log(gl
     and (
       . as $root
       | [
-          $root.meshes[].primitives[].attributes.POSITION
+          $root.nodes[]
+          | select(.mesh != null)
+          # meshopt tiles store positions as integers that the node scale turns back into metres
+          | (.scale // [1, 1, 1])[0] as $scale
+          | $root.meshes[.mesh].primitives[].attributes.POSITION
           | $root.accessors[.]
-          | .max[0] - .min[0]
+          | (.max[0] - .min[0]) * $scale
         ]
       | max > 100
     )

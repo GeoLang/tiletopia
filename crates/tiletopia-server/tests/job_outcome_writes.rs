@@ -129,3 +129,37 @@ async fn a_refused_tiling_write_fails_the_job_before_a_tiler_runs() {
     let asset_dir = state.data_dir.join(job.asset_id.to_string());
     assert!(!asset_dir.join("tileset.json").exists());
 }
+
+fn element_edit_previews(state: &Arc<AppState>, asset_id: Uuid) -> std::path::PathBuf {
+    let path = state
+        .data_dir
+        .join(asset_id.to_string())
+        .join("element-edits.json");
+    std::fs::write(&path, br#"{"edits":[]}"#).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn a_finished_tiling_job_drops_the_element_edit_previews() {
+    let state = test_state().await;
+    let job = queued_point_cloud_job(&state).await;
+    let previews = element_edit_previews(&state, job.asset_id);
+
+    let settled = settled_job(&state, job.id).await;
+
+    assert_eq!(settled.status, JobStatus::Done, "{:?}", settled.error);
+    assert!(!previews.exists());
+}
+
+#[tokio::test]
+async fn a_failed_tiling_job_keeps_the_element_edit_previews() {
+    let state = test_state().await;
+    let job = queued_point_cloud_job(&state).await;
+    let previews = element_edit_previews(&state, job.asset_id);
+    refuse_status_writes(&state, "assets", "ready").await;
+
+    let settled = settled_job(&state, job.id).await;
+
+    assert_eq!(settled.status, JobStatus::Failed);
+    assert!(previews.exists());
+}

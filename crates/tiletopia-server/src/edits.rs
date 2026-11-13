@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,13 +16,16 @@ use tiletopia_ingest::ifc_edit::{
     EditError, add_proxy, change_relation, delete_product, mesh_volume, replace_mesh,
     translate_placement, yaw_placement,
 };
+use tiletopia_ingest::ifc_elements::element_parent;
 use tiletopia_ingest::ifc_reader::map_conversion_placement;
+use tokio::sync::{Mutex, OwnedMutexGuard};
+use uuid::Uuid;
 
 use crate::db::JobRecord;
 use crate::dxf_export::{mesh_source, read_meshes_in_tileset_frame};
 use crate::element_store::{
     PropertyStoreError, StoredElementId, delete_stored_element, insert_stored_proxy, open_store,
-    stored_element_id,
+    store_parent, stored_element_id,
 };
 use crate::elements::{
     element_error, invalid_parameter, no_element_store, permitted_asset, server_failure,
@@ -29,7 +33,40 @@ use crate::elements::{
 use crate::{AppState, may_modify_asset, may_view_asset, users};
 
 const MAX_PREVIEW_VERTICES: usize = 200_000;
-const EDITS_FILE: &str = "element-edits.json";
+pub(crate) const EDITS_FILE: &str = "element-edits.json";
+
+static ASSET_WRITE_LOCKS: Mutex<BTreeMap<Uuid, Arc<Mutex<()>>>> = Mutex::const_new(BTreeMap::new());
+
+pub async fn lock_asset_writes(asset_id: Uuid) -> OwnedMutexGuard<()> {
+    let lock = {
+        let mut locks = ASSET_WRITE_LOCKS.lock().await;
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        Arc::clone(locks.entry(asset_id).or_default())
+    };
+    lock.lock_owned().await
+}
+
+pub(crate) async fn lock_asset_for_edit(
+    state: &AppState,
+    asset_id: Uuid,
+    id: &str,
+) -> Result<(OwnedMutexGuard<()>, crate::Asset), crate::ion_compat::IonError> {
+    let writes = lock_asset_writes(asset_id).await;
+    // run_job marks an asset tiling under this lock, so a status read before it can be stale
+    let asset = state
+        .db
+        .get_asset(asset_id)
+        .await
+        .map_err(|error| server_failure("the asset could not be read", error))?
+        .ok_or_else(|| {
+            element_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFound",
+                format!("no asset {id}"),
+            )
+        })?;
+    Ok((writes, asset))
+}
 
 pub fn edit_routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -128,6 +165,7 @@ enum StoreChange {
     None,
     Delete,
     Insert,
+    Parent(Option<i64>),
 }
 
 async fn get_edits(
@@ -137,10 +175,27 @@ async fn get_edits(
 ) -> Result<Json<EditFile>, crate::ion_compat::IonError> {
     let (asset, _) = permitted_asset(&state, &headers, &id, may_view_asset).await?;
     let path = state.data_dir.join(asset.id.to_string()).join(EDITS_FILE);
-    let Ok(bytes) = tokio::fs::read(&path).await else {
-        return Ok(Json(EditFile::default()));
-    };
-    Ok(Json(serde_json::from_slice(&bytes).unwrap_or_default()))
+    let bytes = read_if_present(&path)
+        .await
+        .map_err(|error| server_failure("the edit previews could not be read", error))?;
+    parsed_edit_file(bytes.as_deref())
+        .map(Json)
+        .map_err(|error| server_failure("the edit previews could not be read", error))
+}
+
+async fn read_if_present(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn parsed_edit_file(bytes: Option<&[u8]>) -> serde_json::Result<EditFile> {
+    match bytes {
+        Some(bytes) => serde_json::from_slice(bytes),
+        None => Ok(EditFile::default()),
+    }
 }
 
 async fn get_volume(
@@ -154,14 +209,25 @@ async fn get_volume(
         return Err(not_ifc(&id, &source.extension));
     }
     let job = source.job;
-    let (positions, indices) =
-        tokio::task::spawn_blocking(move || element_triangles(&job, &element_id))
-            .await
-            .map_err(|error| server_failure("the volume could not be read", error))?
-            .map_err(|reason| server_failure("the volume could not be read", reason))?;
-    Ok(Json(VolumeBody {
-        volume: mesh_volume(&points_of(&positions), &indices),
-    }))
+    let build_slot = state.elevation_store.build_slot().await;
+    let asked_for = element_id.clone();
+    let (positions, indices) = tokio::task::spawn_blocking(move || {
+        let _build_slot = build_slot;
+        element_triangles(&job, &asked_for)
+    })
+    .await
+    .map_err(|error| server_failure("the volume could not be read", error))?
+    .map_err(|reason| server_failure("the volume could not be read", reason))?;
+    if positions.is_empty() {
+        return Err(element_error(
+            StatusCode::NOT_FOUND,
+            "ELEMENT_HAS_NO_MESH",
+            format!("asset {id} has no mesh for element {element_id}"),
+        ));
+    }
+    let volume = mesh_volume(&points_of(&positions), &indices)
+        .map_err(|error| server_failure("the volume could not be read", format!("{error:?}")))?;
+    Ok(Json(VolumeBody { volume }))
 }
 
 async fn post_edit(
@@ -171,53 +237,58 @@ async fn post_edit(
     Json(body): Json<EditBody>,
 ) -> Result<Json<EditResponse>, crate::ion_compat::IonError> {
     let (asset, _) = permitted_asset(&state, &headers, &id, may_modify_asset).await?;
+    let (_writes, asset) = lock_asset_for_edit(&state, asset.id, &id).await?;
     let source = mesh_source(&state, &asset, &id).await?;
     if source.extension != "ifc" {
         return Err(not_ifc(&id, &source.extension));
     }
     let asset_dir = state.data_dir.join(asset.id.to_string());
     let identity = load_identity(&asset_dir, &id, &asset.status, body.element_id()).await?;
+    let edits_path = asset_dir.join(EDITS_FILE);
+    let previous_edits = read_if_present(&edits_path)
+        .await
+        .map_err(|error| server_failure("the edit previews could not be read", error))?;
+    let edit_file = parsed_edit_file(previous_edits.as_deref())
+        .map_err(|error| server_failure("the edit previews could not be read", error))?;
     let path = PathBuf::from(&source.job.input_path);
     let job = source.job.clone();
     let source_path = path.clone();
-    let applied = tokio::task::spawn_blocking(move || {
-        apply_edit(
-            &source_path,
+    let _build_slot = state.elevation_store.build_slot().await;
+    let (previous, applied) = tokio::task::spawn_blocking(move || {
+        let previous = std::fs::read(&source_path).map_err(EditFailure::Io)?;
+        let applied = apply_edit(
+            &previous,
             &body,
             identity.as_ref().map(|item| item.express_id),
-        )
+        )?;
+        Ok::<_, EditFailure>((previous, applied))
     })
     .await
     .map_err(|error| server_failure("the edit could not be written", error))?
     .map_err(|error| refused(&id, &error))?;
 
-    let previous = replace_ifc(&path, &applied.bytes)
+    replace_file(&path, &applied.bytes)
+        .await
         .map_err(|error| server_failure("the edit could not be written", error))?;
     let preview = match read_preview(&job, &previous, &applied).await {
         Ok(preview) => preview,
         Err(error) => {
-            let _ = restore_ifc(&path, &previous);
+            restore_file(&path, Some(&previous)).await;
             return Err(server_failure("the edit could not be drawn", error));
         }
     };
     let drawn = preview
         .as_ref()
         .is_some_and(|item| !item.positions.is_empty());
-    let edits_path = asset_dir.join(EDITS_FILE);
-    let previous_edits = tokio::fs::read(&edits_path).await.unwrap_or_default();
-    if let Some(record) = stored_record(&applied, preview.as_ref(), drawn) {
-        if let Err(error) = upsert_edit(&edits_path, record).await {
-            let _ = restore_ifc(&path, &previous);
-            return Err(server_failure("the edit preview could not be saved", error));
-        }
+    if let Some(record) = stored_record(&applied, preview.as_ref(), drawn)
+        && let Err(error) = write_edit_file(&edits_path, with_edit(edit_file, record)).await
+    {
+        restore_file(&path, Some(&previous)).await;
+        return Err(server_failure("the edit preview could not be saved", error));
     }
     if let Err(error) = apply_store(&asset_dir, &applied).await {
-        let _ = restore_ifc(&path, &previous);
-        if previous_edits.is_empty() {
-            let _ = tokio::fs::remove_file(&edits_path).await;
-        } else {
-            let _ = tokio::fs::write(&edits_path, &previous_edits).await;
-        }
+        restore_file(&path, Some(&previous)).await;
+        restore_file(&edits_path, previous_edits.as_deref()).await;
         return Err(error);
     }
     Ok(Json(EditResponse {
@@ -261,7 +332,7 @@ async fn read_preview(
     tokio::task::spawn_blocking(move || {
         let (positions, indices) = element_triangles(&job, &element_id)?;
         if !positions.is_empty() {
-            return Ok(Some(Preview { positions, indices }));
+            return Ok(capped_preview(positions, indices));
         }
         let local = map_conversion_placement(&previous)
             .map_err(|error| error.to_string())?
@@ -311,44 +382,46 @@ async fn apply_store(
                 .await
                 .map_err(stored_edit_failure)
         }
+        StoreChange::Parent(parent) => store_parent(asset_dir, &applied.element_id, parent)
+            .await
+            .map_err(stored_edit_failure),
     }
 }
 
 fn apply_edit(
-    path: &Path,
+    source: &[u8],
     body: &EditBody,
     express_id: Option<i64>,
 ) -> Result<Applied, EditFailure> {
-    let source = std::fs::read(path).map_err(EditFailure::Io)?;
     let express = || -> Result<u32, EditFailure> {
         u32::try_from(express_id.ok_or(EditError::MissingElement)?)
             .map_err(|_| EditFailure::Refused(EditError::MissingElement))
     };
     match body {
         EditBody::Translate { element_id, delta } => {
-            let changed =
-                translate_placement(&source, express()?, *delta).map_err(EditFailure::Refused)?;
-            Ok(geometry(changed.bytes, element_id, "translate"))
+            let bytes =
+                translate_placement(source, express()?, *delta).map_err(EditFailure::Refused)?;
+            Ok(geometry(bytes, element_id, "translate"))
         }
         EditBody::Yaw {
             element_id,
             radians,
         } => {
-            let changed =
-                yaw_placement(&source, express()?, *radians).map_err(EditFailure::Refused)?;
-            Ok(geometry(changed.bytes, element_id, "yaw"))
+            let bytes =
+                yaw_placement(source, express()?, *radians).map_err(EditFailure::Refused)?;
+            Ok(geometry(bytes, element_id, "yaw"))
         }
         EditBody::Replace {
             element_id,
             positions,
             indices,
         } => {
-            let bytes = replace_mesh(&source, express()?, positions, indices)
+            let bytes = replace_mesh(source, express()?, positions, indices)
                 .map_err(EditFailure::Refused)?;
             Ok(geometry(bytes, element_id, "replace"))
         }
         EditBody::Delete { element_id } => {
-            let bytes = delete_product(&source, express()?).map_err(EditFailure::Refused)?;
+            let bytes = delete_product(source, express()?).map_err(EditFailure::Refused)?;
             Ok(Applied {
                 bytes,
                 element_id: element_id.clone(),
@@ -364,7 +437,7 @@ fn apply_edit(
             })
         }
         EditBody::Add { origin, size } => {
-            let added = add_proxy(&source, *origin, *size).map_err(EditFailure::Refused)?;
+            let added = add_proxy(source, *origin, *size).map_err(EditFailure::Refused)?;
             let fallback = box_preview(&added.positions, &added.indices);
             Ok(Applied {
                 bytes: added.bytes,
@@ -382,8 +455,11 @@ fn apply_edit(
             relation_id,
             add,
         } => {
-            let bytes = change_relation(&source, *relation_id, express()?, *add)
+            let element = express()?;
+            let bytes = change_relation(source, *relation_id, element, *add)
                 .map_err(EditFailure::Refused)?;
+            let parent = element_parent(&bytes, element)
+                .map_err(|error| EditFailure::Io(std::io::Error::other(error)))?;
             Ok(Applied {
                 bytes,
                 element_id: element_id.clone(),
@@ -392,7 +468,7 @@ fn apply_edit(
                 hide_original: false,
                 read_back: false,
                 fallback: None,
-                store: StoreChange::None,
+                store: StoreChange::Parent(parent.map(i64::from)),
             })
         }
     }
@@ -427,15 +503,16 @@ fn element_triangles(job: &JobRecord, element_id: &str) -> Result<(Vec<f64>, Vec
     Ok(triangles_of(&meshes, element_id))
 }
 
+fn capped_preview(positions: Vec<f64>, indices: Vec<u32>) -> Option<Preview> {
+    (positions.len() / 3 <= MAX_PREVIEW_VERTICES).then_some(Preview { positions, indices })
+}
+
 fn triangles_of(meshes: &[MeshData], global_id: &str) -> (Vec<f64>, Vec<u32>) {
     let mut positions = Vec::new();
     let mut indices = Vec::new();
     for mesh in meshes {
         if mesh.asset_id.as_deref() != Some(global_id) {
             continue;
-        }
-        if positions.len() / 3 + mesh.positions.len() > MAX_PREVIEW_VERTICES {
-            return (Vec::new(), Vec::new());
         }
         let base = (positions.len() / 3) as u32;
         for point in &mesh.positions {
@@ -447,10 +524,7 @@ fn triangles_of(meshes: &[MeshData], global_id: &str) -> (Vec<f64>, Vec<u32>) {
 }
 
 fn points_of(positions: &[f64]) -> Vec<[f64; 3]> {
-    positions
-        .chunks_exact(3)
-        .map(|point| [point[0], point[1], point[2]])
-        .collect()
+    positions.as_chunks::<3>().0.to_vec()
 }
 
 enum EditFailure {
@@ -494,12 +568,30 @@ fn refused(asset_id: &str, error: &EditFailure) -> crate::ion_compat::IonError {
             "NO_STRUCTURE",
             "the IFC has no building or site to contain the element",
         ),
+        EditFailure::Refused(EditError::StillReferenced) => element_error(
+            StatusCode::CONFLICT,
+            "STILL_REFERENCED",
+            "an entity that is not a relation refers to the element, so deleting it breaks that entity",
+        ),
+        EditFailure::Refused(EditError::UnsupportedSchema) => element_error(
+            StatusCode::CONFLICT,
+            "UNSUPPORTED_SCHEMA",
+            "adding or reshaping an element writes tessellated geometry, which needs an IFC4 or later file",
+        ),
+        EditFailure::Refused(EditError::AlreadyRelated) => element_error(
+            StatusCode::CONFLICT,
+            "ALREADY_RELATED",
+            "the element is already in a relation of that kind, and IFC allows it only one",
+        ),
+        EditFailure::Refused(EditError::UnusableLengthUnit) => element_error(
+            StatusCode::CONFLICT,
+            "UNUSABLE_LENGTH_UNIT",
+            "the IFC's length unit has no usable conversion factor",
+        ),
     }
 }
 
-async fn upsert_edit(path: &Path, edit: StoredEdit) -> std::io::Result<()> {
-    let current = tokio::fs::read(path).await.unwrap_or_default();
-    let mut file: EditFile = serde_json::from_slice(&current).unwrap_or_default();
+fn with_edit(mut file: EditFile, edit: StoredEdit) -> EditFile {
     if let Some(existing) = file
         .edits
         .iter_mut()
@@ -509,48 +601,50 @@ async fn upsert_edit(path: &Path, edit: StoredEdit) -> std::io::Result<()> {
     } else {
         file.edits.push(edit);
     }
+    file
+}
+
+async fn write_edit_file(path: &Path, file: EditFile) -> std::io::Result<()> {
     let bytes = serde_json::to_vec_pretty(&file).map_err(std::io::Error::other)?;
-    let writing = path.with_file_name(".element-edits.json.writing");
-    tokio::fs::write(&writing, &bytes).await?;
-    if let Err(error) = tokio::fs::rename(&writing, path).await {
+    replace_file(path, &bytes).await
+}
+
+async fn restore_file(path: &Path, previous: Option<&[u8]>) {
+    let restored = match previous {
+        Some(bytes) => replace_file(path, bytes).await,
+        None => crate::element_store::remove_file_if_present(path).map_err(std::io::Error::other),
+    };
+    if let Err(error) = restored {
+        tracing::error!(
+            "{} could not be restored after a failed edit: {error}",
+            path.display()
+        );
+    }
+}
+
+pub(crate) async fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let writing = writing_path(path)?;
+    let written = match tokio::fs::write(&writing, bytes).await {
+        Ok(()) => tokio::fs::rename(&writing, path).await,
+        Err(error) => Err(error),
+    };
+    if written.is_err() {
         let _ = tokio::fs::remove_file(&writing).await;
-        return Err(error);
     }
-    Ok(())
+    written
 }
 
-fn replace_ifc(path: &Path, next: &[u8]) -> std::io::Result<Vec<u8>> {
-    let previous = std::fs::read(path)?;
-    let writing = writing_path(path)?;
-    std::fs::write(&writing, next)?;
-    if let Err(error) = std::fs::rename(&writing, path) {
-        let _ = std::fs::remove_file(&writing);
-        return Err(error);
-    }
-    Ok(previous)
-}
-
-fn restore_ifc(path: &Path, previous: &[u8]) -> std::io::Result<()> {
-    let writing = writing_path(path)?;
-    std::fs::write(&writing, previous)?;
-    if let Err(error) = std::fs::rename(&writing, path) {
-        let _ = std::fs::remove_file(&writing);
-        return Err(error);
-    }
-    Ok(())
-}
-
-fn writing_path(path: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn writing_path(path: &Path) -> std::io::Result<PathBuf> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "the IFC path has no file name",
+                "the path has no file name",
             )
         })?;
-    Ok(path.with_file_name(format!(".{file_name}.writing")))
+    Ok(path.with_file_name(format!(".{file_name}.{}.writing", Uuid::new_v4())))
 }
 
 fn missing_element(asset_id: &str, element_id: &str) -> crate::ion_compat::IonError {
@@ -618,7 +712,14 @@ mod tests {
             0, 3, 2, 0, 2, 1, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2, 0, 4, 7, 0, 7,
             3, 1, 2, 6, 1, 6, 5,
         ];
-        assert!((mesh_volume(&positions, &indices) - 1.0).abs() < 1.0e-9);
+        assert!((mesh_volume(&positions, &indices).unwrap() - 1.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn an_edit_the_file_schema_lacks_is_a_conflict() {
+        let (status, body) = refused("asset", &EditFailure::Refused(EditError::UnsupportedSchema));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body.0["code"], "UNSUPPORTED_SCHEMA");
     }
 
     #[test]
@@ -684,17 +785,27 @@ mod tests {
     }
 
     #[test]
-    fn triangles_drop_the_preview_when_a_later_part_passes_the_vertex_cap() {
+    fn an_element_past_the_vertex_cap_keeps_its_triangles_and_draws_no_preview() {
         let mut first = part("wall", 0.0);
         first.positions = vec![[0.0, 0.0, 0.0]; MAX_PREVIEW_VERTICES];
-        let (positions, _) = triangles_of(&[first], "wall");
-        assert_eq!(positions.len(), MAX_PREVIEW_VERTICES * 3);
+        let (positions, indices) = triangles_of(&[first], "wall");
+        assert!(capped_preview(positions, indices).is_some());
 
         let mut over = part("wall", 0.0);
         over.positions = vec![[0.0, 0.0, 0.0]; MAX_PREVIEW_VERTICES + 1];
         let (positions, indices) = triangles_of(&[over, part("wall", 1.0)], "wall");
-        assert!(positions.is_empty());
-        assert!(indices.is_empty());
+        assert_eq!(positions.len(), (MAX_PREVIEW_VERTICES + 4) * 3);
+        assert_eq!(indices.len(), 6);
+        assert!(capped_preview(positions, indices).is_none());
+    }
+
+    #[test]
+    fn two_writes_of_one_file_use_different_temporary_files() {
+        let path = Path::new("/data/asset/model.ifc");
+        let first = writing_path(path).unwrap();
+        let second = writing_path(path).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), path.parent());
     }
 
     #[test]

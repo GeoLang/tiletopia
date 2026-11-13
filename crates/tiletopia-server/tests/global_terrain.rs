@@ -7,7 +7,9 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode, Uri, header};
 use common::decode_tile;
 use terrano_core::{CogParams, Raster, SampleFormat, write_cog};
+use tiletopia_core::spatial::geodetic_to_ecef;
 use tiletopia_server::global_terrain::{GlobalTerrain, GlobalTerrainSettings};
+use tiletopia_server::osm_buildings::{OsmBuildings, OsmBuildingsSettings};
 use tiletopia_server::{AppState, router};
 use tiletopia_terrain::global_dem::TerrainTileCoord;
 use tower::ServiceExt;
@@ -228,6 +230,15 @@ impl Harness {
             .collect()
     }
 
+    fn cached_tile(&self, relative_path: &str) -> std::path::PathBuf {
+        let source_directories: Vec<_> = std::fs::read_dir(self.cache.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(source_directories.len(), 1, "{source_directories:?}");
+        source_directories[0].join(relative_path)
+    }
+
     fn request_count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }
@@ -336,7 +347,7 @@ async fn a_second_request_is_served_from_the_disk_cache() {
     let second = harness.tile(&INSIDE_CELL).await;
     assert_eq!(harness.request_count(), reads_after_first);
     assert_eq!(first, second);
-    assert!(harness.cache.path().join("10/1064/778.terrain").is_file());
+    assert!(harness.cached_tile("10/1064/778.terrain").is_file());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -477,6 +488,109 @@ async fn a_coarse_dem_that_does_not_cover_the_globe_names_the_file() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_coarse_dem_with_no_overviews_too_fine_for_a_tile_names_the_file() {
+    let pixel = 0.125;
+    let fine = float_cog(
+        2880,
+        1441,
+        (-180.0 - pixel / 2.0, 90.0 + pixel / 2.0),
+        pixel,
+        0,
+        |_, _| 10.0,
+    );
+    let harness = Harness::open(dem_cell(), geoid_grid(), Some(fine), 1 << 30, None).await;
+    let (status, body) = harness.get("/api/v1/terrain/global/0/0/0.terrain").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let message = String::from_utf8_lossy(&body);
+    assert!(message.contains("/coarse.tif"), "{message}");
+    assert!(message.contains("overviews"), "{message}");
+
+    let coord = tile_containing(3, 7.5, 46.5);
+    let bytes = harness.tile(&coord).await;
+    assert_heights(&bytes, &coord, |latitude, _| {
+        10.0 + geoid_undulation(latitude)
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn coarse_tiles_on_either_side_of_the_antimeridian_meet_at_one_height() {
+    let harness = Harness::open(
+        dem_cell(),
+        geoid_grid(),
+        Some(coarse_dem(|_, longitude| longitude)),
+        1 << 30,
+        None,
+    )
+    .await;
+    let (columns, _) = TerrainTileCoord::grid_at_zoom(3);
+    for x in [0, columns - 1] {
+        let coord = TerrainTileCoord { zoom: 3, x, y: 4 };
+        let tile = decode_tile(&harness.tile(&coord).await);
+        let tolerance = (tile.max_height - tile.min_height) / QUANTIZED_MAX + POSITION_SLACK_METRES;
+        let seam: Vec<[f64; 3]> = tile
+            .vertices(&coord)
+            .into_iter()
+            .filter(|[longitude, _, _]| longitude.abs() == 180.0)
+            .collect();
+        assert!(
+            !seam.is_empty(),
+            "tile {x} has no vertex on the antimeridian"
+        );
+        for [longitude, latitude, height] in seam {
+            let want = -180.0 + geoid_undulation(latitude);
+            assert!(
+                (height - want).abs() <= tolerance,
+                "tile {x}: height {height} at ({longitude}, {latitude}), expected {want}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_coarse_url_is_not_answered_from_tiles_cached_before_it() {
+    let (base, _) = serve_files(HashMap::from([
+        (cell_path(), dem_cell()),
+        ("/geoid.tif".to_string(), geoid_grid()),
+        ("/coarse.tif".to_string(), coarse_dem(dem_height)),
+    ]))
+    .await;
+    let cache = tempfile::tempdir().unwrap();
+    let coord = tile_containing(3, 7.5, 46.5);
+    let uri = format!(
+        "/api/v1/terrain/global/{}/{}/{}.terrain",
+        coord.zoom, coord.x, coord.y
+    );
+    let mut served = Vec::new();
+    for coarse_url in [None, Some(format!("{base}/coarse.tif"))] {
+        let state =
+            common::test_state_with_global_terrain(GlobalTerrain::new(GlobalTerrainSettings {
+                dem_url: Some(base.clone()),
+                geoid_url: Some(format!("{base}/geoid.tif")),
+                coarse_url,
+                cache_dir: Some(cache.path().to_path_buf()),
+                cache_bytes: 1 << 30,
+                ion_asset_id: None,
+            }))
+            .await;
+        let response = router(state)
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        served.push(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        );
+    }
+
+    assert_heights(&served[0], &coord, |latitude, _| geoid_undulation(latitude));
+    assert_heights(&served[1], &coord, |latitude, longitude| {
+        dem_height(latitude, longitude) + geoid_undulation(latitude)
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_cache_drops_the_oldest_tile_past_its_cap() {
     let first = TerrainTileCoord {
         zoom: 2,
@@ -493,8 +607,8 @@ async fn the_cache_drops_the_oldest_tile_past_its_cap() {
     let harness = Harness::new(tile_bytes + tile_bytes / 2, None).await;
     harness.tile(&first).await;
     harness.tile(&second).await;
-    assert!(!harness.cache.path().join("2/0/0.terrain").exists());
-    assert!(harness.cache.path().join("2/1/0.terrain").is_file());
+    assert!(!harness.cached_tile("2/0/0.terrain").exists());
+    assert!(harness.cached_tile("2/1/0.terrain").is_file());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -591,62 +705,12 @@ async fn the_configured_ion_id_resolves_to_the_global_layer() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
-async fn uploaded_ion_id(state: &Arc<AppState>) -> i64 {
-    let boundary = "tiletopiaglobalterrainboundary";
-    let body = format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"cloud.ply\"\r\n\r\n{}\r\n--{boundary}--\r\n",
-        common::PLY_FIXTURE
-    );
-    let response = router(Arc::clone(state))
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/assets")
-                .header(
-                    "content-type",
-                    format!("multipart/form-data; boundary={boundary}"),
-                )
-                .header(
-                    "authorization",
-                    format!("Bearer {}", common::token("terrain-uploader", "editor")),
-                )
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let uploaded: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    let response = router(Arc::clone(state))
-        .oneshot(
-            Request::builder()
-                .uri(format!("/v1/assets/{}", uploaded["id"].as_str().unwrap()))
-                .header(
-                    "authorization",
-                    format!("Bearer {}", common::token("terrain-uploader", "editor")),
-                )
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let ion_asset: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    ion_asset["id"].as_i64().unwrap()
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn ion_id_one_stays_the_global_layer_after_the_first_upload() {
     let harness = Harness::new(1 << 30, Some(1)).await;
 
-    assert_eq!(uploaded_ion_id(&harness.state).await, 2);
-    assert_eq!(uploaded_ion_id(&harness.state).await, 3);
+    assert_eq!(common::uploaded_ion_id(&harness.state).await, 2);
+    assert_eq!(common::uploaded_ion_id(&harness.state).await, 3);
 
     let (status, body) = harness.get("/v1/assets/1/endpoint").await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
@@ -664,14 +728,14 @@ async fn ion_id_one_stays_the_global_layer_after_the_first_upload() {
 async fn the_id_counter_steps_over_a_reserved_id_it_reaches_later() {
     let harness = Harness::new(1 << 30, Some(2)).await;
 
-    assert_eq!(uploaded_ion_id(&harness.state).await, 1);
-    assert_eq!(uploaded_ion_id(&harness.state).await, 3);
+    assert_eq!(common::uploaded_ion_id(&harness.state).await, 1);
+    assert_eq!(common::uploaded_ion_id(&harness.state).await, 3);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn startup_refuses_an_ion_id_an_asset_already_holds() {
     let state = common::test_state().await;
-    assert_eq!(uploaded_ion_id(&state).await, 1);
+    assert_eq!(common::uploaded_ion_id(&state).await, 1);
     let holder = state.db.get_asset_by_ion_id(1).await.unwrap().unwrap().0;
 
     let global_terrain = GlobalTerrain::new(GlobalTerrainSettings {
@@ -682,10 +746,15 @@ async fn startup_refuses_an_ion_id_an_asset_already_holds() {
         cache_bytes: 1 << 30,
         ion_asset_id: Some(1),
     });
-    let refusal = global_terrain
-        .reserve_ion_asset_id(&state.db)
-        .await
-        .unwrap_err();
+    let refusal = tiletopia_server::ion_compat::reserve_ion_ids(
+        &state.db,
+        &[(
+            tiletopia_server::global_terrain::ION_ASSET_ID_VAR,
+            global_terrain.ion_asset_id(),
+        )],
+    )
+    .await
+    .unwrap_err();
 
     assert!(
         refusal.contains("TILETOPIA_GLOBAL_TERRAIN_ION_ASSET_ID"),
@@ -693,4 +762,109 @@ async fn startup_refuses_an_ion_id_an_asset_already_holds() {
     );
     assert!(refusal.contains(&holder.id.to_string()), "{refusal}");
     assert!(refusal.contains("cloud.ply"), "{refusal}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn buildings_stand_on_the_lowest_terrain_under_their_corners() {
+    let (base, _) = serve_files(HashMap::from([
+        (cell_path(), dem_cell()),
+        ("/geoid.tif".to_string(), geoid_grid()),
+    ]))
+    .await;
+    let terrain_cache = tempfile::tempdir().unwrap();
+    let global_terrain = GlobalTerrain::new(GlobalTerrainSettings {
+        dem_url: Some(base.clone()),
+        geoid_url: Some(format!("{base}/geoid.tif")),
+        coarse_url: None,
+        cache_dir: Some(terrain_cache.path().to_path_buf()),
+        cache_bytes: 1 << 30,
+        ion_asset_id: None,
+    });
+    let tiles = f64::from(1u32 << 15);
+    let x = ((7.45 + 180.0) / 360.0 * tiles).floor();
+    let y = ((46.55 + 90.0) / 180.0 * tiles).floor();
+    let longitude = -180.0 + (x + 0.5) * 360.0 / tiles;
+    let latitude = -90.0 + (y + 0.5) * 180.0 / tiles;
+    let half = 0.0001;
+    let ring = [
+        [longitude - half, latitude - half],
+        [longitude + half, latitude - half],
+        [longitude + half, latitude + half],
+        [longitude - half, latitude + half],
+    ];
+    let (overpass_url, _) = common::serve_overpass(
+        Vec::new(),
+        common::overpass_buildings(&[(
+            &ring,
+            serde_json::json!({ "building": "yes", "building:levels": "2" }),
+        )]),
+    )
+    .await;
+    let buildings_cache = tempfile::tempdir().unwrap();
+    let osm_buildings = OsmBuildings::new(
+        OsmBuildingsSettings {
+            overpass_url: Some(overpass_url),
+            cache_dir: Some(buildings_cache.path().to_path_buf()),
+            cache_bytes: 1 << 30,
+            ion_asset_id: None,
+        },
+        &global_terrain,
+    );
+    let state = common::test_state_with_global_layers(global_terrain, osm_buildings).await;
+    let get = |uri: String| {
+        let state = Arc::clone(&state);
+        async move {
+            let response = router(state)
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, body.to_vec())
+        }
+    };
+
+    let (status, body) = get(format!("/api/v1/buildings/osm/content/15/{x}/{y}.glb")).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let positions = common::glb_earth_centred_positions(&body);
+    let ground = ring
+        .iter()
+        .map(|&[corner_longitude, corner_latitude]| {
+            dem_height(corner_latitude, corner_longitude) + geoid_undulation(corner_latitude)
+        })
+        .fold(f64::INFINITY, f64::min);
+    for &[corner_longitude, corner_latitude] in &ring {
+        for height in [ground, ground + 2.0 * 3.2] {
+            let expected = geodetic_to_ecef(
+                corner_latitude.to_radians(),
+                corner_longitude.to_radians(),
+                height,
+            );
+            let nearest = positions
+                .iter()
+                .map(|position| {
+                    ((position[0] - expected[0]).powi(2)
+                        + (position[1] - expected[1]).powi(2)
+                        + (position[2] - expected[2]).powi(2))
+                    .sqrt()
+                })
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                nearest < 0.05,
+                "no vertex at {corner_longitude}, {corner_latitude}, {height} m: nearest is {nearest} m away"
+            );
+        }
+    }
+
+    let (status, body) = get("/api/v1/buildings/osm/tileset.json".to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    let tileset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        tileset["extras"]["ground"]
+            .as_str()
+            .unwrap()
+            .contains("global terrain")
+    );
 }

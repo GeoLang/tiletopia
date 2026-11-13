@@ -186,7 +186,7 @@ impl DemStore {
         }
     }
 
-    pub(crate) async fn build_slot(&self) -> OwnedSemaphorePermit {
+    pub async fn build_slot(&self) -> OwnedSemaphorePermit {
         Arc::clone(&self.build_slots)
             .acquire_owned()
             .await

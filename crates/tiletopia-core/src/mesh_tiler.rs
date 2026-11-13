@@ -245,7 +245,7 @@ pub fn tile_meshes(
     Ok(stats)
 }
 
-const MESH_BATCH_DIRECTORY: &str = "mesh-batches";
+pub const MESH_BATCH_DIRECTORY: &str = "mesh-batches";
 
 struct MeshBatchChild {
     tile_box: [f64; 12],
@@ -253,7 +253,6 @@ struct MeshBatchChild {
     uri: String,
 }
 
-/// Parent tileset whose children are tilesets written by [`tile_meshes`].
 pub struct MeshBatchTiles {
     output_dir: std::path::PathBuf,
     config: MeshTilingConfig,
@@ -275,7 +274,6 @@ impl MeshBatchTiles {
         }
     }
 
-    /// Write `meshes` as one child tileset. The caller can drop `meshes` after this returns.
     pub fn write_batch(&mut self, meshes: &[MeshData]) -> io::Result<()> {
         let index = self.children.len();
         let batch_dir = self
@@ -311,7 +309,6 @@ impl MeshBatchTiles {
         Ok(())
     }
 
-    /// Record a tileset that was already written. Its box stays in this parent's frame.
     pub fn adopt_tileset(&mut self, tileset_path: &Path, uri: String) -> io::Result<()> {
         let tileset: Tileset =
             serde_json::from_reader(io::BufReader::new(std::fs::File::open(tileset_path)?))
@@ -409,53 +406,6 @@ impl MeshBatchTiles {
             max_depth_reached: self.max_depth_reached,
         })
     }
-}
-
-/// Tile `meshes` with `config`.
-///
-/// When the `charge` of the whole list fits in `max_bytes_held`, this calls [`tile_meshes`]
-/// once. Otherwise each batch that fits is its own child tileset under a parent tileset.
-pub fn tile_meshes_within_budget(
-    meshes: impl IntoIterator<Item = MeshData>,
-    output_dir: &Path,
-    config: &MeshTilingConfig,
-    max_bytes_held: u64,
-    mut charge: impl FnMut(&MeshData) -> u64,
-) -> io::Result<MeshTilingStats> {
-    let mut pending = Vec::new();
-    let mut pending_bytes = 0u64;
-    let mut batches: Option<MeshBatchTiles> = None;
-    for mesh in meshes {
-        let mesh_charge = charge(&mesh);
-        if mesh_charge > max_bytes_held {
-            return Err(io::Error::other(format!(
-                "one mesh holds {mesh_charge} bytes, past the {max_bytes_held} byte limit"
-            )));
-        }
-        #[cfg(test)]
-        tests::note_resident_meshes(1);
-        if pending_bytes.saturating_add(mesh_charge) > max_bytes_held && !pending.is_empty() {
-            let batches =
-                batches.get_or_insert_with(|| MeshBatchTiles::new(output_dir, config.clone()));
-            batches.write_batch(&pending)?;
-            #[cfg(test)]
-            tests::note_resident_meshes(-(pending.len() as i64));
-            pending.clear();
-            pending_bytes = 0;
-        }
-        pending_bytes = pending_bytes.saturating_add(mesh_charge);
-        pending.push(mesh);
-    }
-    if let Some(mut batches) = batches {
-        if !pending.is_empty() {
-            batches.write_batch(&pending)?;
-            #[cfg(test)]
-            tests::note_resident_meshes(-(pending.len() as i64));
-            pending.clear();
-        }
-        return batches.finish();
-    }
-    tile_meshes(&pending, output_dir, config)
 }
 
 fn material_groups(meshes: &[MeshData], config: &MeshTilingConfig) -> Vec<MaterialGroup> {
@@ -2126,33 +2076,6 @@ pub fn split_texture(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
-
-    thread_local! {
-        static RESIDENT_MESHES: Cell<i64> = const { Cell::new(0) };
-        static RESIDENT_MESH_PEAK: Cell<i64> = const { Cell::new(0) };
-    }
-
-    pub(super) fn note_resident_meshes(delta: i64) {
-        RESIDENT_MESHES.with(|resident| {
-            let updated = resident.get() + delta;
-            resident.set(updated);
-            RESIDENT_MESH_PEAK.with(|peak| {
-                if updated > peak.get() {
-                    peak.set(updated);
-                }
-            });
-        });
-    }
-
-    pub(super) fn reset_resident_meshes() {
-        RESIDENT_MESHES.with(|resident| resident.set(0));
-        RESIDENT_MESH_PEAK.with(|peak| peak.set(0));
-    }
-
-    pub(super) fn resident_mesh_peak() -> i64 {
-        RESIDENT_MESH_PEAK.with(Cell::get)
-    }
 
     fn cube_mesh() -> MeshData {
         #[rustfmt::skip]
@@ -2302,73 +2225,6 @@ mod tests {
             "cube with 12 triangles should be a leaf"
         );
         assert_eq!(root.content.as_ref().unwrap().uri, "tiles/root.glb");
-    }
-
-    #[test]
-    fn a_mesh_list_over_a_tiny_budget_writes_child_tilesets_without_holding_every_mesh() {
-        let charge = |_: &MeshData| 10u64;
-        let config = MeshTilingConfig::default();
-        let shifted_cube = |index: usize| {
-            let mut mesh = cube_mesh();
-            let shift = index as f64 * 10.0;
-            for position in &mut mesh.positions {
-                position[0] += shift;
-            }
-            mesh.name = format!("cube-{index}");
-            mesh
-        };
-        let directory = |label: &str| {
-            std::env::temp_dir().join(format!("mesh_budget_{label}_{}", uuid::Uuid::new_v4()))
-        };
-        let remove_directory = |path: &std::path::Path| {
-            let _ = std::fs::remove_dir_all(path);
-        };
-
-        let under_budget = directory("under");
-        let direct = directory("direct");
-        let meshes = vec![shifted_cube(0), shifted_cube(1)];
-        tile_meshes_within_budget(meshes.clone(), &under_budget, &config, 25, charge)
-            .expect("a list under the budget should tile");
-        tile_meshes(&meshes, &direct, &config).expect("tile_meshes failed");
-        let under_json = std::fs::read_to_string(under_budget.join("tileset.json"))
-            .expect("the under-budget tileset");
-        let direct_json =
-            std::fs::read_to_string(direct.join("tileset.json")).expect("the direct tileset");
-        assert_eq!(under_json, direct_json);
-        assert!(!under_budget.join(MESH_BATCH_DIRECTORY).exists());
-        remove_directory(&under_budget);
-        remove_directory(&direct);
-
-        reset_resident_meshes();
-        let over_budget = directory("over");
-        tile_meshes_within_budget((0..3).map(shifted_cube), &over_budget, &config, 10, charge)
-            .expect("a list over the budget should tile");
-        let peak = resident_mesh_peak();
-        assert!(
-            peak < 3,
-            "the three meshes were resident together, peak {peak}"
-        );
-        let tileset: Tileset = serde_json::from_str(
-            &std::fs::read_to_string(over_budget.join("tileset.json")).expect("the parent tileset"),
-        )
-        .expect("a parseable parent tileset");
-        assert!(tileset.root.children.len() > 1);
-        for child in &tileset.root.children {
-            let uri = &child.content.as_ref().expect("a child tileset link").uri;
-            assert!(uri.ends_with("tileset.json"), "{uri}");
-            let child_path = over_budget.join(uri);
-            assert!(child_path.is_file(), "{}", child_path.display());
-            let child_tileset: Tileset = serde_json::from_str(
-                &std::fs::read_to_string(&child_path).expect("a child tileset"),
-            )
-            .expect("a parseable child tileset");
-            assert!(matches!(
-                child_tileset.root.bounding_volume,
-                BoundingVolume::Box { .. }
-            ));
-            assert!(matches!(child.bounding_volume, BoundingVolume::Box { .. }));
-        }
-        remove_directory(&over_budget);
     }
 
     #[test]

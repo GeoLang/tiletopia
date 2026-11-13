@@ -78,24 +78,16 @@ pub fn read(path: &Path, max_bytes_held: u64) -> Result<Vec<MeshData>, IngestErr
     Ok(elements.meshes)
 }
 
-/// One handed-off group of meshes from [`for_each_mesh_batch`].
 pub struct IfcMeshBatch {
     pub meshes: Vec<MeshData>,
-    /// True only when `meshes` is the whole model and no earlier batch was handed off.
     pub completes_the_model: bool,
 }
 
-/// What [`for_each_mesh_batch`] keeps after the meshes have been handed off.
 pub struct IfcMeshRead {
     pub dropped: DroppedElements,
     pub scan: IfcScan,
 }
 
-/// Mesh the IFC without retaining every mesh when they do not fit in `max_bytes_held`.
-///
-/// When the model fits, the callback runs once and [`IfcMeshBatch::completes_the_model`]
-/// is true. Otherwise each call receives one batch that fits, and that flag is false.
-/// One element's own meshes still have to fit, and the error is the byte limit.
 pub fn for_each_mesh_batch(
     source: &[u8],
     max_bytes_held: u64,
@@ -115,7 +107,7 @@ pub(crate) fn axis_factors_of_scan(
     axis_factors_of(&declared_from_lists(
         &mut decoder,
         scan.georef_types.clone(),
-        scan.true_north_context,
+        &scan.representation_contexts,
     )?)
 }
 
@@ -165,7 +157,7 @@ fn resize_mesh(mesh: &mut MeshData, axis_factors: [f64; 3]) {
     }
 }
 
-fn bytes_held_by_mesh(mesh: &MeshData) -> u64 {
+pub fn bytes_held_by_mesh(mesh: &MeshData) -> u64 {
     let text_bytes = mesh.name.len() + mesh.asset_id.as_ref().map_or(0, String::len);
     (mesh.positions.len() as u64)
         .saturating_mul(BYTES_HELD_PER_VERTEX)
@@ -277,7 +269,7 @@ pub(crate) fn scan_ifc(source: &[u8]) -> ScannedIfc {
     let mut void_spans = Vec::new();
     let mut aggregate_spans = Vec::new();
     let mut georef_types = Vec::new();
-    let mut true_north_context = None;
+    let mut representation_contexts = Vec::new();
     let mut scanner = EntityScanner::new(source);
     while let Some((id, type_name, start, end)) = scanner.next_entity() {
         index.insert(id, (start, end));
@@ -287,10 +279,8 @@ pub(crate) fn scan_ifc(source: &[u8]) -> ScannedIfc {
             .any(|keyword| keyword_eq(type_name, keyword))
         {
             georef_types.push((id, IfcType::from_str(type_name)));
-        } else if true_north_context.is_none()
-            && keyword_eq(type_name, "IFCGEOMETRICREPRESENTATIONCONTEXT")
-        {
-            true_north_context = Some(id);
+        } else if keyword_eq(type_name, "IFCGEOMETRICREPRESENTATIONCONTEXT") {
+            representation_contexts.push(id);
         }
         let ifc_type = ifc_type_from_keyword(type_name);
         if ifc_type == IfcType::IfcProject
@@ -348,7 +338,7 @@ pub(crate) fn scan_ifc(source: &[u8]) -> ScannedIfc {
             products,
             relations,
             georef_types,
-            true_north_context,
+            representation_contexts,
         },
         style_spans,
         geometry_jobs,
@@ -704,36 +694,34 @@ fn read_declared_georeference(source: &[u8]) -> Result<DeclaredGeoreference, Ing
     let mut decoder = EntityDecoder::with_index(source, build_entity_index(source));
     let mut scanner = EntityScanner::new(source);
     let mut entity_types = Vec::new();
-    let mut true_north_context = None;
+    let mut representation_contexts = Vec::new();
     while let Some((id, type_name, _start, _end)) = scanner.next_entity() {
         if GEOREFERENCE_KEYWORDS
             .iter()
             .any(|keyword| keyword_eq(type_name, keyword))
         {
             entity_types.push((id, IfcType::from_str(type_name)));
-        } else if true_north_context.is_none()
-            && keyword_eq(type_name, "IFCGEOMETRICREPRESENTATIONCONTEXT")
-        {
-            true_north_context = Some(id);
+        } else if keyword_eq(type_name, "IFCGEOMETRICREPRESENTATIONCONTEXT") {
+            representation_contexts.push(id);
         }
     }
-    declared_from_lists(&mut decoder, entity_types, true_north_context)
+    declared_from_lists(&mut decoder, entity_types, &representation_contexts)
 }
 
 fn declared_from_lists(
     decoder: &mut EntityDecoder<'_>,
     entity_types: Vec<(u32, IfcType)>,
-    true_north_context: Option<u32>,
+    representation_contexts: &[u32],
 ) -> Result<DeclaredGeoreference, IngestError> {
-    let true_north_direction = true_north_context
-        .map(|id| {
-            decoder
-                .decode_by_id(id)
-                .map_err(parse_error)
-                .map(|context| context.ref_at(slot::IfcGeometricRepresentationContext::TRUE_NORTH))
-        })
-        .transpose()?
-        .flatten();
+    let mut true_north_direction = None;
+    for id in representation_contexts {
+        let context = decoder.decode_by_id(*id).map_err(parse_error)?;
+        if let Some(direction) = context.ref_at(slot::IfcGeometricRepresentationContext::TRUE_NORTH)
+        {
+            true_north_direction = Some(direction);
+            break;
+        }
+    }
 
     let true_north_from_y_axis_radians = match true_north_direction {
         Some(id) => {
@@ -1551,6 +1539,33 @@ END-ISO-10303-21;
         );
         assert!(
             (x_axis_from_east_radians(&source).unwrap() - std::f64::consts::FRAC_PI_2).abs()
+                < ANGLE_TOLERANCE_RADIANS
+        );
+    }
+
+    #[test]
+    fn true_north_comes_from_a_later_context_when_the_first_has_none() {
+        let source = ifc_file(
+            "#1=IFCPROJECT('0Project00000000000000',$,'Test',$,$,$,$,(#9,#10),#7);\n\
+             #7=IFCUNITASSIGNMENT((#8));\n\
+             #8=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);\n\
+             #9=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Plan',2,1.E-5,#11,$);\n\
+             #10=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#11,#14);\n\
+             #11=IFCAXIS2PLACEMENT3D(#12,$,$);\n\
+             #12=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #14=IFCDIRECTION((0.5,0.8660254));\n\
+             #2=IFCSITE('0Site00000000000000000',$,'Site',$,$,$,$,$,.ELEMENT.,(51,30,0),(0,7,40),$,$,$);\n",
+        );
+        let thirty_degrees = std::f64::consts::FRAC_PI_6;
+
+        let placement = site_placement(&source).unwrap().expect("a site placement");
+
+        assert!(
+            (placement.x_axis_from_east_radians - thirty_degrees).abs() < ANGLE_TOLERANCE_RADIANS,
+            "{placement:?}"
+        );
+        assert!(
+            (x_axis_from_east_radians(&source).unwrap() - thirty_degrees).abs()
                 < ANGLE_TOLERANCE_RADIANS
         );
     }

@@ -5568,9 +5568,27 @@ END-ISO-10303-21;
         assert!(state.db.list_assets().await.unwrap().is_empty());
     }
 
+    // obj is read y up, so a vertex is easting, height and minus northing
     const UTM_DIAMOND_OBJ: &str = "\
-v 499990 10 15\nv 500010 10 15\nv 500000 0 15\nv 500000 20 15\n\
+v 499990 15 -10\nv 500010 15 -10\nv 500000 15 0\nv 500000 15 -20\n\
 f 1 2 4\nf 1 3 2\n";
+
+    const UTM_DIAMOND_Z_UP_DAE: &str = r##"<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset><created>2026-01-01T00:00:00</created><modified>2026-01-01T00:00:00</modified><up_axis>Z_UP</up_axis></asset>
+  <library_geometries>
+    <geometry id="diamond"><mesh>
+      <source id="p"><float_array id="p-a" count="12">499990 10 15 500010 10 15 500000 0 15 500000 20 15</float_array>
+        <technique_common><accessor source="#p-a" count="4" stride="3">
+          <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+        </accessor></technique_common></source>
+      <vertices id="v"><input semantic="POSITION" source="#p"/></vertices>
+      <triangles count="2"><input semantic="VERTEX" source="#v" offset="0"/><p>0 1 3 0 2 1</p></triangles>
+    </mesh></geometry>
+  </library_geometries>
+  <library_visual_scenes><visual_scene id="s"><node><instance_geometry url="#diamond"/></node></visual_scene></library_visual_scenes>
+  <scene><instance_visual_scene url="#s"/></scene>
+</COLLADA>"##;
 
     #[tokio::test]
     async fn a_native_mesh_upload_with_a_crs_is_placed_on_that_crs() {
@@ -5579,47 +5597,52 @@ f 1 2 4\nf 1 3 2\n";
         let state = state_with_external_tiler(None).await;
         let token = bootstrap_editor(&state, "native-crs-placed@example.com").await;
 
-        let (status, body) = upload_with_fields(
-            &state,
-            &token,
-            "diamond.obj",
-            UTM_DIAMOND_OBJ,
-            &[("crs", "EPSG:32632")],
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED);
-        let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+        for (file_name, contents) in [
+            ("diamond.obj", UTM_DIAMOND_OBJ),
+            ("diamond.dae", UTM_DIAMOND_Z_UP_DAE),
+        ] {
+            let (status, body) = upload_with_fields(
+                &state,
+                &token,
+                file_name,
+                contents,
+                &[("crs", "EPSG:32632")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{file_name}");
+            let asset: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let asset_id = uuid::Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
 
-        let settled = settle_only_job(&state, asset_id).await;
-        assert_eq!(
-            settled.status,
-            JobStatus::Done,
-            "error: {:?}",
-            settled.error
-        );
-
-        let (status, body) = get_with_token(
-            &state,
-            &format!("/api/v1/assets/{asset_id}/tileset.json"),
-            &token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let longitude = 9.0_f64.to_radians();
-        let radius = tiletopia_core::spatial::WGS84_A + 15.0;
-        let expected = [
-            radius * longitude.cos(),
-            radius * longitude.sin(),
-            10.0 / 0.9996,
-        ];
-        let written =
-            root_translation(&serde_json::from_slice::<serde_json::Value>(&body).unwrap());
-        for axis in 0..3 {
-            assert!(
-                (written[axis] - expected[axis]).abs() < 0.01,
-                "axis {axis}: {written:?} is not {expected:?}"
+            let settled = settle_only_job(&state, asset_id).await;
+            assert_eq!(
+                settled.status,
+                JobStatus::Done,
+                "{file_name}: {:?}",
+                settled.error
             );
+
+            let (status, body) = get_with_token(
+                &state,
+                &format!("/api/v1/assets/{asset_id}/tileset.json"),
+                &token,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let longitude = 9.0_f64.to_radians();
+            let radius = tiletopia_core::spatial::WGS84_A + 15.0;
+            let expected = [
+                radius * longitude.cos(),
+                radius * longitude.sin(),
+                10.0 / 0.9996,
+            ];
+            let written =
+                root_translation(&serde_json::from_slice::<serde_json::Value>(&body).unwrap());
+            for axis in 0..3 {
+                assert!(
+                    (written[axis] - expected[axis]).abs() < 0.01,
+                    "{file_name} axis {axis}: {written:?} is not {expected:?}"
+                );
+            }
         }
     }
 

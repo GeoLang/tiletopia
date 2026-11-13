@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 2026-11-13: an edit or property write that waits while a re-tile starts answers 409 `ASSET_NOT_READY` and writes nothing, instead of changing the IFC under the tiling job.
+- 2026-11-13: moving or turning an element whose `IfcLocalPlacement` another product also uses gives the element its own copy, and its openings, fillings and parts move with it. Other products on that placement stay where they are.
+- 2026-11-13: dropped the unused `axum-extra`, core's `memmap2` and store's `tiletopia-core` dependencies.
+- 2026-11-13: a property PUT writes into copies when other elements share the value, its set or its relation, so only the edited element changes. Repeated keys are numbered the way the element store numbers them, and text outside printable ASCII is written as `\X2\` escapes.
+- 2026-11-13: IFC edits and property writes to one asset run one at a time with unique temporary files. Volume, alignments, edits and property writes wait for a build slot.
+- 2026-11-13: an unreadable `element-edits.json` answers 500 instead of reading as empty.
+- 2026-11-13: a relation edit that adds an element already in a containment, aggregate or nest answers 409 `ALREADY_RELATED`, and relation edits update the element tree.
+- 2026-11-13: edit inputs are metres, converted to the IFC's length unit. A length unit with no usable factor answers 409 `UNUSABLE_LENGTH_UNIT`.
+- 2026-11-13: the volume of an element with no mesh answers 404 `ELEMENT_HAS_NO_MESH`, and an element past the preview vertex cap gets its volume.
+- 2026-11-13: a drawing's hidden lines ignore geometry on the removed side of the cut, so a plan no longer marks every edge hidden.
+- 2026-11-13: a mesh placed by `crs` is read with its format's up axis, so a y-up glTF or OBJ lands at the right northing and height.
+- 2026-11-13: `POST /v1/assets/{id}/ids` records the new IDS file name, and an IDS file with no recorded name is not checked. An `ids` field on an upload other than an IFC answers 400, and the field is refused past 16 MiB before it is written.
+- 2026-11-13: a section plane given with `axis` or `position` answers 400.
+- 2026-11-13: global terrain tiles are cached per set of DEM, geoid and coarse URLs. Coarse tiles wrap at the antimeridian, and a coarse window past 2,000,000 samples answers 503 asking for overviews.
+- 2026-11-13: `scripts/validate-tiles.sh` measures the repeated-box extent in metres under meshopt.
+- 2026-11-13: an IFC split puts every `IfcProduct` subtype in a piece, keeps nested elements such as a duct's ports with their parent, and copies facilities such as `IfcRoad` into every piece. A relation's single references are no longer written as lists. Pieces go in the asset directory instead of the temp directory, and as many are tiled at once as fit the task memory. Element mesh hashes are the same whether a model is read whole, in batches or in pieces.
+- 2026-11-13: adding or reshaping an IFC element writes `IfcCartesianPointList3D` with the attribute count of the file's schema, and the added proxy carries `PredefinedType`. An IFC2X3 file answers 409 `UNSUPPORTED_SCHEMA`. Added GlobalIds are random, where they used to repeat across models.
+- 2026-11-13: an element volume over a mesh with a partial triangle or an index past its vertices answers 500 instead of skipping those triangles.
+- 2026-11-13: TrueNorth is read from the first representation context that has one, not only the first context in the file.
+- 2026-11-13: alignment stations are in metres whatever the file's length and angle units. Segments that meet share one station, and a gap between segments adds no distance.
+- 2026-11-13: a section DXF places each polyline at the cut, with elevation `position` and extrusion along the cut axis, so storey cuts no longer overlap at z 0. A y section and a y drawing are drawn with height up, instead of with height along the sheet's x.
+- 2026-11-13: a tiling job that succeeds deletes the asset's `element-edits.json`, so edit previews stop drawing once the tiles hold the edits.
+- 2026-11-13: `GET /v1/assets/{id}/drawing` with `flip=true` looks up at the cut from below, so the kept part above the cut is drawn with its own hidden lines instead of as seen from above.
+- 2026-11-13: deleting an IFC element removes it from relation lists and removes a relation whose single attribute or whole list was that element, instead of dropping attributes and leaving `()`. References inside quoted strings are left alone. When an entity that is not a relation refers to the element, the edit answers 409 `STILL_REFERENCED`.
+- 2026-11-13: moving or turning an IFC element copies its axis placement, point and direction when another entity shares them, so only that element moves.
+- 2026-11-13: child tilesets under `ifc-pieces/` and `mesh-batches/` are served, at any depth, with no token like other tile reads. Before this an IFC that was split or tiled in batches finished its job but every child tileset answered 404.
+- 2026-11-13: `/api/v1/buildings/osm/tileset.json` serves OpenStreetMap buildings for the whole Earth as an implicit quadtree, each level 15 tile extruded from one Overpass query and cached on disk. Buildings stand on global terrain when it is configured. `TILETOPIA_OSM_BUILDINGS_ION_ASSET_ID` resolves an Ion id to it.
+- 2026-11-13: reserved Ion ids are a table, so new assets skip the global terrain id and the global buildings id.
 - 2026-11-13: global terrain levels 0 to 6 read `TILETOPIA_GLOBAL_TERRAIN_COARSE_URL` when it names one global DEM, and still carry the geoid alone when it does not.
 - 2026-11-13: a mesh upload other than an IFC may name `crs` as an EPSG code. Vertices are easting, northing and ellipsoidal height, and the job places them in an east-north-up frame. Longitude and latitude together with `crs` answer 400, and so does `crs` on an IFC.
 - 2026-11-13: `GET /v1/assets/{id}/drawing` projects visible and hidden edges. A section position keeps the side of the cut and adds the cut as visible lines.

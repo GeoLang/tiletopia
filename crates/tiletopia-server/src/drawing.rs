@@ -65,9 +65,13 @@ fn sub(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
     std::array::from_fn(|axis| left[axis] - right[axis])
 }
 
-fn paper(axis: Axis, point: [f64; 3]) -> [f64; 2] {
-    let [along, across] = axis.plane_axes();
-    [point[along], point[across]]
+pub(crate) fn paper(axis: Axis, point: [f64; 3]) -> [f64; 2] {
+    // dxf's arbitrary axis algorithm gives these two axes for an extrusion along +x, +y and +z
+    match axis {
+        Axis::X => [point[1], point[2]],
+        Axis::Y => [-point[0], point[2]],
+        Axis::Z => [point[0], point[1]],
+    }
 }
 
 fn kept(point: [f64; 3], axis: usize, position: f64, flip: bool) -> bool {
@@ -116,9 +120,9 @@ fn unit(vector: [f64; 3]) -> Option<[f64; 3]> {
     (length > 1.0e-12).then(|| std::array::from_fn(|axis| vector[axis] / length))
 }
 
-fn view_direction(axis: usize) -> [f64; 3] {
+fn view_direction(axis: usize, flip: bool) -> [f64; 3] {
     let mut direction = [0.0; 3];
-    direction[axis] = -1.0;
+    direction[axis] = if flip { 1.0 } else { -1.0 };
     direction
 }
 
@@ -146,12 +150,14 @@ fn raster_depth(
     axis_index: usize,
     view: [f64; 3],
     bounds: ([f64; 2], [f64; 2]),
+    cut_nearness: Option<f64>,
 ) -> DepthGrid {
     let span = [
         (bounds.1[0] - bounds.0[0]).max(1.0e-6),
         (bounds.1[1] - bounds.0[1]).max(1.0e-6),
     ];
     let cell = span[0].max(span[1]) / GRID as f64;
+    let toward_camera = -view[axis_index];
     let mut depth = vec![f64::NEG_INFINITY; GRID * GRID];
     let axis = match axis_index {
         0 => Axis::X,
@@ -214,9 +220,13 @@ fn raster_depth(
                 let Some(weight) = barycentric(flat, sample) else {
                     continue;
                 };
-                let at = weight[0] * corners[0][axis_index]
+                let at = (weight[0] * corners[0][axis_index]
                     + weight[1] * corners[1][axis_index]
-                    + weight[2] * corners[2][axis_index];
+                    + weight[2] * corners[2][axis_index])
+                    * toward_camera;
+                if cut_nearness.is_some_and(|cut| at > cut) {
+                    continue;
+                }
                 let slot = row as usize * GRID + column as usize;
                 if at > depth[slot] {
                     depth[slot] = at;
@@ -265,7 +275,8 @@ pub(crate) fn project_drawing(
     flip: bool,
 ) -> Drawing {
     let axis_index = axis.index();
-    let view = view_direction(axis_index);
+    let view = view_direction(axis_index, flip);
+    let toward_camera = -view[axis_index];
     let mut edges: HashMap<EdgeKey, EdgeRecord> = HashMap::new();
     let mut paper_bounds: Option<([f64; 2], [f64; 2])> = None;
     let include = |point: [f64; 3]| match position {
@@ -321,6 +332,7 @@ pub(crate) fn project_drawing(
             }
         }
     }
+    let cut_nearness = position.map(|position| position * toward_camera);
     let grid = paper_bounds.map(|bounds| {
         let mut grid = DepthGrid {
             origin: bounds.0,
@@ -328,7 +340,7 @@ pub(crate) fn project_drawing(
             depth: Vec::new(),
         };
         for mesh in meshes {
-            let raster = raster_depth(mesh, axis_index, view, bounds);
+            let raster = raster_depth(mesh, axis_index, view, bounds, cut_nearness);
             if grid.depth.is_empty() {
                 grid = raster;
                 continue;
@@ -357,7 +369,7 @@ pub(crate) fn project_drawing(
             std::array::from_fn(|coordinate| (start[coordinate] + end[coordinate]) * 0.5);
         let hidden = grid.as_ref().is_some_and(|grid| {
             depth_at(grid, paper(axis, midpoint))
-                .is_some_and(|near| near > midpoint[axis_index] + OCCLUSION_METRES)
+                .is_some_and(|near| near > midpoint[axis_index] * toward_camera + OCCLUSION_METRES)
         });
         lines.push(DrawingLine {
             element_id: edge.element_id,
@@ -578,7 +590,7 @@ mod tests {
     #[test]
     fn a_cut_keeps_only_the_kept_side_and_draws_the_section_as_visible_lines() {
         let mesh = box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], "box");
-        let below = project_drawing(&[mesh.clone()], Axis::Z, Some(0.5), false);
+        let below = project_drawing(std::slice::from_ref(&mesh), Axis::Z, Some(0.5), false);
         assert!(
             below
                 .lines
@@ -603,6 +615,42 @@ mod tests {
                 .iter()
                 .all(|line| line.start[2] >= 0.5 - 1.0e-6 && line.end[2] >= 0.5 - 1.0e-6)
         );
+    }
+
+    #[test]
+    fn a_flipped_cut_looks_up_so_the_lower_box_hides_the_upper_one() {
+        let low = box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], "low");
+        let high = box_mesh([0.0, 0.0, 2.0], [1.0, 1.0, 3.0], "high");
+        let drawing = project_drawing(&[low, high], Axis::Z, Some(-1.0), true);
+        let line = |start: [f64; 3], end: [f64; 3]| {
+            drawing
+                .lines
+                .iter()
+                .find(|line| joins(line, start, end))
+                .expect("the box edge is drawn")
+        };
+        assert!(line([0.0, 0.0, 3.0], [1.0, 0.0, 3.0]).hidden);
+        assert!(!line([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]).hidden);
+    }
+
+    #[test]
+    fn a_box_on_the_removed_side_of_the_cut_hides_nothing() {
+        let meshes = [
+            box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], "low"),
+            box_mesh([0.0, 0.0, 2.0], [1.0, 1.0, 2.2], "high"),
+        ];
+        for (flip, near_height) in [(false, 1.0), (true, 2.0)] {
+            let drawing = project_drawing(&meshes, Axis::Z, Some(1.5), flip);
+            let edge = drawing
+                .lines
+                .iter()
+                .find(|line| joins(line, [0.0, 0.0, near_height], [1.0, 0.0, near_height]))
+                .expect("the kept box's near edge is drawn");
+            assert!(
+                !edge.hidden,
+                "flip {flip}: the kept box's near edge is hidden"
+            );
+        }
     }
 
     #[test]

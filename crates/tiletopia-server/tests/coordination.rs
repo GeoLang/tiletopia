@@ -1520,6 +1520,8 @@ async fn every_route_needs_a_bearer_token_from_someone_who_may_view_the_asset() 
         format!("/v1/assets/{ion_id}/bcf/topics"),
         format!("/v1/assets/{ion_id}/bcf/topics/{TOPIC_GUID}"),
         format!("/v1/assets/{ion_id}/bcf/topics/{TOPIC_GUID}/viewpoints/{VIEWPOINT_GUID}/snapshot"),
+        format!("/v1/assets/{ion_id}/element-edits"),
+        format!("/v1/assets/{ion_id}/elements/{KEPT_WALL}/volume"),
     ];
     for uri in &read_uris {
         let stranger = get_as(&state, uri, STRANGER).await;
@@ -1566,6 +1568,21 @@ async fn every_route_needs_a_bearer_token_from_someone_who_may_view_the_asset() 
     )
     .await;
     assert_eq!(stranger_delete.status, StatusCode::NOT_FOUND);
+
+    let stranger_edit = send_json(
+        &state,
+        "POST",
+        &format!("/v1/assets/{ion_id}/edits"),
+        STRANGER,
+        &json!({ "kind": "delete", "elementId": KEPT_WALL }),
+    )
+    .await;
+    assert_eq!(stranger_edit.status, StatusCode::NOT_FOUND);
+    assert!(
+        std::fs::read_to_string(&model.input_path)
+            .unwrap()
+            .contains(KEPT_WALL)
+    );
 
     let topics = owner_get(&state, &format!("/v1/assets/{ion_id}/bcf/topics")).await;
     assert_eq!(topics["total"], 0);
@@ -1662,6 +1679,15 @@ async fn an_owner_with_the_viewer_role_is_refused_every_write_an_editor_may_make
             .into_bytes(),
             success: StatusCode::OK,
         },
+        WriteRoute {
+            method: "POST",
+            uri: format!("/v1/assets/{}/edits", first.ion_id),
+            content_type: "application/json".to_string(),
+            body: json!({ "kind": "delete", "elementId": REMOVED_WALL })
+                .to_string()
+                .into_bytes(),
+            success: StatusCode::OK,
+        },
     ];
     for route in &routes {
         let viewer = send(&state, owner_write(route, "viewer")).await;
@@ -1692,4 +1718,301 @@ async fn a_model_with_no_element_store_refuses_a_bcf_import() {
     let answer = import_bcf(&state, ion_id, OWNER, &full_bcf()).await;
     assert_eq!(answer.status, StatusCode::NOT_FOUND);
     assert_eq!(answer.json()["code"], "ASSET_HAS_NO_ELEMENT_STORE");
+}
+
+async fn post_edit(state: &Arc<AppState>, ion_id: i64, edit: Value) -> Answer {
+    send_json(
+        state,
+        "POST",
+        &format!("/v1/assets/{ion_id}/edits"),
+        OWNER,
+        &edit,
+    )
+    .await
+}
+
+async fn put_fire_rating(state: &Arc<AppState>, ion_id: i64, rating: &str) -> Answer {
+    send_json(
+        state,
+        "PUT",
+        &format!("/v1/assets/{ion_id}/elements/{CHANGED_WALL}/properties"),
+        OWNER,
+        &json!({ "key": "Pset_WallCommon.FireRating", "value": rating }),
+    )
+    .await
+}
+
+async fn parent_path(state: &Arc<AppState>, ion_id: i64, element_id: &str) -> Vec<String> {
+    let parents = owner_get(
+        state,
+        &format!("/v1/assets/{ion_id}/tree/parents?elementId={element_id}"),
+    )
+    .await;
+    parents["path"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn edits_move_delete_and_relate_elements_and_the_volume_reads_the_mesh() {
+    let state = test_state().await;
+    let model = upload_and_tile(&state, &FIRST_REVISION, None).await;
+    let ion_id = model.ion_id;
+
+    let volume = owner_get(
+        &state,
+        &format!("/v1/assets/{ion_id}/elements/{CHANGED_WALL}/volume"),
+    )
+    .await;
+    assert!(
+        (volume["volume"].as_f64().unwrap() - 6.0).abs() < 1.0e-6,
+        "{volume}"
+    );
+    let unknown = get_as(
+        &state,
+        &format!("/v1/assets/{ion_id}/elements/{UNKNOWN_ELEMENT}/volume"),
+        OWNER,
+    )
+    .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    assert_eq!(unknown.json()["code"], "ELEMENT_HAS_NO_MESH");
+
+    let empty = owner_get(&state, &format!("/v1/assets/{ion_id}/element-edits")).await;
+    assert_eq!(empty["edits"], json!([]));
+
+    let moved = post_edit(
+        &state,
+        ion_id,
+        json!({ "kind": "translate", "elementId": KEPT_WALL, "delta": [1.0, 0.0, 0.0] }),
+    )
+    .await;
+    assert_eq!(moved.status, StatusCode::OK, "{}", moved.json());
+    assert_eq!(moved.json()["drawn"], true);
+    let source = std::fs::read_to_string(&model.input_path).unwrap();
+    assert!(
+        source.contains("IFCCARTESIANPOINT((1.0,0.0,0.0))"),
+        "{source}"
+    );
+
+    let deleted = post_edit(
+        &state,
+        ion_id,
+        json!({ "kind": "delete", "elementId": REMOVED_WALL }),
+    )
+    .await;
+    assert_eq!(deleted.status, StatusCode::OK, "{}", deleted.json());
+    let gone = get_as(
+        &state,
+        &format!("/v1/assets/{ion_id}/elements/{REMOVED_WALL}"),
+        OWNER,
+    )
+    .await;
+    assert_eq!(gone.status, StatusCode::NOT_FOUND);
+
+    let edits = owner_get(&state, &format!("/v1/assets/{ion_id}/element-edits")).await;
+    let edits = edits["edits"].as_array().unwrap();
+    assert_eq!(edits.len(), 2, "{edits:?}");
+    assert_eq!(edits[0]["elementId"], KEPT_WALL);
+    assert_eq!(edits[0]["kind"], "translate");
+    assert_eq!(edits[0]["hideOriginal"], true);
+    assert!(!edits[0]["positions"].as_array().unwrap().is_empty());
+    assert_eq!(edits[1]["elementId"], REMOVED_WALL);
+    assert_eq!(edits[1]["kind"], "delete");
+
+    let contained = [PROJECT, SITE, BUILDING, STOREY, CHANGED_WALL];
+    assert_eq!(parent_path(&state, ion_id, CHANGED_WALL).await, contained);
+    let twice = post_edit(
+        &state,
+        ion_id,
+        json!({ "kind": "relation", "elementId": CHANGED_WALL, "relationId": 43, "add": true }),
+    )
+    .await;
+    assert_eq!(twice.status, StatusCode::CONFLICT);
+    assert_eq!(twice.json()["code"], "ALREADY_RELATED");
+
+    let removed = post_edit(
+        &state,
+        ion_id,
+        json!({ "kind": "relation", "elementId": CHANGED_WALL, "relationId": 43, "add": false }),
+    )
+    .await;
+    assert_eq!(removed.status, StatusCode::OK, "{}", removed.json());
+    assert_eq!(
+        parent_path(&state, ion_id, CHANGED_WALL).await,
+        [PROJECT, CHANGED_WALL]
+    );
+    let restored = post_edit(
+        &state,
+        ion_id,
+        json!({ "kind": "relation", "elementId": CHANGED_WALL, "relationId": 43, "add": true }),
+    )
+    .await;
+    assert_eq!(restored.status, StatusCode::OK, "{}", restored.json());
+    assert_eq!(parent_path(&state, ion_id, CHANGED_WALL).await, contained);
+}
+
+#[tokio::test]
+async fn an_unreadable_edit_file_answers_500_and_is_kept() {
+    let state = test_state().await;
+    let model = upload_and_tile(&state, &FIRST_REVISION, None).await;
+    let edits_path = state
+        .data_dir
+        .join(model.id.to_string())
+        .join("element-edits.json");
+    std::fs::write(&edits_path, b"{ not json").unwrap();
+    let source = std::fs::read(&model.input_path).unwrap();
+
+    let listed = get_as(
+        &state,
+        &format!("/v1/assets/{}/element-edits", model.ion_id),
+        OWNER,
+    )
+    .await;
+    assert_eq!(listed.status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    let moved = post_edit(
+        &state,
+        model.ion_id,
+        json!({ "kind": "translate", "elementId": KEPT_WALL, "delta": [1.0, 0.0, 0.0] }),
+    )
+    .await;
+    assert_eq!(moved.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(std::fs::read(&edits_path).unwrap(), b"{ not json");
+    assert_eq!(std::fs::read(&model.input_path).unwrap(), source);
+}
+
+#[tokio::test]
+async fn writes_to_one_model_wait_for_each_other_and_both_land() {
+    let state = test_state().await;
+    let model = upload_and_tile(&state, &FIRST_REVISION, None).await;
+    let ion_id = model.ion_id;
+
+    let other_write = tiletopia_server::edits::lock_asset_writes(model.id).await;
+    let edit = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            post_edit(
+                &state,
+                ion_id,
+                json!({ "kind": "translate", "elementId": KEPT_WALL, "delta": [1.0, 0.0, 0.0] }),
+            )
+            .await
+        }
+    });
+    let property = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move { put_fire_rating(&state, ion_id, "REI99").await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(!edit.is_finished());
+    assert!(!property.is_finished());
+
+    drop(other_write);
+    let edit = edit.await.unwrap();
+    assert_eq!(edit.status, StatusCode::OK, "{}", edit.json());
+    let property = property.await.unwrap();
+    assert_eq!(property.status, StatusCode::OK, "{}", property.json());
+    let source = std::fs::read_to_string(&model.input_path).unwrap();
+    assert!(source.contains("IFCLABEL('REI99')"), "{source}");
+    assert!(
+        source.contains("IFCCARTESIANPOINT((1.0,0.0,0.0))"),
+        "{source}"
+    );
+}
+
+#[tokio::test]
+async fn an_edit_waiting_while_a_re_tile_starts_is_refused_and_writes_nothing() {
+    let state = test_state().await;
+    let model = upload_and_tile(&state, &FIRST_REVISION, None).await;
+    let ion_id = model.ion_id;
+    let before = std::fs::read(&model.input_path).unwrap();
+
+    let job_start = tiletopia_server::edits::lock_asset_writes(model.id).await;
+    let edit = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            post_edit(
+                &state,
+                ion_id,
+                json!({ "kind": "translate", "elementId": KEPT_WALL, "delta": [1.0, 0.0, 0.0] }),
+            )
+            .await
+        }
+    });
+    let property = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move { put_fire_rating(&state, ion_id, "REI99").await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let mut asset = state.db.get_asset(model.id).await.unwrap().unwrap();
+    asset.status = tiletopia_server::AssetStatus::Tiling;
+    state.db.update_asset(&asset).await.unwrap();
+    drop(job_start);
+
+    for answer in [edit.await.unwrap(), property.await.unwrap()] {
+        assert_eq!(answer.status, StatusCode::CONFLICT, "{}", answer.json());
+        assert_eq!(answer.json()["code"], "ASSET_NOT_READY");
+    }
+    assert_eq!(std::fs::read(&model.input_path).unwrap(), before);
+}
+
+#[tokio::test]
+async fn reads_and_writes_of_the_whole_model_wait_for_a_build_slot() {
+    let state = test_state().await;
+    let ion_id = upload_and_tile(&state, &FIRST_REVISION, None).await.ion_id;
+    let other_ion_id = upload_and_tile(&state, &FIRST_REVISION, None).await.ion_id;
+
+    let mut held_slots = Vec::new();
+    while let Ok(slot) = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        state.elevation_store.build_slot(),
+    )
+    .await
+    {
+        held_slots.push(slot);
+    }
+    assert!(!held_slots.is_empty());
+
+    let spawn_get = |uri: String| {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { get_as(&state, &uri, OWNER).await })
+    };
+    let volume = spawn_get(format!(
+        "/v1/assets/{ion_id}/elements/{CHANGED_WALL}/volume"
+    ));
+    let alignments = spawn_get(format!("/v1/assets/{ion_id}/alignments"));
+    let edit = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            post_edit(
+                &state,
+                ion_id,
+                json!({ "kind": "delete", "elementId": REMOVED_WALL }),
+            )
+            .await
+        }
+    });
+    let property = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move { put_fire_rating(&state, other_ion_id, "REI99").await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let requests = [
+        ("volume", volume),
+        ("alignments", alignments),
+        ("edit", edit),
+        ("property", property),
+    ];
+    for (name, request) in &requests {
+        assert!(!request.is_finished(), "{name}");
+    }
+
+    drop(held_slots);
+    for (name, request) in requests {
+        let answer = request.await.unwrap();
+        assert_eq!(answer.status, StatusCode::OK, "{name}: {}", answer.json());
+    }
 }

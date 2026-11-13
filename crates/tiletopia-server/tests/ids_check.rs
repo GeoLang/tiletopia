@@ -726,3 +726,109 @@ async fn an_upload_ids_field_longer_than_16_mib_answers_400_before_a_job() {
     assert_eq!(counted(&state, "SELECT COUNT(*) FROM assets").await, 0);
     assert!(ids_directories(&state).is_empty());
 }
+
+#[tokio::test]
+async fn a_posted_ids_file_names_the_check_of_the_next_version() {
+    let sidecar = mock_sidecar(StatusCode::OK, REPORT).await;
+    sidecar.release();
+    let state = test_state_with_ids_check(sidecar.ids_check_sidecar()).await;
+    let previous = model_asset(&state, "previous.ifc").await;
+    store_ids(&state, previous, Some("uploaded.ids"));
+
+    let started = post_ids(&state, previous, OWNER, "editor").await;
+    assert_eq!(started.status, StatusCode::ACCEPTED, "{}", started.json());
+    assert_eq!(
+        settled_check(&state, previous).await.json()["status"],
+        "done"
+    );
+
+    let next = model_asset(&state, "next.ifc").await;
+    tiletopia_server::model_versions::add_version(&state.db, next, previous)
+        .await
+        .unwrap();
+    ids_check::check_ready_asset(&state.db, &state.data_dir, state.ids_check.clone(), next).await;
+
+    let check = settled_check(&state, next).await.json();
+    assert_eq!(check["status"], "done");
+    assert_eq!(check["idsFileName"], IDS_FILE_NAME);
+}
+
+#[tokio::test]
+async fn an_ids_file_with_no_file_name_is_not_checked() {
+    let sidecar = mock_sidecar(StatusCode::OK, REPORT).await;
+    sidecar.release();
+    let state = test_state_with_ids_check(sidecar.ids_check_sidecar()).await;
+    let id = model_asset(&state, "model.ifc").await;
+    store_ids(&state, id, None);
+
+    ids_check::check_ready_asset(&state.db, &state.data_dir, state.ids_check.clone(), id).await;
+
+    let check = get_ids(&state, id, OWNER).await;
+    assert_eq!(check.json()["code"], "IDS_NOT_CHECKED", "{}", check.json());
+}
+
+#[tokio::test]
+async fn an_ids_field_on_an_upload_that_is_not_an_ifc_answers_400() {
+    let state = test_state().await;
+
+    let answer = post_asset(
+        &state,
+        asset_upload("points.las", Some(IDS_FILE_NAME), IDS_XML.as_bytes()),
+    )
+    .await;
+
+    assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+    let text = String::from_utf8(answer.bytes).unwrap();
+    assert!(text.contains("points.las: ids applies to"), "{text}");
+    assert_eq!(counted(&state, "SELECT COUNT(*) FROM assets").await, 0);
+    assert!(ids_directories(&state).is_empty());
+}
+
+const WALL_IFC: &str = "\
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('ViewDefinition [CoordinationView]'),'2;1');
+FILE_NAME('wall.ifc','2026-01-01',(''),(''),'','','');
+FILE_SCHEMA(('IFC2X3'));
+ENDSEC;
+DATA;
+#1=IFCPROJECT('0001',$,'TestProject',$,$,$,$,$,$);
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCLOCALPLACEMENT($,#11);
+#20=IFCRECTANGLEPROFILEDEF(.AREA.,$,#11,2.0,1.0);
+#21=IFCDIRECTION((0.,0.,1.));
+#22=IFCEXTRUDEDAREASOLID(#20,#11,#21,3.0);
+#30=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#22));
+#31=IFCPRODUCTDEFINITIONSHAPE($,$,(#30));
+#40=IFCWALL('0002',$,'TestWall',$,$,#12,#31,$);
+ENDSEC;
+END-ISO-10303-21;
+";
+
+#[tokio::test]
+async fn a_finished_tiling_job_starts_the_check_of_the_uploaded_ids_file() {
+    let sidecar = mock_sidecar(StatusCode::OK, REPORT).await;
+    sidecar.release();
+    let state = test_state_with_ids_check(sidecar.ids_check_sidecar()).await;
+    let body = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"longitude\"\r\n\r\n10\r\n\
+         --{BOUNDARY}\r\nContent-Disposition: form-data; name=\"latitude\"\r\n\r\n20\r\n\
+         --{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"wall.ifc\"\r\n\r\n{WALL_IFC}\r\n\
+         --{BOUNDARY}\r\nContent-Disposition: form-data; name=\"ids\"; filename=\"{IDS_FILE_NAME}\"\r\n\r\n{IDS_XML}\r\n\
+         --{BOUNDARY}--\r\n"
+    );
+
+    let answer = post_asset(&state, body.into_bytes()).await;
+    assert_eq!(answer.status, StatusCode::CREATED, "{}", answer.json());
+    let id = Uuid::parse_str(answer.json()["id"].as_str().unwrap()).unwrap();
+    let worker = Arc::clone(&state.job_queue).start().await;
+    let request = first_request(&sidecar).await;
+    worker.abort();
+
+    assert_eq!(request["ifc_path"], format!("{id}/input/wall.ifc"));
+    assert_eq!(request["ids_path"], format!("{id}/ids/specification.ids"));
+    let check = settled_check(&state, id).await.json();
+    assert_eq!(check["status"], "done");
+    assert_eq!(check["idsFileName"], IDS_FILE_NAME);
+}

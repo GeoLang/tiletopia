@@ -345,12 +345,68 @@ async fn an_asset_that_is_not_a_tiled_ifc_answers_404() {
         for uri in [
             format!("/v1/assets/{ion_id}/section?axis=z&position=0.5"),
             format!("/v1/assets/{ion_id}/dxf?axis=z&position=0.5"),
+            format!("/v1/assets/{ion_id}/drawing?axis=z&position=0.5"),
         ] {
             let (status, body) = get_as(&state, &uri, OWNER).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
             assert_eq!(body["code"], "ASSET_HAS_NO_MESH_SOURCE", "{uri}");
         }
     }
+}
+
+fn drawn_points(line: &Value) -> [[f64; 3]; 2] {
+    ["start", "end"].map(|end| serde_json::from_value(line[end].clone()).unwrap())
+}
+
+#[tokio::test]
+async fn a_plan_drawing_shows_the_cut_and_the_sill_seen_through_the_opening() {
+    let state = test_state().await;
+    let model = upload_and_tile(&state, "section.ifc", WALL_WITH_AN_OPENING_IFC).await;
+
+    let bad_flip = format!(
+        "/v1/assets/{}/drawing?axis=z&position=1.25&flip=up",
+        model.ion_id
+    );
+    let (status, body) = get_as(&state, &bad_flip, OWNER).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "INVALID_PARAMETER");
+
+    let uri = format!("/v1/assets/{}/drawing?axis=z&position=1.25", model.ion_id);
+    let (status, body) = get_as(&state, &uri, OWNER).await;
+    assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    assert_eq!(body["axis"], "z");
+    let lines = body["lines"].as_array().unwrap();
+    for line in lines {
+        assert_eq!(line["elementId"], WALL, "{line}");
+        for (point, paper) in drawn_points(line).iter().zip(["paperStart", "paperEnd"]) {
+            assert!(point[Z] <= 1.25 + ROUNDING_METRES, "{line}");
+            assert_eq!(
+                line[paper],
+                serde_json::json!([point[X], point[Y]]),
+                "{line}"
+            );
+        }
+    }
+
+    let lying_on = |height: f64| {
+        lines.iter().filter(move |line| {
+            drawn_points(line)
+                .iter()
+                .all(|point| close(point[Z], height))
+        })
+    };
+    assert!(lying_on(1.25).count() >= 8, "{body}");
+    assert!(lying_on(1.25).all(|line| line["hidden"] == false), "{body}");
+
+    let sill: Vec<&Value> = lying_on(0.5)
+        .filter(|line| {
+            drawn_points(line)
+                .iter()
+                .all(|point| close(point[Y].abs(), 0.15) && point[X].abs() <= 0.6 + ROUNDING_METRES)
+        })
+        .collect();
+    assert!(!sill.is_empty(), "{body}");
+    assert!(sill.iter().all(|line| line["hidden"] == false), "{sill:?}");
 }
 
 async fn get_bytes(state: &Arc<AppState>, uri: &str) -> (StatusCode, Vec<u8>) {

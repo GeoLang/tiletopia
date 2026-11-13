@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::AppState;
 use crate::api_keys::{ApiKey, Permission, RateLimitResult, hash_presented_key};
-use crate::global_terrain::GlobalTerrain;
+use tiletopia_core::mesh_tiler::MESH_BATCH_DIRECTORY;
 
 pub const TILETOPIA_READ_SCOPE: &str = "tiletopia:read";
 pub const TILETOPIA_WRITE_SCOPE: &str = "tiletopia:write";
@@ -215,13 +215,18 @@ pub fn is_public_read(method: &Method, path: &str) -> bool {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
     match segments.as_slice() {
-        // 3D Tiles: the tileset and the tile payloads it references. Exactly one
-        // trailing segment, matching the route: the tilers encode octree depth
-        // into the filename ("037.glb"), never into directories, so a nested tile
-        // path is not something this server can serve. See the note on the route
-        // in lib.rs before widening either side.
+        // 3D Tiles: the tileset and the tile payloads it references
         ["api", "v1", "assets", _, "tileset.json"] => true,
         ["api", "v1", "assets", _, "tiles", _] => true,
+        [
+            "api",
+            "v1",
+            "assets",
+            _,
+            crate::job_queue::IFC_PIECE_DIRECTORY | MESH_BATCH_DIRECTORY,
+            _,
+            ..,
+        ] => true,
         // the external tiler references its tile content as "data/RC0000.glb",
         // one trailing segment the same way
         ["api", "v1", "assets", _, "data", _] => true,
@@ -258,6 +263,18 @@ pub fn is_public_read(method: &Method, path: &str) -> bool {
         // segments are all matched, so the POST compute routes under
         // /api/v1/analysis/ stay gated.
         ["api", "v1", "analysis", "xyz", _, _, _, _] => true,
+
+        ["api", "v1", "buildings", "osm", "tileset.json"] => true,
+        [
+            "api",
+            "v1",
+            "buildings",
+            "osm",
+            "subtrees" | "content",
+            _,
+            _,
+            _,
+        ] => true,
 
         _ => false,
     }
@@ -432,15 +449,17 @@ pub fn request_token<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> Option<&'a str
     token.filter(|t| !t.is_empty())
 }
 
-fn is_global_terrain_endpoint(global_terrain: &GlobalTerrain, method: &Method, path: &str) -> bool {
+fn is_global_layer_endpoint(state: &AppState, method: &Method, path: &str) -> bool {
     if *method != Method::GET {
         return false;
     }
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    // createWorldTerrainAsync takes no token option and asks for one fixed asset id
+    // createWorldTerrainAsync and createOsmBuildingsAsync take no token option and ask for one fixed asset id each
     matches!(
         segments.as_slice(),
-        ["v1", "assets", id, "endpoint"] if global_terrain.is_named_by_ion_id(id)
+        ["v1", "assets", id, "endpoint"]
+            if state.global_terrain.is_named_by_ion_id(id)
+                || state.osm_buildings.is_named_by_ion_id(id)
     )
 }
 
@@ -481,11 +500,7 @@ pub async fn auth_middleware(
     }
 
     if is_public_read(request.method(), request.uri().path())
-        || is_global_terrain_endpoint(
-            &state.global_terrain,
-            request.method(),
-            request.uri().path(),
-        )
+        || is_global_layer_endpoint(&state, request.method(), request.uri().path())
     {
         return Ok(next.run(request).await);
     }
@@ -692,43 +707,29 @@ mod tests {
     }
 
     #[test]
+    fn nested_child_tileset_reads_are_public() {
+        for path in [
+            "/api/v1/assets/abc/ifc-pieces/3/tileset.json",
+            "/api/v1/assets/abc/ifc-pieces/3/mesh-batches/0/tiles/037.glb",
+            "/api/v1/assets/abc/mesh-batches/1/tiles/037.glb",
+        ] {
+            assert!(is_public_read(&Method::GET, path), "GET {path}");
+        }
+        assert!(!is_public_read(
+            &Method::GET,
+            "/api/v1/assets/abc/ifc-pieces"
+        ));
+        assert!(!is_public_read(
+            &Method::GET,
+            "/api/v1/assets/abc/elements/3/volume"
+        ));
+    }
+
+    #[test]
     fn ion_asset_reads_are_gated() {
         for path in ["/v1/assets", "/v1/assets/1", "/v1/assets/1/endpoint"] {
             assert!(!is_public_read(&Method::GET, path), "GET {path}");
         }
-    }
-
-    #[test]
-    fn only_the_configured_id_endpoint_skips_the_token() {
-        let global_terrain = GlobalTerrain::new(crate::global_terrain::GlobalTerrainSettings {
-            dem_url: None,
-            geoid_url: None,
-            coarse_url: None,
-            cache_dir: None,
-            cache_bytes: 1,
-            ion_asset_id: Some(1),
-        });
-        assert!(is_global_terrain_endpoint(
-            &global_terrain,
-            &Method::GET,
-            "/v1/assets/1/endpoint"
-        ));
-        for path in [
-            "/v1/assets/2/endpoint",
-            "/v1/assets/1",
-            "/v1/assets/1/uploadComplete",
-            "/v1/assets",
-        ] {
-            assert!(
-                !is_global_terrain_endpoint(&global_terrain, &Method::GET, path),
-                "GET {path}"
-            );
-        }
-        assert!(!is_global_terrain_endpoint(
-            &global_terrain,
-            &Method::POST,
-            "/v1/assets/1/endpoint"
-        ));
     }
 
     #[test]

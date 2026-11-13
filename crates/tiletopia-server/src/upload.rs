@@ -199,6 +199,7 @@ pub async fn upload_asset(
         units,
         photogrammetry_preset,
         base_asset_id,
+        carries_ids,
     } = match read_fields(&mut multipart, &asset_dir).await {
         Ok(fields) => fields,
         Err(error) => return Err(discard(&asset_dir, error).await),
@@ -293,6 +294,15 @@ pub async fn upload_asset(
             &asset_dir,
             bad_request(format!(
                 "{asset_name}: texture_compression applies to meshes the native tiler takes"
+            )),
+        )
+        .await);
+    }
+    if carries_ids && extension != "ifc" && extension != "ifczip" {
+        return Err(discard(
+            &asset_dir,
+            bad_request(format!(
+                "{asset_name}: ids applies to ifc and ifczip uploads"
             )),
         )
         .await);
@@ -476,6 +486,7 @@ struct UploadFields {
     units: Option<DrawingUnit>,
     photogrammetry_preset: Option<PhotogrammetryPreset>,
     base_asset_id: Option<String>,
+    carries_ids: bool,
 }
 
 async fn read_fields(
@@ -496,8 +507,8 @@ async fn read_fields(
         units: None,
         photogrammetry_preset: None,
         base_asset_id: None,
+        carries_ids: false,
     };
-    let mut stored_ids = false;
 
     while let Some(mut field) = multipart.next_field().await? {
         let field_name = field.name().unwrap_or("").to_string();
@@ -574,7 +585,7 @@ async fn read_fields(
                 fields.streamed_path = Some(path);
             }
             "ids" => {
-                if stored_ids {
+                if fields.carries_ids {
                     return Err(bad_request("the upload has more than one ids field"));
                 }
                 let file_name = field
@@ -585,19 +596,28 @@ async fn read_fields(
                 if lowercase_extension(Path::new(&file_name)) != "ids" {
                     return Err(bad_request(format!("{file_name} is not an .ids file")));
                 }
-                let stored = asset_dir.join(IDS_DIR).join(STORED_IDS_FILE);
-                write_field(&mut field, &stored).await?;
-                let length = tokio::fs::metadata(&stored)
+                let mut specification = Vec::new();
+                while let Some(chunk) = field
+                    .chunk()
                     .await
-                    .map_err(|_| server_error("could not write the uploaded file"))?
-                    .len();
-                if length > MOST_IDS_UPLOAD_BYTES as u64 {
-                    return Err(bad_request("the IDS file is longer than 16 MiB"));
+                    .map_err(|_| bad_request("could not read the ids field"))?
+                {
+                    if specification.len() + chunk.len() > MOST_IDS_UPLOAD_BYTES {
+                        return Err(bad_request("the IDS file is longer than 16 MiB"));
+                    }
+                    specification.extend_from_slice(&chunk);
                 }
-                tokio::fs::write(asset_dir.join(IDS_DIR).join(FILE_NAME_FILE), &file_name)
+                let ids_dir = asset_dir.join(IDS_DIR);
+                tokio::fs::create_dir_all(&ids_dir)
+                    .await
+                    .map_err(|_| server_error("could not create the upload directory"))?;
+                tokio::fs::write(ids_dir.join(STORED_IDS_FILE), &specification)
                     .await
                     .map_err(|_| server_error("could not write the uploaded file"))?;
-                stored_ids = true;
+                tokio::fs::write(ids_dir.join(FILE_NAME_FILE), &file_name)
+                    .await
+                    .map_err(|_| server_error("could not write the uploaded file"))?;
+                fields.carries_ids = true;
             }
             _ => {}
         }
@@ -882,6 +902,46 @@ mod tests {
 
         assert_eq!(text.len(), 8 * FILLER_FRAME.len());
         assert!(multipart.next_field().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_ids_field_past_the_cap_is_refused_before_it_is_written() {
+        use axum::extract::DefaultBodyLimit;
+        use tower::{Layer, ServiceExt};
+
+        let head = b"--bound\r\nContent-Disposition: form-data; name=\"ids\"; filename=\"walls.ids\"\r\n\r\n";
+        let filler = vec![b'x'; MOST_IDS_UPLOAD_BYTES + 1];
+        let body = [
+            head.as_slice(),
+            filler.as_slice(),
+            b"\r\n--bound--\r\n".as_slice(),
+        ]
+        .concat();
+        let body_length = body.len();
+        let request = Request::builder()
+            .header("content-type", "multipart/form-data; boundary=bound")
+            .body(Body::from(body))
+            .unwrap();
+        // axum's Multipart reads at most 2 MB unless a DefaultBodyLimit layer saw the request
+        let request = DefaultBodyLimit::disable()
+            .layer(tower::service_fn(|request: Request<Body>| async move {
+                Ok::<_, std::convert::Infallible>(request)
+            }))
+            .oneshot(request)
+            .await
+            .unwrap();
+        let mut multipart = UploadMultipart::with_limit_awaiting_field(request, body_length)
+            .await
+            .unwrap();
+        let asset_dir = tempfile::tempdir().unwrap();
+
+        let Err(refusal) = read_fields(&mut multipart, asset_dir.path()).await else {
+            panic!("an ids field past 16 MiB was accepted");
+        };
+
+        assert_eq!(refusal.0, StatusCode::BAD_REQUEST);
+        assert!(refusal.1.contains("16 MiB"), "{}", refusal.1);
+        assert!(!asset_dir.path().join(IDS_DIR).exists());
     }
 
     #[tokio::test]

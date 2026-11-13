@@ -7,7 +7,7 @@ use ifc_lite_core::{
     resolve_unit_by_ref, slot,
 };
 use ifc_lite_geometry::GeometryRouter;
-use ifc_lite_processing::data_model::property::PropertyDecoder;
+use ifc_lite_processing::data_model::property::{PropertyDecoder, PropertyKind};
 use ifc_lite_processing::data_model::quantity::{QuantityDecodeMode, decode_quantity_records};
 use ifc_lite_processing::data_model::render::flat::{flat_property, new_property_decoder};
 use ifc_lite_processing::data_model::rows::{PropValue, ValueKind};
@@ -39,7 +39,8 @@ pub const WARNING_STOREY_WITHOUT_HEIGHT: &str = "storey_without_height";
 pub type ExtractionWarnings = BTreeMap<&'static str, u64>;
 
 const MAX_SPATIAL_DEPTH: usize = 64;
-const MAX_PROPERTIES_PER_ELEMENT: usize = 10_000;
+pub(crate) const MAX_PROPERTIES_PER_ELEMENT: usize = 10_000;
+pub(crate) const ELEMENT_TAG_KEY: &str = "Element.Tag";
 const MAX_STORED_TEXT_BYTES: usize = 64 * 1024;
 const MIN_PROPERTY_ROW_BUDGET: u64 = 4_000_000;
 // ifc-lite-core's COMPLEX_PROPERTY_BYTES_PER_INPUT_BYTE and ifc-lite-processing's material table allow 16 too
@@ -274,7 +275,7 @@ pub struct IfcScan {
     pub(crate) products: Vec<ScannedSpan>,
     pub(crate) relations: Vec<ScannedRelation>,
     pub(crate) georef_types: Vec<(u32, IfcType)>,
-    pub(crate) true_north_context: Option<u32>,
+    pub(crate) representation_contexts: Vec<u32>,
 }
 
 #[derive(Default)]
@@ -485,7 +486,7 @@ fn tree_kind(class: &IfcType) -> TreeKind {
     }
 }
 
-fn property_key(set_name: &str, entry_name: &str) -> String {
+pub(crate) fn property_key(set_name: &str, entry_name: &str) -> String {
     if set_name.is_empty() {
         entry_name.to_string()
     } else {
@@ -719,6 +720,67 @@ fn material_members(
     }
 }
 
+pub(crate) struct SetRow {
+    pub(crate) value: PropValue,
+    pub(crate) single_value_id: Option<u32>,
+}
+
+pub(crate) struct SetRows {
+    pub(crate) name: String,
+    pub(crate) members: Vec<DecodedEntity>,
+    pub(crate) rows: Vec<SetRow>,
+}
+
+pub(crate) fn property_set_rows(
+    property_decoder: &mut PropertyDecoder,
+    decoder: &mut EntityDecoder<'_>,
+    definition: &DecodedEntity,
+) -> Option<SetRows> {
+    let set = property_decoder.decode_set(decoder, definition)?;
+    let members = definition
+        .attr(slot::IfcPropertySet::HAS_PROPERTIES)
+        .and_then(|attribute| decoder.resolve_ref_list(attribute).ok())
+        .unwrap_or_default();
+    // ifc-lite's decode_set keeps an IfcPropertySingleValue, in member order, when its Name is a string
+    let mut single_value_ids = members
+        .iter()
+        .filter(|member| {
+            member.ifc_type == IfcType::IfcPropertySingleValue
+                && member
+                    .string_at(slot::IfcPropertySingleValue::NAME)
+                    .is_some()
+        })
+        .map(|member| member.id);
+    let rows = set
+        .properties
+        .iter()
+        .filter_map(|row| {
+            let single_value_id = (row.kind == PropertyKind::Single)
+                .then(|| single_value_ids.next())
+                .flatten();
+            flat_property(row).map(|value| SetRow {
+                value,
+                single_value_id,
+            })
+        })
+        .collect();
+    Some(SetRows {
+        name: set.name.unwrap_or_default(),
+        members,
+        rows,
+    })
+}
+
+pub(crate) fn numbered_key(counts: &mut HashMap<String, u32>, base: String) -> String {
+    let occurrence = counts.entry(base.clone()).or_insert(0);
+    let key = match *occurrence {
+        0 => base,
+        later => format!("{base}[{later}]"),
+    };
+    *occurrence += 1;
+    key
+}
+
 #[derive(Default)]
 struct CollectedProperties {
     counts: HashMap<String, u32>,
@@ -732,12 +794,7 @@ impl CollectedProperties {
             self.truncated = true;
             return;
         }
-        let occurrence = self.counts.entry(property.key.clone()).or_insert(0);
-        let key = match *occurrence {
-            0 => property.key.clone(),
-            later => format!("{}[{later}]", property.key),
-        };
-        *occurrence += 1;
+        let key = numbered_key(&mut self.counts, property.key.clone());
         self.rows.push(ElementProperty {
             key,
             value: property.value.clone(),
@@ -827,19 +884,14 @@ impl ElementReader<'_> {
         if !self.admit_set_members(references)? {
             return Ok(Vec::new());
         }
-        let Some(set) = self
-            .property_decoder
-            .decode_set(&mut self.decoder, definition)
+        let Some(set) =
+            property_set_rows(&mut self.property_decoder, &mut self.decoder, definition)
         else {
             warn(&mut self.warnings, WARNING_UNDECODABLE_PROPERTY_DEFINITION);
             return Ok(Vec::new());
         };
-        let members = definition
-            .attr(slot::IfcPropertySet::HAS_PROPERTIES)
-            .and_then(|attribute| self.decoder.resolve_ref_list(attribute).ok())
-            .unwrap_or_default();
         let mut unit_overrides = HashMap::new();
-        for member in &members {
+        for member in &set.members {
             if member.ifc_type != IfcType::IfcPropertySingleValue {
                 continue;
             }
@@ -852,11 +904,11 @@ impl ElementReader<'_> {
                 unit_overrides.insert(name.to_string(), symbol);
             }
         }
-        let set_name = stored_text(&set.name.unwrap_or_default(), &mut self.warnings);
+        let set_name = stored_text(&set.name, &mut self.warnings);
         Ok(set
-            .properties
-            .iter()
-            .filter_map(flat_property)
+            .rows
+            .into_iter()
+            .map(|row| row.value)
             .map(|property| {
                 let value = typed_value(&property, &mut self.warnings);
                 let units = match value {
@@ -1064,7 +1116,7 @@ impl ElementReader<'_> {
     ) -> Result<Vec<ElementProperty>, IngestError> {
         let mut collected = CollectedProperties::default();
         if let Some(tag) = tag {
-            collected.add(&text_property("Element.Tag".to_string(), tag));
+            collected.add(&text_property(ELEMENT_TAG_KEY.to_string(), tag));
         }
         let mut seen_definitions = HashSet::new();
         let own_definition_count = self
@@ -1229,6 +1281,40 @@ pub fn extract_elements_from_scan(
     )
 }
 
+fn parent_of_element(
+    relations: &ModelRelations,
+    project_id: Option<u32>,
+    express_id: u32,
+    warnings: &mut ExtractionWarnings,
+) -> Option<u32> {
+    match (relations.parent_of.get(&express_id).copied(), project_id) {
+        (Some(parent), _) => Some(parent),
+        (None, Some(project_id)) if project_id != express_id => {
+            warn(warnings, WARNING_UNCONTAINED_ELEMENT);
+            Some(project_id)
+        }
+        (None, _) => None,
+    }
+}
+
+pub fn element_parent(source: &[u8], express_id: u32) -> Result<Option<u32>, IngestError> {
+    let scanned = crate::ifc_reader::scan_ifc(source);
+    let decoder = EntityDecoder::with_arc_index(source, Arc::clone(&scanned.scan.index));
+    let mut warnings = ExtractionWarnings::new();
+    let relations = ModelRelations::from_spans(
+        &decoder,
+        &scanned.scan.relations,
+        ExtractionBudgets::for_input(source.len()).property_rows,
+        &mut warnings,
+    )?;
+    Ok(parent_of_element(
+        &relations,
+        find_project_id(source),
+        express_id,
+        &mut warnings,
+    ))
+}
+
 fn extract_elements_within(
     source: &[u8],
     scan: &IfcScan,
@@ -1297,15 +1383,12 @@ fn extract_elements_within(
             continue;
         }
 
-        let declared_parent = reader.relations.parent_of.get(&express_id).copied();
-        let parent_express_id = match (declared_parent, project_id) {
-            (Some(parent), _) => Some(parent),
-            (None, Some(project_id)) if project_id != express_id => {
-                warn(&mut reader.warnings, WARNING_UNCONTAINED_ELEMENT);
-                Some(project_id)
-            }
-            (None, _) => None,
-        };
+        let parent_express_id = parent_of_element(
+            &reader.relations,
+            project_id,
+            express_id,
+            &mut reader.warnings,
+        );
         let storey = reader.relations.storey_of(express_id, &mut reader.warnings);
         // spatial elements keep LongName in the position an IfcElement keeps Tag
         let tag = entity
@@ -1465,6 +1548,25 @@ END-ISO-10303-21;
             },
         )
         .unwrap();
+        let global_ids: Vec<&str> = from_scan
+            .iter()
+            .map(|element| element.global_id.as_str())
+            .collect();
+        assert_eq!(
+            global_ids,
+            ["legacyproject", "legacystorey", "legacydoor", "legacywall"]
+        );
+        let door = &from_scan[2];
+        assert_eq!(door.parent_express_id, Some(4));
+        assert_eq!(door.storey.as_deref(), Some("Ground"));
+        assert_eq!(
+            property(door, "Type.Name").value,
+            PropertyValue::Text("Steel Style".to_string())
+        );
+        assert_eq!(
+            warnings,
+            ExtractionWarnings::from([(WARNING_STOREY_WITHOUT_HEIGHT, 1)])
+        );
         assert_eq!(from_scan, direct);
         assert_eq!(warnings, direct_warnings);
     }

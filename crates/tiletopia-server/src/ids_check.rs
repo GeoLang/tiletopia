@@ -271,7 +271,11 @@ async fn receive_ids_file(multipart: &mut Multipart, upload: &Path) -> Result<St
     ids_file_name.ok_or_else(|| ids_refusal("no file field in the upload"))
 }
 
-async fn claim_check(db: &Database, asset_id: Uuid, ids_file_name: &str) -> Result<(), IonError> {
+async fn claim_check(
+    db: &Database,
+    asset_id: Uuid,
+    ids_file_name: &str,
+) -> Result<bool, sqlx::Error> {
     let claimed = sqlx::query(
         "INSERT INTO ids_checks (asset_id, ids_file_name, status) VALUES (?, ?, ?) \
          ON CONFLICT (asset_id) DO UPDATE SET ids_file_name = excluded.ids_file_name, \
@@ -282,19 +286,11 @@ async fn claim_check(db: &Database, asset_id: Uuid, ids_file_name: &str) -> Resu
     .bind(ids_file_name)
     .bind(CheckStatus::Running.stored_name())
     .execute(&db.pool)
-    .await
-    .map_err(start_failure)?;
-    if claimed.rows_affected() == 0 {
-        return Err(element_error(
-            StatusCode::CONFLICT,
-            "IDS_CHECK_RUNNING",
-            format!("asset {asset_id} is already being checked against an IDS file"),
-        ));
-    }
-    Ok(())
+    .await?;
+    Ok(claimed.rows_affected() > 0)
 }
 
-async fn store_ids_file(upload: &Path, asset_dir: &Path) -> std::io::Result<()> {
+async fn store_ids_file(upload: &Path, asset_dir: &Path, file_name: &str) -> std::io::Result<()> {
     let ids_dir = asset_dir.join(IDS_DIR);
     tokio::fs::create_dir_all(&ids_dir).await?;
     match tokio::fs::remove_file(ids_dir.join(REPORT_FILE)).await {
@@ -302,7 +298,8 @@ async fn store_ids_file(upload: &Path, asset_dir: &Path) -> std::io::Result<()> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    tokio::fs::rename(upload, ids_dir.join(STORED_IDS_FILE)).await
+    tokio::fs::rename(upload, ids_dir.join(STORED_IDS_FILE)).await?;
+    tokio::fs::write(ids_dir.join(FILE_NAME_FILE), file_name).await
 }
 
 async fn settle_check(
@@ -346,9 +343,21 @@ async fn start_check(
     let started = async {
         let upload = scratch.join(UPLOAD_FILE);
         let ids_file_name = receive_ids_file(&mut multipart, &upload).await?;
-        claim_check(&state.db, asset.id, &ids_file_name).await?;
+        if !claim_check(&state.db, asset.id, &ids_file_name)
+            .await
+            .map_err(start_failure)?
+        {
+            return Err(element_error(
+                StatusCode::CONFLICT,
+                "IDS_CHECK_RUNNING",
+                format!(
+                    "asset {} is already being checked against an IDS file",
+                    asset.id
+                ),
+            ));
+        }
         let asset_dir = state.data_dir.join(asset.id.to_string());
-        if let Err(error) = store_ids_file(&upload, &asset_dir).await {
+        if let Err(error) = store_ids_file(&upload, &asset_dir, &ids_file_name).await {
             let outcome = Err(format!("storing the IDS file failed: {error}"));
             settle_check(&state.db, asset.id, &outcome)
                 .await
@@ -452,21 +461,6 @@ fn specification_path(data_dir: &Path, asset_id: Uuid) -> PathBuf {
         .join(STORED_IDS_FILE)
 }
 
-fn ion_message(error: &IonError) -> String {
-    error
-        .1
-        .0
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("the IDS check could not be started")
-        .to_string()
-}
-
-fn check_is_running(error: &IonError) -> bool {
-    error.0 == StatusCode::CONFLICT
-        && error.1.0.get("code").and_then(serde_json::Value::as_str) == Some("IDS_CHECK_RUNNING")
-}
-
 async fn ids_file_name(db: &Database, data_dir: &Path, asset_id: Uuid) -> Result<String, String> {
     let path = data_dir
         .join(asset_id.to_string())
@@ -488,7 +482,7 @@ async fn ids_file_name(db: &Database, data_dir: &Path, asset_id: Uuid) -> Result
             .fetch_optional(&db.pool)
             .await
             .map_err(|error| format!("reading the IDS file name of {asset_id} failed: {error}"))?;
-    Ok(stored.unwrap_or_else(|| STORED_IDS_FILE.to_string()))
+    stored.ok_or_else(|| format!("asset {asset_id} has an IDS file with no file name"))
 }
 
 struct StoredSpecification {
@@ -639,10 +633,11 @@ async fn start_check_of_ready_asset(
         )
         .await?;
     }
-    match claim_check(db, asset_id, &specification.file_name).await {
-        Ok(()) => {}
-        Err(error) if check_is_running(&error) => return Ok(()),
-        Err(error) => return Err(ion_message(&error)),
+    let claimed = claim_check(db, asset_id, &specification.file_name)
+        .await
+        .map_err(|error| format!("claiming the IDS check of {asset_id} failed: {error}"))?;
+    if !claimed {
+        return Ok(());
     }
     let Some(sidecar) = sidecar else {
         let outcome = Err(sidecar_unset_message());

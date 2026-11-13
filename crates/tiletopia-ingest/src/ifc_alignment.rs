@@ -26,10 +26,20 @@ struct Record {
     end: usize,
 }
 
+#[derive(Clone, Copy)]
+struct FileUnits {
+    metres: f64,
+    radians: f64,
+}
+
 pub fn alignments_of(source: &[u8]) -> Vec<AlignmentCurve> {
     let records = index_records(source);
     let children = child_lists(source, &records);
     let mut decoder = EntityDecoder::new(source);
+    let units = FileUnits {
+        metres: decoder.length_unit_scale(),
+        radians: decoder.plane_angle_to_radians(),
+    };
     let mut curves = Vec::new();
     for (id, record) in &records {
         if record.ifc_type != IfcType::IfcAlignment {
@@ -44,7 +54,7 @@ pub fn alignments_of(source: &[u8]) -> Vec<AlignmentCurve> {
             .filter(|name| !name.is_empty())
             .unwrap_or(&global_id)
             .to_string();
-        let (stations, approximate) = curve_of(*id, &records, &children, &mut decoder);
+        let (stations, approximate) = curve_of(*id, &records, &children, &mut decoder, units);
         let length = stations
             .last()
             .map(|station| station.distance)
@@ -82,7 +92,7 @@ fn child_lists(
 ) -> std::collections::HashMap<u32, Vec<u32>> {
     let mut children = std::collections::HashMap::<u32, Vec<u32>>::new();
     let mut decoder = EntityDecoder::new(source);
-    for (id, record) in records {
+    for record in records.values() {
         if record.ifc_type != IfcType::IfcRelNests && record.ifc_type != IfcType::IfcRelAggregates {
             continue;
         }
@@ -96,7 +106,6 @@ fn child_lists(
             continue;
         };
         children.entry(parent).or_default().extend(related);
-        let _ = id;
     }
     children
 }
@@ -106,6 +115,7 @@ fn curve_of(
     records: &std::collections::BTreeMap<u32, Record>,
     children: &std::collections::HashMap<u32, Vec<u32>>,
     decoder: &mut EntityDecoder<'_>,
+    units: FileUnits,
 ) -> (Vec<AlignmentStation>, bool) {
     let mut segments = Vec::new();
     walk_children(
@@ -117,7 +127,7 @@ fn curve_of(
         &mut std::collections::HashSet::new(),
     );
     if !segments.is_empty() {
-        return sample_segments(&segments, records, decoder);
+        return sample_segments(&segments, records, decoder, units);
     }
     let mut polylines = Vec::new();
     walk_refs(
@@ -128,7 +138,7 @@ fn curve_of(
         &mut std::collections::HashSet::new(),
     );
     if let Some(polyline) = polylines.first() {
-        return (sample_polyline(*polyline, records, decoder), false);
+        return (sample_polyline(*polyline, records, decoder, units), false);
     }
     (Vec::new(), false)
 }
@@ -209,8 +219,9 @@ fn sample_segments(
     segments: &[u32],
     records: &std::collections::BTreeMap<u32, Record>,
     decoder: &mut EntityDecoder<'_>,
+    units: FileUnits,
 ) -> (Vec<AlignmentStation>, bool) {
-    let mut points = Vec::new();
+    let mut runs = Vec::new();
     let mut approximate = false;
     for id in segments {
         let Some(record) = records.get(id) else {
@@ -222,11 +233,11 @@ fn sample_segments(
         let Some(start_id) = segment.get_ref(2) else {
             continue;
         };
-        let Some(start) = point_of(decoder, start_id) else {
+        let Some(start) = point_of(decoder, start_id, units) else {
             continue;
         };
-        let direction = segment.get_float(3).unwrap_or(0.0);
-        let length = segment.get_float(6).unwrap_or(0.0);
+        let direction = segment.get_float(3).unwrap_or(0.0) * units.radians;
+        let length = segment.get_float(6).unwrap_or(0.0) * units.metres;
         if !length.is_finite() || length <= 0.0 || !direction.is_finite() {
             continue;
         }
@@ -236,25 +247,29 @@ fn sample_segments(
             .unwrap_or("LINE");
         let radius = segment
             .get_float(4)
-            .filter(|radius| radius.is_finite() && *radius != 0.0);
+            .filter(|radius| radius.is_finite() && *radius != 0.0)
+            .map(|radius| radius * units.metres);
+        let mut run = Vec::new();
         match (kind, radius) {
-            ("LINE", _) => push_line(&mut points, start, direction, length),
+            ("LINE", _) => push_line(&mut run, start, direction, length),
             ("CIRCULARARC", Some(radius)) => {
-                push_arc(&mut points, start, direction, length, radius);
+                push_arc(&mut run, start, direction, length, radius);
             }
             _ => {
                 approximate = true;
-                push_line(&mut points, start, direction, length);
+                push_line(&mut run, start, direction, length);
             }
         }
+        runs.push(run);
     }
-    (stations_from_points(&points), approximate)
+    (stations_from_runs(&runs), approximate)
 }
 
 fn sample_polyline(
     id: u32,
     records: &std::collections::BTreeMap<u32, Record>,
     decoder: &mut EntityDecoder<'_>,
+    units: FileUnits,
 ) -> Vec<AlignmentStation> {
     let Some(record) = records.get(&id) else {
         return Vec::new();
@@ -267,14 +282,18 @@ fn sample_polyline(
     };
     let positions: Vec<[f64; 3]> = points
         .iter()
-        .filter_map(|point| point_of(decoder, *point))
+        .filter_map(|point| point_of(decoder, *point, units))
         .collect();
-    stations_from_points(&positions)
+    stations_from_runs(&[positions])
 }
 
-fn point_of(decoder: &mut EntityDecoder<'_>, id: u32) -> Option<[f64; 3]> {
+fn point_of(decoder: &mut EntityDecoder<'_>, id: u32, units: FileUnits) -> Option<[f64; 3]> {
     let (x, y, z) = decoder.get_cartesian_point_fast(id)?;
-    (x.is_finite() && y.is_finite() && z.is_finite()).then_some([x, y, z])
+    (x.is_finite() && y.is_finite() && z.is_finite()).then_some([
+        x * units.metres,
+        y * units.metres,
+        z * units.metres,
+    ])
 }
 
 fn push_line(points: &mut Vec<[f64; 3]>, start: [f64; 3], direction: f64, length: f64) {
@@ -302,28 +321,25 @@ fn push_arc(points: &mut Vec<[f64; 3]>, start: [f64; 3], direction: f64, length:
     }
 }
 
-fn stations_from_points(points: &[[f64; 3]]) -> Vec<AlignmentStation> {
-    if points.is_empty() {
-        return Vec::new();
-    }
-    let mut raw = Vec::with_capacity(points.len());
-    let mut distance = 0.0;
-    for (index, point) in points.iter().enumerate() {
-        if index > 0 {
-            distance += length(sub(*point, points[index - 1]));
+fn stations_from_runs(runs: &[Vec<[f64; 3]>]) -> Vec<AlignmentStation> {
+    let mut paths: Vec<Vec<[f64; 3]>> = Vec::new();
+    for run in runs {
+        let continues = paths
+            .last()
+            .and_then(|path| path.last())
+            .zip(run.first())
+            .is_some_and(|(end, start)| unit(sub(*start, *end)).is_none());
+        match paths.last_mut() {
+            Some(path) if continues => path.extend(run),
+            _ => paths.push(run.clone()),
         }
-        let ahead = if index + 1 < points.len() {
-            sub(points[index + 1], *point)
-        } else if index > 0 {
-            sub(*point, points[index - 1])
-        } else {
-            [1.0, 0.0, 0.0]
-        };
-        raw.push(AlignmentStation {
-            distance,
-            position: *point,
-            tangent: unit(ahead).unwrap_or([1.0, 0.0, 0.0]),
-        });
+    }
+    let mut raw = Vec::new();
+    for path in &paths {
+        let start_distance = raw
+            .last()
+            .map_or(0.0, |station: &AlignmentStation| station.distance);
+        raw.extend(path_stations(path, start_distance));
     }
     if raw.len() <= MAX_STATIONS {
         return raw;
@@ -344,6 +360,38 @@ fn stations_from_points(points: &[[f64; 3]]) -> Vec<AlignmentStation> {
         }
     }
     kept
+}
+
+fn path_stations(path: &[[f64; 3]], start_distance: f64) -> Vec<AlignmentStation> {
+    let Some((first, rest)) = path.split_first() else {
+        return Vec::new();
+    };
+    let mut stations = Vec::new();
+    let mut at = *first;
+    let mut distance = start_distance;
+    let mut heading = None;
+    for point in rest {
+        let step = sub(*point, at);
+        let Some(direction) = unit(step) else {
+            continue;
+        };
+        stations.push(AlignmentStation {
+            distance,
+            position: at,
+            tangent: direction,
+        });
+        distance += length(step);
+        at = *point;
+        heading = Some(direction);
+    }
+    if let Some(tangent) = heading {
+        stations.push(AlignmentStation {
+            distance,
+            position: at,
+            tangent,
+        });
+    }
+    stations
 }
 
 fn sub(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
@@ -481,6 +529,73 @@ mod tests {
         assert!((end.position[0] - 110.0).abs() < 0.05, "{:?}", end.position);
         assert!((end.position[1] + 10.0).abs() < 0.05, "{:?}", end.position);
         assert!(!curves[0].approximate);
+    }
+
+    #[test]
+    fn segments_that_meet_share_one_station_heading_along_the_road() {
+        let source = file(
+            "#1=IFCALIGNMENT('aligngid',$,'North',$,$,$,$);\n\
+             #10=IFCALIGNMENTSEGMENT('first',$,$,$,$,$,$,#11);\n\
+             #11=IFCALIGNMENTHORIZONTALSEGMENT('s','e',#12,1.5707963267948966,$,$,10.,$,.LINE.);\n\
+             #12=IFCCARTESIANPOINT((0.,0.));\n\
+             #13=IFCALIGNMENTSEGMENT('second',$,$,$,$,$,$,#14);\n\
+             #14=IFCALIGNMENTHORIZONTALSEGMENT('s','e',#15,1.5707963267948966,$,$,10.,$,.LINE.);\n\
+             #15=IFCCARTESIANPOINT((0.,10.));\n\
+             #20=IFCRELNESTS('nest',$,$,$,#1,(#10,#13));\n",
+        );
+        let stations = &alignments_of(source.as_bytes())[0].stations;
+        let distances: Vec<f64> = stations.iter().map(|station| station.distance).collect();
+        assert_eq!(distances.len(), 3, "{stations:?}");
+        assert!((distances[1] - 10.0).abs() < 1.0e-6, "{stations:?}");
+        assert!((distances[2] - 20.0).abs() < 1.0e-6, "{stations:?}");
+        for station in stations {
+            assert!(
+                station.tangent[0].abs() < 1.0e-6 && (station.tangent[1] - 1.0).abs() < 1.0e-6,
+                "{station:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gap_between_segments_adds_no_distance() {
+        let source = file(
+            "#1=IFCALIGNMENT('aligngid',$,'Gap',$,$,$,$);\n\
+             #10=IFCALIGNMENTSEGMENT('first',$,$,$,$,$,$,#11);\n\
+             #11=IFCALIGNMENTHORIZONTALSEGMENT('s','e',#12,0.,$,$,5.,$,.LINE.);\n\
+             #12=IFCCARTESIANPOINT((0.,0.));\n\
+             #13=IFCALIGNMENTSEGMENT('second',$,$,$,$,$,$,#14);\n\
+             #14=IFCALIGNMENTHORIZONTALSEGMENT('s','e',#15,0.,$,$,5.,$,.LINE.);\n\
+             #15=IFCCARTESIANPOINT((100.,0.));\n\
+             #20=IFCRELNESTS('nest',$,$,$,#1,(#10,#13));\n",
+        );
+        let curve = &alignments_of(source.as_bytes())[0];
+        assert!((curve.length - 10.0).abs() < 1.0e-6, "{curve:?}");
+        assert_eq!(curve.stations.last().unwrap().position, [105.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn millimetres_and_degrees_become_metres_and_radians() {
+        let source = file(
+            "#1=IFCALIGNMENT('aligngid',$,'Units',$,$,$,$);\n\
+             #2=IFCPROJECT('project',$,'Project',$,$,$,$,$,#3);\n\
+             #3=IFCUNITASSIGNMENT((#4,#5));\n\
+             #4=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);\n\
+             #5=IFCCONVERSIONBASEDUNIT(#6,.PLANEANGLEUNIT.,'DEGREE',#7);\n\
+             #6=IFCDIMENSIONALEXPONENTS(0,0,0,0,0,0,0);\n\
+             #7=IFCMEASUREWITHUNIT(IFCPLANEANGLEMEASURE(0.0174532925199433),#8);\n\
+             #8=IFCSIUNIT(*,.PLANEANGLEUNIT.,$,.RADIAN.);\n\
+             #10=IFCALIGNMENTSEGMENT('seg',$,$,$,$,$,$,#11);\n\
+             #11=IFCALIGNMENTHORIZONTALSEGMENT('s','e',#12,90.,$,$,10000.,$,.LINE.);\n\
+             #12=IFCCARTESIANPOINT((2000.,0.));\n\
+             #20=IFCRELNESTS('nest',$,$,$,#1,(#10));\n",
+        );
+        let curve = &alignments_of(source.as_bytes())[0];
+        assert!((curve.length - 10.0).abs() < 1.0e-6, "{curve:?}");
+        let end = curve.stations.last().unwrap().position;
+        assert!(
+            (end[0] - 2.0).abs() < 1.0e-6 && (end[1] - 10.0).abs() < 1.0e-6,
+            "{end:?}"
+        );
     }
 
     #[test]

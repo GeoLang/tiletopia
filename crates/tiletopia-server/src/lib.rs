@@ -45,6 +45,7 @@ pub mod metrics;
 pub mod model_registry;
 pub mod model_versions;
 pub mod offline_export;
+pub mod osm_buildings;
 pub mod photogrammetry;
 pub mod plugin_registry;
 pub mod portal;
@@ -59,6 +60,7 @@ pub mod stories_api;
 pub mod terrain_api;
 pub mod terrain_bundle;
 pub mod terrain_rgb;
+mod tile_cache;
 #[cfg(feature = "martin")]
 pub mod tilesets;
 pub mod topojson;
@@ -79,6 +81,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
+use tiletopia_core::mesh_tiler::MESH_BATCH_DIRECTORY;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
@@ -120,6 +123,7 @@ pub struct AppState {
     pub analysis_engines: analysis_tiles::AnalysisEngines,
     pub imagery_layers: imagery::ImageryLayers,
     pub global_terrain: global_terrain::GlobalTerrain,
+    pub osm_buildings: osm_buildings::OsmBuildings,
     pub entity_link_store: entity_linking::EntityLinkStore,
     pub ids_check: Option<ids_check::IdsCheckSidecar>,
     /// Sources served under `/martin`. Filled in before [`router`] is called,
@@ -287,15 +291,24 @@ pub fn router(state: Arc<AppState>) -> Router {
 
     let tileset_read_routes = Router::new()
         .route("/api/v1/assets/{id}/tileset.json", get(get_tileset))
-        // {path} captures one segment, which is all a tile name ever is: the
-        // tilers encode octree depth into the filename rather than into
-        // directories, so node [0,3,7] is "037.glb", not "0/3/7.glb" (see
-        // to_filename in tiletopia-core lod.rs:44, mesh_tiler.rs:286, tile.rs:137,
-        // and the matching tiles_dir.join in their writers). If a tiler ever
-        // emits nested child URIs this needs {*path}, and the matching arm in
-        // auth::is_public_read has to widen with it.
         .route("/api/v1/assets/{id}/tiles/{path}", get(get_tile))
         .route("/api/v1/assets/{id}/data/{path}", get(get_data_file))
+        // an ifc piece over the job budget is itself tiled in mesh batches, so child tilesets nest two levels
+        .route(
+            &format!(
+                "/api/v1/assets/{{id}}/{}/{{*path}}",
+                job_queue::IFC_PIECE_DIRECTORY
+            ),
+            get(|state, Path((id, path))| {
+                get_child_tileset_file(state, id, job_queue::IFC_PIECE_DIRECTORY, path)
+            }),
+        )
+        .route(
+            &format!("/api/v1/assets/{{id}}/{MESH_BATCH_DIRECTORY}/{{*path}}"),
+            get(|state, Path((id, path))| {
+                get_child_tileset_file(state, id, MESH_BATCH_DIRECTORY, path)
+            }),
+        )
         // brotli quality 5 saved 40% on balconies-a2 tiles at 36 MB/s a core, quality 9 saved 41% at 9 MB/s
         .layer(
             tower_http::compression::CompressionLayer::new()
@@ -322,6 +335,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(terrain_api::terrain_routes())
         .merge(terrain_bundle::terrain_bundle_routes())
         .merge(global_terrain::global_terrain_routes())
+        .merge(osm_buildings::osm_buildings_routes())
         .merge(terrain_rgb::terrain_rgb_routes())
         .merge(premium_routes::api_key_routes())
         .merge(premium_routes::webhook_routes())
@@ -553,6 +567,24 @@ async fn get_tile(
         return Err(StatusCode::BAD_REQUEST);
     }
     let key = format!("{}/tiles/{}", id, tile_path);
+    let data = state
+        .store
+        .get(&key)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok(data.to_vec())
+}
+
+async fn get_child_tileset_file(
+    State(state): State<Arc<AppState>>,
+    id: Uuid,
+    directory: &str,
+    path: String,
+) -> Result<Vec<u8>, StatusCode> {
+    if path.contains("..") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let key = format!("{id}/{directory}/{path}");
     let data = state
         .store
         .get(&key)

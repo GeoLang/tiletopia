@@ -1,8 +1,6 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::SystemTime;
 
 use axum::{
     Json, Router,
@@ -12,14 +10,16 @@ use axum::{
     routing::get,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use terrano_core::{CogReader, Error as TerranoError, RangeRead};
 use tiletopia_terrain::global_dem::{DemSource, TerrainTileCoord, sampled_terrain_tile};
 
 use crate::AppState;
-use crate::db::Database;
 use crate::http_cache::CachePolicy;
+use crate::ion_compat::ion_asset_id_setting;
 use crate::terrain_api::{encode_quantized_mesh, full_availability, terrain_grid_size};
 use crate::terrain_bundle::cache_headers;
+use crate::tile_cache::{TileAddress, TileCache, cache_bytes_setting, setting_text};
 
 pub const DEM_URL_VAR: &str = "TILETOPIA_GLOBAL_TERRAIN_DEM_URL";
 pub const GEOID_URL_VAR: &str = "TILETOPIA_GLOBAL_TERRAIN_GEOID_URL";
@@ -35,6 +35,7 @@ pub const COPERNICUS_NOTICE: &str = "produced using Copernicus WorldDEM-30 © DL
 
 // a level 7 tile spans 1.40625 degrees, so it touches at most three by three one-degree cells
 const FIRST_DEM_LEVEL: u32 = 7;
+const ONE_ARC_SECOND: f64 = 1.0 / 3600.0;
 // level 14 is the first whose 65 samples per tile step finer than glo-30's one arc-second
 const DEEPEST_LEVEL: u32 = 14;
 
@@ -46,6 +47,7 @@ const MERGE_GAP_BYTES: u64 = 4096;
 const RANGE_CACHE_BYTES: usize = 96 * 1024 * 1024;
 // egm96 at 15 minutes is 1440 by 721 samples
 const MAX_GEOID_SAMPLES: usize = 2_000_000;
+const MAX_COARSE_WINDOW_SAMPLES: usize = 2_000_000;
 const GLOBE_TOLERANCE_DEGREES: f64 = 1e-6;
 // sampled vertex positions land a few ulps past a tile edge that sits on a whole degree
 const CELL_EDGE_TOLERANCE_DEGREES: f64 = 1e-9;
@@ -69,39 +71,15 @@ pub struct GlobalTerrainSettings {
     pub ion_asset_id: Option<i64>,
 }
 
-const DEFAULT_CACHE_MEGABYTES: u64 = 1024;
-
 impl GlobalTerrainSettings {
     pub fn from_env() -> Result<Self, String> {
-        let text = |name: &str| {
-            std::env::var(name)
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        };
-        let cache_megabytes = match text(CACHE_MEGABYTES_VAR) {
-            None => DEFAULT_CACHE_MEGABYTES,
-            Some(raw) => raw
-                .parse::<u64>()
-                .ok()
-                .filter(|&megabytes| megabytes > 0)
-                .ok_or_else(|| {
-                    format!("{CACHE_MEGABYTES_VAR} is {raw:?}, expected a whole number of megabytes above 0")
-                })?,
-        };
-        let ion_asset_id = text(ION_ASSET_ID_VAR)
-            .map(|raw| {
-                raw.parse::<i64>()
-                    .map_err(|_| format!("{ION_ASSET_ID_VAR} is {raw:?}, expected a whole number"))
-            })
-            .transpose()?;
         Ok(GlobalTerrainSettings {
-            dem_url: text(DEM_URL_VAR),
-            geoid_url: text(GEOID_URL_VAR),
-            coarse_url: text(COARSE_URL_VAR),
-            cache_dir: text(CACHE_DIR_VAR).map(PathBuf::from),
-            cache_bytes: cache_megabytes * 1024 * 1024,
-            ion_asset_id,
+            dem_url: setting_text(DEM_URL_VAR),
+            geoid_url: setting_text(GEOID_URL_VAR),
+            coarse_url: setting_text(COARSE_URL_VAR),
+            cache_dir: setting_text(CACHE_DIR_VAR).map(PathBuf::from),
+            cache_bytes: cache_bytes_setting(CACHE_MEGABYTES_VAR)?,
+            ion_asset_id: ion_asset_id_setting(ION_ASSET_ID_VAR)?,
         })
     }
 }
@@ -114,19 +92,21 @@ pub struct GlobalTerrain {
 impl GlobalTerrain {
     pub fn new(settings: GlobalTerrainSettings) -> Self {
         let source = match (settings.dem_url, settings.geoid_url, settings.cache_dir) {
-            (Some(dem_url), Some(geoid_url), Some(cache_dir)) => Ok(Arc::new(TerrainSource {
-                dem_url: dem_url.trim_end_matches('/').to_string(),
-                geoid_url,
-                coarse_url: settings.coarse_url,
-                cache: TileCache {
-                    directory: cache_dir,
-                    capacity_bytes: settings.cache_bytes,
-                    index: Mutex::new(None),
-                },
-                ranges: Arc::new(Mutex::new(RangeCache::default())),
-                absent_cells: Mutex::new(HashSet::new()),
-                geoid: Mutex::new(None),
-            })),
+            (Some(dem_url), Some(geoid_url), Some(cache_dir)) => {
+                let dem_url = dem_url.trim_end_matches('/').to_string();
+                let source_urls_digest =
+                    Sha256::digest(format!("{dem_url}\n{geoid_url}\n{:?}", settings.coarse_url));
+                let cache_dir = cache_dir.join(crate::users::to_hex(&source_urls_digest[..8]));
+                Ok(Arc::new(TerrainSource {
+                    dem_url,
+                    geoid_url,
+                    coarse_url: settings.coarse_url,
+                    cache: TileCache::new(cache_dir, settings.cache_bytes, "terrain"),
+                    ranges: Arc::new(Mutex::new(RangeCache::default())),
+                    absent_cells: Mutex::new(HashSet::new()),
+                    geoid: Mutex::new(None),
+                }))
+            }
             (dem_url, geoid_url, cache_dir) => {
                 let missing: Vec<&str> = [
                     (dem_url.is_none(), DEM_URL_VAR),
@@ -153,21 +133,8 @@ impl GlobalTerrain {
             .is_some_and(|configured| ion_id.parse::<i64>() == Ok(configured))
     }
 
-    pub async fn reserve_ion_asset_id(&self, db: &Database) -> Result<(), String> {
-        if let Some(ion_id) = self.ion_asset_id {
-            let holder = db.get_asset_by_ion_id(ion_id).await.map_err(|error| {
-                format!("reading the asset with ion id {ion_id} failed: {error}")
-            })?;
-            if let Some((asset, _)) = holder {
-                return Err(format!(
-                    "{ION_ASSET_ID_VAR} is {ion_id}, and asset {} ({:?}) already holds that ion id: set the variable to an id no asset holds, or unset it and delete that asset first",
-                    asset.id, asset.name
-                ));
-            }
-        }
-        db.set_reserved_ion_id(self.ion_asset_id)
-            .await
-            .map_err(|error| format!("storing {ION_ASSET_ID_VAR} failed: {error}"))
+    pub fn ion_asset_id(&self) -> Option<i64> {
+        self.ion_asset_id
     }
 
     pub(crate) fn missing_configuration(&self) -> Option<&str> {
@@ -176,6 +143,13 @@ impl GlobalTerrain {
 
     pub(crate) fn uses_coarse_dem(&self) -> bool {
         matches!(&self.source, Ok(source) if source.coarse_url.is_some())
+    }
+
+    pub(crate) fn ellipsoid_heights(
+        &self,
+        longitude_latitude_points: &[[f64; 2]],
+    ) -> Result<Vec<f64>, TileFailure> {
+        self.source()?.ellipsoid_heights(longitude_latitude_points)
     }
 
     fn source(&self) -> Result<Arc<TerrainSource>, TileFailure> {
@@ -246,17 +220,25 @@ async fn serve_tile(
 ) -> Result<Vec<u8>, TileFailure> {
     let source = state.global_terrain.source()?;
     let coord = tile_coord(z, x, y_segment)?;
-    if let Some(bytes) = source.cache.read(&coord).await? {
+    if let Some(bytes) = source.cache.read(tile_address(&coord)).await? {
         return Ok(bytes);
     }
     let _build_slot = state.elevation_store.build_slot().await;
     tokio::task::spawn_blocking(move || -> Result<Vec<u8>, TileFailure> {
         let bytes = source.build_tile(&coord)?;
-        source.cache.store(&coord, &bytes)?;
+        source.cache.store(tile_address(&coord), &bytes)?;
         Ok(bytes)
     })
     .await
     .expect("global terrain tile build panicked")
+}
+
+fn tile_address(coord: &TerrainTileCoord) -> TileAddress {
+    TileAddress {
+        level: coord.zoom,
+        x: coord.x,
+        y: coord.y,
+    }
 }
 
 fn tile_coord(z: u32, x: u32, y_segment: &str) -> Result<TerrainTileCoord, TileFailure> {
@@ -294,6 +276,17 @@ struct TerrainSource {
     geoid: Mutex<Option<Arc<Geoid>>>,
 }
 
+fn coarsest_level_as_fine_as(reader: &CogReader<RemoteCog>, spacing: f64) -> usize {
+    (0..reader.levels().len())
+        .filter(|&level| PointGrid::of_level(reader, level).step_y <= spacing * (1.0 + 1e-9))
+        .max_by(|&a, &b| {
+            PointGrid::of_level(reader, a)
+                .step_y
+                .total_cmp(&PointGrid::of_level(reader, b).step_y)
+        })
+        .unwrap_or(0)
+}
+
 impl TerrainSource {
     fn build_tile(&self, coord: &TerrainTileCoord) -> Result<Vec<u8>, TileFailure> {
         let geoid = self.geoid()?;
@@ -311,7 +304,9 @@ impl TerrainSource {
                 }),
             }
         } else {
-            let cells = self.read_cells(coord, grid)?;
+            let bounds = coord.bounds();
+            let spacing = (bounds[3] - bounds[1]) / (grid - 1) as f64;
+            let cells = self.read_cells(bounds, spacing)?;
             sampled_terrain_tile(coord, grid, |latitude, longitude| {
                 orthometric_height(&cells, latitude, longitude)
                     + geoid.undulation(latitude, longitude)
@@ -333,9 +328,29 @@ impl TerrainSource {
         Ok(geoid)
     }
 
-    fn read_cells(&self, coord: &TerrainTileCoord, grid: u32) -> Result<Vec<DemCell>, TileFailure> {
-        let [west, south, east, north] = coord.bounds();
-        let spacing = (north - south) / (grid - 1) as f64;
+    fn ellipsoid_heights(&self, points: &[[f64; 2]]) -> Result<Vec<f64>, TileFailure> {
+        let geoid = self.geoid()?;
+        let mut bounds = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+        for &[longitude, latitude] in points {
+            bounds = [
+                bounds[0].min(longitude),
+                bounds[1].min(latitude),
+                bounds[2].max(longitude),
+                bounds[3].max(latitude),
+            ];
+        }
+        let cells = self.read_cells(bounds, ONE_ARC_SECOND)?;
+        Ok(points
+            .iter()
+            .map(|&[longitude, latitude]| {
+                orthometric_height(&cells, latitude, longitude)
+                    + geoid.undulation(latitude, longitude)
+            })
+            .collect())
+    }
+
+    fn read_cells(&self, bounds: [f64; 4], spacing: f64) -> Result<Vec<DemCell>, TileFailure> {
+        let [west, south, east, north] = bounds;
         let mut cells = Vec::new();
         for latitude in cell_latitude(south)..=cell_latitude(north) {
             for longitude in cell_longitude(west)..=cell_longitude(east) {
@@ -396,14 +411,55 @@ impl TerrainSource {
         require_globe(&reader, url)?;
         let [west, south, east, north] = coord.bounds();
         let spacing = (north - south) / (grid - 1) as f64;
-        let (_, mut window) =
-            self.sample_window(&reader, url, [west, south, east, north], spacing)?;
-        for height in &mut window.heights {
+        let level = coarsest_level_as_fine_as(&reader, spacing);
+        let globe = PointGrid::of_level(&reader, level);
+        let width = reader.levels()[level].width;
+        let first_column = ((west - globe.first_x) / globe.step_x).floor() as i64;
+        let last_column = ((east - globe.first_x) / globe.step_x).ceil() as i64;
+        let first_row = globe.row(north).floor() as usize;
+        let last_row = globe.row(south).ceil() as usize;
+        let columns = (last_column - first_column + 1) as usize;
+        let rows = last_row - first_row + 1;
+        if columns * rows > MAX_COARSE_WINDOW_SAMPLES {
+            return Err(unavailable(format!(
+                "{url} needs {columns}x{rows} samples of level {level} for tile {}/{}/{}, more than the {MAX_COARSE_WINDOW_SAMPLES} read for one tile, add overviews to it",
+                coord.zoom, coord.x, coord.y
+            )));
+        }
+        let mut heights = vec![0.0; columns * rows];
+        let mut column = first_column;
+        while column <= last_column {
+            let offset = (column - first_column) as usize;
+            // global grids continue past the antimeridian from their first column
+            let start = column.rem_euclid(width as i64) as usize;
+            let run = (width - start).min(columns - offset);
+            let piece = reader
+                .read_window(level, start, first_row, run, rows)
+                .map_err(|e| unavailable(format!("{url} could not be read: {e}")))?
+                .into_data();
+            for row in 0..rows {
+                heights[row * columns + offset..][..run]
+                    .copy_from_slice(&piece[row * run..][..run]);
+            }
+            column += run as i64;
+        }
+        for height in &mut heights {
             if !height.is_finite() {
                 *height = 0.0;
             }
         }
-        Ok(window)
+        Ok(CellWindow {
+            grid: PointGrid {
+                first_x: globe.first_x + first_column as f64 * globe.step_x,
+                last_column: (columns - 1) as f64,
+                ..globe
+            },
+            first_column: 0,
+            first_row,
+            columns,
+            rows,
+            heights,
+        })
     }
 
     fn sample_window(
@@ -413,14 +469,7 @@ impl TerrainSource {
         overlap: [f64; 4],
         spacing: f64,
     ) -> Result<(usize, CellWindow), TileFailure> {
-        let level = (0..reader.levels().len())
-            .filter(|&level| PointGrid::of_level(reader, level).step_y <= spacing * (1.0 + 1e-9))
-            .max_by(|&a, &b| {
-                PointGrid::of_level(reader, a)
-                    .step_y
-                    .total_cmp(&PointGrid::of_level(reader, b).step_y)
-            })
-            .unwrap_or(0);
+        let level = coarsest_level_as_fine_as(reader, spacing);
         let grid = PointGrid::of_level(reader, level);
         let [west, south, east, north] = overlap;
         let first_column = grid.column(west).floor() as usize;
@@ -834,113 +883,4 @@ fn fetch_range(url: &str, offset: u64, len: u64) -> Result<Option<Vec<u8>>, Terr
         )));
     }
     Ok(Some(bytes))
-}
-
-struct TileCache {
-    directory: PathBuf,
-    capacity_bytes: u64,
-    index: Mutex<Option<CacheIndex>>,
-}
-
-fn cache_failure(path: &Path, error: std::io::Error) -> TileFailure {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!("terrain cache {}: {error}", path.display()),
-    )
-}
-
-impl TileCache {
-    fn tile_path(&self, coord: &TerrainTileCoord) -> PathBuf {
-        self.directory
-            .join(coord.zoom.to_string())
-            .join(coord.x.to_string())
-            .join(format!("{}.terrain", coord.y))
-    }
-
-    async fn read(&self, coord: &TerrainTileCoord) -> Result<Option<Vec<u8>>, TileFailure> {
-        let path = self.tile_path(coord);
-        match tokio::fs::read(&path).await {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(cache_failure(&path, error)),
-        }
-    }
-
-    fn store(&self, coord: &TerrainTileCoord, bytes: &[u8]) -> Result<(), TileFailure> {
-        let path = self.tile_path(coord);
-        let mut loaded = lock(&self.index);
-        if loaded.is_none() {
-            let scanned = CacheIndex::scan(&self.directory)
-                .map_err(|error| cache_failure(&self.directory, error))?;
-            *loaded = Some(scanned);
-        }
-        let index = loaded.as_mut().expect("the index was just loaded");
-        if path.exists() {
-            return Ok(());
-        }
-        let level_directory = path
-            .parent()
-            .expect("a tile path sits in a column directory");
-        std::fs::create_dir_all(level_directory)
-            .map_err(|error| cache_failure(level_directory, error))?;
-        let staging = path.with_extension("partial");
-        std::fs::write(&staging, bytes).map_err(|error| cache_failure(&staging, error))?;
-        std::fs::rename(&staging, &path).map_err(|error| cache_failure(&path, error))?;
-        index.oldest_first.push_back((path, bytes.len() as u64));
-        index.total_bytes += bytes.len() as u64;
-        while index.total_bytes > self.capacity_bytes {
-            let Some((oldest, size)) = index.oldest_first.pop_front() else {
-                break;
-            };
-            match std::fs::remove_file(&oldest) {
-                Ok(()) => {}
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(error) => return Err(cache_failure(&oldest, error)),
-            }
-            index.total_bytes -= size;
-        }
-        Ok(())
-    }
-}
-
-struct CacheIndex {
-    oldest_first: VecDeque<(PathBuf, u64)>,
-    total_bytes: u64,
-}
-
-fn collect_files(
-    directory: &Path,
-    files: &mut Vec<(SystemTime, PathBuf, u64)>,
-) -> std::io::Result<()> {
-    let entries = match std::fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        if metadata.is_dir() {
-            collect_files(&entry.path(), files)?;
-        } else {
-            files.push((metadata.modified()?, entry.path(), metadata.len()));
-        }
-    }
-    Ok(())
-}
-
-impl CacheIndex {
-    fn scan(directory: &Path) -> std::io::Result<CacheIndex> {
-        let mut files = Vec::new();
-        collect_files(directory, &mut files)?;
-        files.sort_by_key(|(modified, _, _)| *modified);
-        let total_bytes: u64 = files.iter().map(|(_, _, size)| size).sum();
-        Ok(CacheIndex {
-            oldest_first: files
-                .into_iter()
-                .map(|(_, path, size)| (path, size))
-                .collect(),
-            total_bytes,
-        })
-    }
 }

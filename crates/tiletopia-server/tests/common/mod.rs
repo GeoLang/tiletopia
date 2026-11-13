@@ -206,6 +206,7 @@ pub async fn build_state(
         None,
         tiletopia_server::users::AccountLimits::default(),
         unconfigured_global_terrain(),
+        unconfigured_osm_buildings(),
         None,
     )
     .await
@@ -221,6 +222,7 @@ pub async fn state_with_node_odm(
         Some(node_odm),
         tiletopia_server::users::AccountLimits::default(),
         unconfigured_global_terrain(),
+        unconfigured_osm_buildings(),
         None,
     )
     .await
@@ -235,6 +237,7 @@ pub async fn test_state_with_account_limits(
         None,
         account_limits,
         unconfigured_global_terrain(),
+        unconfigured_osm_buildings(),
         None,
     )
     .await
@@ -243,6 +246,13 @@ pub async fn test_state_with_account_limits(
 pub async fn test_state_with_global_terrain(
     global_terrain: tiletopia_server::global_terrain::GlobalTerrain,
 ) -> Arc<AppState> {
+    test_state_with_global_layers(global_terrain, unconfigured_osm_buildings()).await
+}
+
+pub async fn test_state_with_global_layers(
+    global_terrain: tiletopia_server::global_terrain::GlobalTerrain,
+    osm_buildings: tiletopia_server::osm_buildings::OsmBuildings,
+) -> Arc<AppState> {
     signing_secret();
     build_state_with_account_limits(
         tiletopia_server::analysis_tiles::AnalysisEngines::new(),
@@ -250,6 +260,7 @@ pub async fn test_state_with_global_terrain(
         None,
         tiletopia_server::users::AccountLimits::default(),
         global_terrain,
+        osm_buildings,
         None,
     )
     .await
@@ -265,12 +276,25 @@ pub async fn test_state_with_ids_check(
         None,
         tiletopia_server::users::AccountLimits::default(),
         unconfigured_global_terrain(),
+        unconfigured_osm_buildings(),
         Some(sidecar),
     )
     .await
 }
 
-fn unconfigured_global_terrain() -> tiletopia_server::global_terrain::GlobalTerrain {
+pub fn unconfigured_osm_buildings() -> tiletopia_server::osm_buildings::OsmBuildings {
+    tiletopia_server::osm_buildings::OsmBuildings::new(
+        tiletopia_server::osm_buildings::OsmBuildingsSettings {
+            overpass_url: None,
+            cache_dir: None,
+            cache_bytes: 1 << 30,
+            ion_asset_id: None,
+        },
+        &unconfigured_global_terrain(),
+    )
+}
+
+pub fn unconfigured_global_terrain() -> tiletopia_server::global_terrain::GlobalTerrain {
     tiletopia_server::global_terrain::GlobalTerrain::new(
         tiletopia_server::global_terrain::GlobalTerrainSettings {
             dem_url: None,
@@ -289,6 +313,7 @@ async fn build_state_with_account_limits(
     node_odm: Option<tiletopia_server::photogrammetry::NodeOdm>,
     account_limits: tiletopia_server::users::AccountLimits,
     global_terrain: tiletopia_server::global_terrain::GlobalTerrain,
+    osm_buildings: tiletopia_server::osm_buildings::OsmBuildings,
     ids_check: Option<tiletopia_server::ids_check::IdsCheckSidecar>,
 ) -> Arc<AppState> {
     let dir = tempfile::Builder::new()
@@ -302,7 +327,21 @@ async fn build_state_with_account_limits(
     let db_url = format!("sqlite://{}?mode=rwc", dir.join("tiletopia.db").display());
     let db = Arc::new(tiletopia_server::db::Database::new(&db_url).await.unwrap());
     db.migrate().await.unwrap();
-    global_terrain.reserve_ion_asset_id(&db).await.unwrap();
+    tiletopia_server::ion_compat::reserve_ion_ids(
+        &db,
+        &[
+            (
+                tiletopia_server::global_terrain::ION_ASSET_ID_VAR,
+                global_terrain.ion_asset_id(),
+            ),
+            (
+                tiletopia_server::osm_buildings::ION_ASSET_ID_VAR,
+                osm_buildings.ion_asset_id(),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
 
     let store: Arc<dyn tiletopia_store::TileStore> =
         Arc::new(tiletopia_store::LocalStore::new(dir.clone()));
@@ -373,6 +412,7 @@ async fn build_state_with_account_limits(
         analysis_engines,
         imagery_layers: tiletopia_server::imagery::ImageryLayers::new(),
         global_terrain,
+        osm_buildings,
         entity_link_store: tiletopia_server::entity_linking::EntityLinkStore::new(),
         ids_check,
         #[cfg(feature = "martin")]
@@ -474,4 +514,140 @@ pub fn decode_tile(bytes: &[u8]) -> DecodedTile {
         heights,
         edge_vertex_counts,
     }
+}
+
+pub type OverpassQueries = Arc<std::sync::Mutex<Vec<String>>>;
+
+pub async fn serve_overpass(
+    failures_first: Vec<axum::http::StatusCode>,
+    answer: serde_json::Value,
+) -> (String, OverpassQueries) {
+    use axum::response::IntoResponse;
+    let queries: OverpassQueries = Arc::default();
+    let recorder = Arc::clone(&queries);
+    let app = axum::Router::new().route(
+        "/api/interpreter",
+        axum::routing::post(move |body: String| {
+            let recorder = Arc::clone(&recorder);
+            let answer = answer.clone();
+            let failures_first = failures_first.clone();
+            async move {
+                let query = body.strip_prefix("data=").unwrap();
+                let query = percent_encoding::percent_decode_str(query)
+                    .decode_utf8()
+                    .unwrap()
+                    .into_owned();
+                let mut queries = recorder.lock().unwrap();
+                queries.push(query);
+                match failures_first.get(queries.len() - 1) {
+                    Some(status) => status.into_response(),
+                    None => axum::Json(answer).into_response(),
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{address}/api/interpreter"), queries)
+}
+
+// overpass answers each way with its node ids, then every node once
+pub fn overpass_buildings(ways: &[(&[[f64; 2]], serde_json::Value)]) -> serde_json::Value {
+    let mut elements = Vec::new();
+    let mut next_node_id = 1;
+    for (index, (ring, tags)) in ways.iter().enumerate() {
+        let first_node_id = next_node_id;
+        let mut node_ids = Vec::new();
+        for &[longitude, latitude] in ring.iter() {
+            elements.push(serde_json::json!({
+                "type": "node", "id": next_node_id, "lat": latitude, "lon": longitude,
+            }));
+            node_ids.push(next_node_id);
+            next_node_id += 1;
+        }
+        node_ids.push(first_node_id);
+        elements.push(serde_json::json!({
+            "type": "way", "id": 1000 + index, "nodes": node_ids, "tags": tags,
+        }));
+    }
+    serde_json::json!({ "version": 0.6, "elements": elements })
+}
+
+// cesium reads a gltf (x, y, z) as (x, -z, y), and the node translation moves the vertices to earth-centred coordinates
+pub fn glb_earth_centred_positions(bytes: &[u8]) -> Vec<[f64; 3]> {
+    // the gltf crate refuses the _FEATURE_ID_0 attribute name, which gltf allows
+    let gltf = gltf::Gltf::from_slice_without_validation(bytes).unwrap();
+    let blob = gltf.blob.as_deref().unwrap();
+    // the gltf crate reads translations as f32, which is half a metre coarse this far from the earth's centre
+    let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let json: serde_json::Value = serde_json::from_slice(&bytes[20..20 + json_length]).unwrap();
+    let translation: [f64; 3] =
+        serde_json::from_value(json["nodes"][0]["translation"].clone()).unwrap();
+    let node = gltf.nodes().next().unwrap();
+    let primitive = node.mesh().unwrap().primitives().next().unwrap();
+    let reader = primitive.reader(|_| Some(blob));
+    reader
+        .read_positions()
+        .unwrap()
+        .map(|[x, y, z]| {
+            let gltf_position = [
+                f64::from(x) + translation[0],
+                f64::from(y) + translation[1],
+                f64::from(z) + translation[2],
+            ];
+            [gltf_position[0], -gltf_position[2], gltf_position[1]]
+        })
+        .collect()
+}
+
+pub async fn uploaded_ion_id(state: &Arc<AppState>) -> i64 {
+    use tower::ServiceExt;
+    let boundary = "tiletopiaglobalterrainboundary";
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"cloud.ply\"\r\n\r\n{}\r\n--{boundary}--\r\n",
+        PLY_FIXTURE
+    );
+    let response = tiletopia_server::router(Arc::clone(state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/v1/assets")
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .header(
+                    "authorization",
+                    format!("Bearer {}", token("terrain-uploader", "editor")),
+                )
+                .body(axum::body::Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let uploaded: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let response = tiletopia_server::router(Arc::clone(state))
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!("/v1/assets/{}", uploaded["id"].as_str().unwrap()))
+                .header(
+                    "authorization",
+                    format!("Bearer {}", token("terrain-uploader", "editor")),
+                )
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let ion_asset: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    ion_asset["id"].as_i64().unwrap()
 }

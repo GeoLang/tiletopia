@@ -1,5 +1,6 @@
 mod common;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -126,9 +127,16 @@ async fn build_store(
     meshes: Vec<MeshData>,
 ) -> Vec<MeshData> {
     tokio::task::spawn_blocking(move || {
-        let labelled =
-            build_store_and_label_meshes(ifc.as_ref(), &asset_dir, ORIGIN, None, meshes, None)
-                .unwrap();
+        let labelled = build_store_and_label_meshes(
+            ifc.as_ref(),
+            &asset_dir,
+            ORIGIN,
+            None,
+            meshes,
+            HashMap::new(),
+            None,
+        )
+        .unwrap();
         finish_build(&asset_dir, true).unwrap();
         labelled
     })

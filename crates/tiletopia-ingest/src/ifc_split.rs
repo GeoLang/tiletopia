@@ -1,63 +1,8 @@
 use crate::IngestError;
+use ifc_lite_core::{IfcType, has_geometry_by_name, ifc_type_from_keyword};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-
-const ELEMENT_TYPES: &[&str] = &[
-    "IFCBEAM",
-    "IFCBEAMSTANDARDCASE",
-    "IFCBUILDINGELEMENTPART",
-    "IFCBUILDINGELEMENTPROXY",
-    "IFCCHIMNEY",
-    "IFCCOLUMN",
-    "IFCCOLUMNSTANDARDCASE",
-    "IFCCOVERING",
-    "IFCCURTAINWALL",
-    "IFCDISTRIBUTIONCONTROLELEMENT",
-    "IFCDISTRIBUTIONELEMENT",
-    "IFCDISTRIBUTIONFLOWELEMENT",
-    "IFCDISTRIBUTIONPORT",
-    "IFCDOOR",
-    "IFCDOORSTANDARDCASE",
-    "IFCENERGYCONVERSIONDEVICE",
-    "IFCFLOWCONTROLLER",
-    "IFCFLOWFITTING",
-    "IFCFLOWMOVINGDEVICE",
-    "IFCFLOWSEGMENT",
-    "IFCFLOWSTORAGEDEVICE",
-    "IFCFLOWTERMINAL",
-    "IFCFLOWTREATMENTDEVICE",
-    "IFCFOOTING",
-    "IFCFURNISHINGELEMENT",
-    "IFCGEOGRAPHICELEMENT",
-    "IFCMECHANICALFASTENER",
-    "IFCMEMBER",
-    "IFCMEMBERSTANDARDCASE",
-    "IFCOPENINGELEMENT",
-    "IFCPILE",
-    "IFCPLATE",
-    "IFCPLATESTANDARDCASE",
-    "IFCPROXY",
-    "IFCRAILING",
-    "IFCRAMP",
-    "IFCRAMPFLIGHT",
-    "IFCROOF",
-    "IFCSANITARYTERMINAL",
-    "IFCSHADINGDEVICE",
-    "IFCSLAB",
-    "IFCSLABELEMENTEDCASE",
-    "IFCSLABSTANDARDCASE",
-    "IFCSPACE",
-    "IFCSTAIR",
-    "IFCSTAIRFLIGHT",
-    "IFCTRANSPORTELEMENT",
-    "IFCVIRTUALELEMENT",
-    "IFCWALL",
-    "IFCWALLELEMENTEDCASE",
-    "IFCWALLSTANDARDCASE",
-    "IFCWINDOW",
-    "IFCWINDOWSTANDARDCASE",
-];
 
 #[derive(Debug)]
 pub struct IfcPiece {
@@ -79,7 +24,12 @@ pub fn group_count(
         return Ok(None);
     }
     let groups = source_len.div_ceil(max_piece_bytes).max(2);
-    Ok(Some(usize::try_from(groups).unwrap_or(usize::MAX)))
+    let groups = usize::try_from(groups).map_err(|_| {
+        IngestError::ParseError(format!(
+            "an IFC of {source_len} bytes needs more pieces than this machine can count"
+        ))
+    })?;
+    Ok(Some(groups))
 }
 
 pub fn split_ifc(
@@ -93,17 +43,18 @@ pub fn split_ifc(
         ));
     }
     let mut indexed = index_ifc(source)?;
-    let elements = element_id_set(&indexed.index);
+    let elements = ids_of_types(&indexed.index, is_element);
     if elements.is_empty() {
         return Ok(Vec::new());
     }
-    let shared = shared_ids(&indexed.index, source);
+    let spatial = ids_of_types(&indexed.index, is_spatial);
+    let shared = shared_ids(&indexed.index, source, &spatial, &elements)?;
     let voids = void_fill_from_source(&indexed.index, source);
     let aggregates = aggregate_from_source(&indexed.index, source, &elements);
     let styles = style_maps_from_source(&indexed.index, source);
     let clusters = build_clusters(&elements, &voids, &aggregates);
     let bins = distribute(&clusters, group_count);
-    let relations = relation_entries(&indexed.index, source);
+    let relations = relation_entries(&indexed.index, source, &spatial, &elements)?;
     let mut groups = resolve_groups(
         source,
         output_dir,
@@ -292,24 +243,17 @@ fn should_rewrite(type_name: &str) -> bool {
     type_name.starts_with("IFCREL") || type_name == "IFCPRESENTATIONLAYERASSIGNMENT"
 }
 
-fn list_argument(type_name: &str) -> usize {
-    match type_name {
-        "IFCRELAGGREGATES" => 5,
-        "IFCRELCONNECTSWITHREALIZINGELEMENTS" => 7,
-        "IFCPRESENTATIONLAYERASSIGNMENT" => 2,
-        _ => 4,
-    }
-}
-
 fn is_element(type_name: &str) -> bool {
-    ELEMENT_TYPES.binary_search(&type_name).is_ok()
+    !is_spatial(type_name)
+        && (has_geometry_by_name(type_name)
+            || ifc_type_from_keyword(type_name).is_subtype_of(IfcType::IfcProduct))
 }
 
 fn is_spatial(type_name: &str) -> bool {
-    matches!(
-        type_name,
-        "IFCPROJECT" | "IFCSITE" | "IFCBUILDING" | "IFCBUILDINGSTOREY"
-    )
+    let ifc_type = ifc_type_from_keyword(type_name);
+    ifc_type == IfcType::IfcProject
+        || (ifc_type.is_subtype_of(IfcType::IfcSpatialElement)
+            && !ifc_type.is_subtype_of(IfcType::IfcSpace))
 }
 
 fn is_georeference(type_name: &str) -> bool {
@@ -328,12 +272,12 @@ fn index_ifc(source: &[u8]) -> Result<IndexedIfc, IngestError> {
     let mut cursor = 0usize;
     let mut header_end = None;
     while cursor < source.len() {
-        cursor = skip_trivia(source, cursor);
+        cursor = skip_trivia(source, cursor)?;
         if cursor >= source.len() {
             break;
         }
         if keyword_at(source, cursor, b"DATA") {
-            let after = skip_trivia(source, cursor + 4);
+            let after = skip_trivia(source, cursor + 4)?;
             if source.get(after) == Some(&b';') {
                 cursor = after + 1;
                 if source.get(cursor) == Some(&b'\r') {
@@ -353,7 +297,7 @@ fn index_ifc(source: &[u8]) -> Result<IndexedIfc, IngestError> {
     let mut index = LineIndex::new();
     let mut footer_start = None;
     while cursor < source.len() {
-        cursor = skip_trivia(source, cursor);
+        cursor = skip_trivia(source, cursor)?;
         if cursor >= source.len() {
             break;
         }
@@ -379,13 +323,13 @@ fn parse_entity(source: &[u8], start: usize) -> Result<StepEntity, IngestError> 
         return Err(step_error(start, "expected an IFC entity"));
     }
     let (id, mut cursor) = parse_id(source, start + 1)?;
-    cursor = skip_trivia(source, cursor);
+    cursor = skip_trivia(source, cursor)?;
     if source.get(cursor) != Some(&b'=') {
         return Err(step_error(cursor, "expected '=' after an IFC id"));
     }
-    cursor = skip_trivia(source, cursor + 1);
+    cursor = skip_trivia(source, cursor + 1)?;
     let (type_name, next) = type_name_at(source, cursor)?;
-    cursor = skip_trivia(source, next);
+    cursor = skip_trivia(source, next)?;
     if source.get(cursor) != Some(&b'(') {
         return Err(step_error(cursor, "expected '(' after an IFC type"));
     }
@@ -416,7 +360,7 @@ fn parse_entity(source: &[u8], start: usize) -> Result<StepEntity, IngestError> 
             b'(' => depth += 1,
             b')' if depth == 0 => {
                 cursor += 1;
-                cursor = skip_trivia(source, cursor);
+                cursor = skip_trivia(source, cursor)?;
                 if source.get(cursor) != Some(&b';') {
                     return Err(step_error(cursor, "expected ';' after an IFC entity"));
                 }
@@ -520,7 +464,7 @@ fn consume_statement(source: &[u8], mut cursor: usize) -> Result<usize, IngestEr
     Err(step_error(cursor, "the IFC statement does not end"))
 }
 
-fn skip_trivia(source: &[u8], mut cursor: usize) -> usize {
+fn skip_trivia(source: &[u8], mut cursor: usize) -> Result<usize, IngestError> {
     loop {
         while source
             .get(cursor)
@@ -529,10 +473,10 @@ fn skip_trivia(source: &[u8], mut cursor: usize) -> usize {
             cursor += 1;
         }
         if source.get(cursor) == Some(&b'/') && source.get(cursor + 1) == Some(&b'*') {
-            cursor = skip_block_comment(source, cursor).unwrap_or(source.len());
+            cursor = skip_block_comment(source, cursor)?;
             continue;
         }
-        return cursor;
+        return Ok(cursor);
     }
 }
 
@@ -561,20 +505,25 @@ fn step_error(offset: usize, message: &str) -> IngestError {
     IngestError::ParseError(format!("{message} at byte {offset}"))
 }
 
-fn element_id_set(index: &LineIndex) -> FxHashSet<u32> {
-    let mut elements = FxHashSet::default();
-    for id in &index.ids {
-        if index.type_name(*id).is_some_and(is_element) {
-            elements.insert(*id);
-        }
-    }
-    elements
+fn ids_of_types(index: &LineIndex, wanted: impl Fn(&str) -> bool) -> FxHashSet<u32> {
+    let wanted_types: Vec<bool> = index.type_names.iter().map(|name| wanted(name)).collect();
+    index
+        .ids
+        .iter()
+        .zip(&index.types)
+        .filter(|(_, type_id)| wanted_types[usize::from(**type_id)])
+        .map(|(id, _)| *id)
+        .collect()
 }
 
-fn shared_ids(index: &LineIndex, source: &[u8]) -> FxHashSet<u32> {
-    let spatial = spatial_id_set(index);
+fn shared_ids(
+    index: &LineIndex,
+    source: &[u8],
+    spatial: &FxHashSet<u32>,
+    elements: &FxHashSet<u32>,
+) -> Result<FxHashSet<u32>, IngestError> {
     let mut shared = FxHashSet::default();
-    for id in &spatial {
+    for id in spatial {
         collect_deps_all(*id, index, &mut shared);
     }
     for id in &index.ids {
@@ -582,50 +531,43 @@ fn shared_ids(index: &LineIndex, source: &[u8]) -> FxHashSet<u32> {
             collect_deps_all(*id, index, &mut shared);
         }
     }
-    add_spatial_relations(index, source, &spatial, &mut shared);
-    shared
+    add_spatial_relations(index, source, spatial, elements, &mut shared)?;
+    Ok(shared)
 }
 
 fn add_spatial_relations(
     index: &LineIndex,
     source: &[u8],
     spatial: &FxHashSet<u32>,
+    elements: &FxHashSet<u32>,
     shared: &mut FxHashSet<u32>,
-) {
+) -> Result<(), IngestError> {
     for id in &index.ids {
-        let Some(type_name) = index.type_name(*id).map(str::to_string) else {
-            continue;
-        };
-        if type_name != "IFCRELAGGREGATES" && !should_rewrite(&type_name) {
+        if !index.type_name(*id).is_some_and(should_rewrite) {
             continue;
         }
         let Some(text) = index.special.get(id) else {
             continue;
         };
-        let Ok(arguments) = split_arguments(source, text.paren) else {
-            continue;
-        };
-        let list_at = list_argument(&type_name);
-        let Some(list) = arguments.get(list_at) else {
-            continue;
-        };
-        let refs = references_in(source, list.clone());
-        if refs.is_empty() || !refs.iter().all(|reference| spatial.contains(reference)) {
-            continue;
+        let arguments = relation_arguments(source, text.paren)?;
+        let list_refs: Vec<u32> = arguments
+            .lists
+            .iter()
+            .flat_map(|list| list.items.iter().filter_map(|(_, reference)| *reference))
+            .collect();
+        let links_only_spatial = !list_refs.is_empty()
+            && list_refs
+                .iter()
+                .all(|reference| spatial.contains(reference))
+            && !arguments
+                .singles
+                .iter()
+                .any(|reference| elements.contains(reference));
+        if links_only_spatial {
+            collect_deps_all(*id, index, shared);
         }
-        if type_name == "IFCRELAGGREGATES" {
-            let Some(relating) = arguments
-                .get(4)
-                .and_then(|range| hash_ref(source, range.clone()))
-            else {
-                continue;
-            };
-            if !spatial.contains(&relating) {
-                continue;
-            }
-        }
-        collect_deps_all(*id, index, shared);
     }
+    Ok(())
 }
 
 fn collect_deps(
@@ -744,7 +686,10 @@ fn aggregate_from_source(
         rel_lines: FxHashMap::default(),
     };
     for id in &index.ids {
-        if index.type_name(*id) != Some("IFCRELAGGREGATES") {
+        if !matches!(
+            index.type_name(*id),
+            Some("IFCRELAGGREGATES" | "IFCRELNESTS")
+        ) {
             continue;
         }
         let Some(text) = index.special.get(id) else {
@@ -940,44 +885,144 @@ fn distribute(clusters: &[Vec<u32>], group_count: usize) -> Vec<Vec<u32>> {
     groups
 }
 
-struct RelationEntry {
-    id: u32,
-    list_refs: Vec<u32>,
-    entity: std::ops::Range<usize>,
+struct ListArgument {
     argument: std::ops::Range<usize>,
+    items: Vec<(std::ops::Range<usize>, Option<u32>)>,
 }
 
-fn relation_entries(index: &LineIndex, source: &[u8]) -> Vec<RelationEntry> {
+struct RelationArguments {
+    singles: Vec<u32>,
+    lists: Vec<ListArgument>,
+}
+
+fn relation_arguments(source: &[u8], paren: usize) -> Result<RelationArguments, IngestError> {
+    let mut arguments = RelationArguments {
+        singles: Vec::new(),
+        lists: Vec::new(),
+    };
+    for argument in split_arguments(source, paren)? {
+        let start = skip_trivia(source, argument.start)?;
+        if source.get(start) == Some(&b'(') {
+            let items = split_arguments(source, start)?
+                .into_iter()
+                .map(|item| {
+                    let reference = hash_ref(source, item.clone());
+                    (item, reference)
+                })
+                .collect();
+            arguments.lists.push(ListArgument { argument, items });
+        } else if let Some(reference) = hash_ref(source, argument) {
+            arguments.singles.push(reference);
+        }
+    }
+    Ok(arguments)
+}
+
+struct RelationEntry {
+    id: u32,
+    entity: std::ops::Range<usize>,
+    single_elements: Vec<u32>,
+    element_lists: Vec<ListArgument>,
+    references_spatial: bool,
+}
+
+fn relation_entries(
+    index: &LineIndex,
+    source: &[u8],
+    spatial: &FxHashSet<u32>,
+    elements: &FxHashSet<u32>,
+) -> Result<Vec<RelationEntry>, IngestError> {
     let mut entries = Vec::new();
     for id in &index.ids {
-        let Some(type_name) = index.type_name(*id) else {
-            continue;
-        };
-        if !should_rewrite(type_name) {
+        if !index.type_name(*id).is_some_and(should_rewrite) {
             continue;
         }
         let Some(text) = index.special.get(id) else {
             continue;
         };
-        let Ok(arguments) = split_arguments(source, text.paren) else {
-            continue;
-        };
-        let list_index = list_argument(type_name);
-        let Some(argument) = arguments.get(list_index).cloned() else {
-            continue;
-        };
-        let list_refs = references_in(source, argument.clone());
-        if list_refs.is_empty() {
+        let arguments = relation_arguments(source, text.paren)?;
+        let references_spatial = arguments
+            .singles
+            .iter()
+            .chain(arguments.lists.iter().flat_map(|list| {
+                list.items
+                    .iter()
+                    .filter_map(|(_, reference)| reference.as_ref())
+            }))
+            .any(|reference| spatial.contains(reference));
+        let single_elements: Vec<u32> = arguments
+            .singles
+            .into_iter()
+            .filter(|reference| elements.contains(reference))
+            .collect();
+        let element_lists: Vec<ListArgument> = arguments
+            .lists
+            .into_iter()
+            .map(|list| ListArgument {
+                argument: list.argument,
+                items: list
+                    .items
+                    .into_iter()
+                    .map(|(item, reference)| (item, reference.filter(|id| elements.contains(id))))
+                    .collect(),
+            })
+            .filter(|list| list.items.iter().any(|(_, element)| element.is_some()))
+            .collect();
+        if single_elements.is_empty() && element_lists.is_empty() {
             continue;
         }
         entries.push(RelationEntry {
             id: *id,
-            list_refs,
             entity: text.start..text.end,
-            argument: argument.start..argument.end,
+            single_elements,
+            element_lists,
+            references_spatial,
         });
     }
-    entries
+    Ok(entries)
+}
+
+fn relation_in_group(
+    source: &[u8],
+    relation: &RelationEntry,
+    members: &FxHashSet<u32>,
+) -> Option<Vec<u8>> {
+    if !relation
+        .single_elements
+        .iter()
+        .all(|id| members.contains(id))
+    {
+        return None;
+    }
+    let mut links_a_member = !relation.single_elements.is_empty();
+    let mut out = Vec::with_capacity(relation.entity.len());
+    let mut copied_to = relation.entity.start;
+    for list in &relation.element_lists {
+        let kept: Vec<&(std::ops::Range<usize>, Option<u32>)> = list
+            .items
+            .iter()
+            .filter(|(_, element)| element.is_none_or(|id| members.contains(&id)))
+            .collect();
+        if kept.is_empty() {
+            return None;
+        }
+        links_a_member |= kept.iter().any(|(_, element)| element.is_some());
+        out.extend_from_slice(&source[copied_to..list.argument.start]);
+        out.push(b'(');
+        for (position, (item, _)) in kept.into_iter().enumerate() {
+            if position > 0 {
+                out.push(b',');
+            }
+            out.extend_from_slice(source[item.clone()].trim_ascii());
+        }
+        out.push(b')');
+        copied_to = list.argument.end;
+    }
+    if !links_a_member && !relation.references_spatial {
+        return None;
+    }
+    out.extend_from_slice(&source[copied_to..relation.entity.end]);
+    Some(out)
 }
 
 struct GroupWrite {
@@ -1028,24 +1073,10 @@ fn resolve_groups(
         resolve_styles(&mut file_ids, inputs.index, inputs.styles, inputs.elements);
         let mut rewritten = FxHashMap::default();
         for relation in inputs.relations {
-            let kept: Vec<u32> = relation
-                .list_refs
-                .iter()
-                .copied()
-                .filter(|reference| member_set.contains(reference))
-                .collect();
-            if kept.is_empty() {
+            let Some(text) = relation_in_group(source, relation, &member_set) else {
                 continue;
-            }
-            rewritten.insert(
-                relation.id,
-                rewritten_entity(
-                    source,
-                    relation.entity.clone(),
-                    relation.argument.clone(),
-                    &kept,
-                ),
-            );
+            };
+            rewritten.insert(relation.id, text);
             file_ids.insert(relation.id);
             if let Some(refs) = inputs.index.refs_of(relation.id) {
                 for reference in refs {
@@ -1089,27 +1120,6 @@ fn resolve_styles(
     }
 }
 
-fn rewritten_entity(
-    source: &[u8],
-    entity: std::ops::Range<usize>,
-    argument: std::ops::Range<usize>,
-    ids: &[u32],
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(entity.len());
-    out.extend_from_slice(&source[entity.start..argument.start]);
-    out.push(b'(');
-    for (index, id) in ids.iter().enumerate() {
-        if index > 0 {
-            out.push(b',');
-        }
-        out.push(b'#');
-        out.extend_from_slice(id.to_string().as_bytes());
-    }
-    out.push(b')');
-    out.extend_from_slice(&source[argument.end..entity.end]);
-    out
-}
-
 struct Membership {
     start: Vec<u32>,
     members: Vec<u32>,
@@ -1121,8 +1131,7 @@ fn group_membership(
     slot_count: usize,
 ) -> Membership {
     let mut start = vec![0u32; slot_count + 1];
-    for (group_index, group) in groups.iter().enumerate() {
-        let _ = group_index;
+    for group in groups {
         for id in &group.file_ids {
             let Some(slot) = slots.get(id) else {
                 continue;
@@ -1179,7 +1188,7 @@ fn write_groups(
     }
     let mut cursor = header_end;
     while cursor < footer_start {
-        cursor = skip_trivia(source, cursor);
+        cursor = skip_trivia(source, cursor)?;
         if cursor >= footer_start || keyword_at(source, cursor, b"ENDSEC") {
             break;
         }
@@ -1298,15 +1307,6 @@ fn hash_ref(source: &[u8], range: std::ops::Range<usize>) -> Option<u32> {
         .map(|(id, _)| id)
 }
 
-fn spatial_id_set(index: &LineIndex) -> FxHashSet<u32> {
-    index
-        .ids
-        .iter()
-        .copied()
-        .filter(|id| index.type_name(*id).is_some_and(is_spatial))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1342,10 +1342,124 @@ mod tests {
         assert_eq!(groups, usize::try_from(source.div_ceil(piece)).unwrap());
     }
 
+    fn defines(text: &str, id: u32) -> bool {
+        let definition = format!("#{id}=");
+        text.lines().any(|line| line.starts_with(&definition))
+    }
+
+    fn unresolved_references(text: &str) -> Vec<u32> {
+        let indexed = index_ifc(text.as_bytes()).unwrap();
+        let mut missing: Vec<u32> = indexed
+            .index
+            .refs
+            .iter()
+            .copied()
+            .filter(|reference| !indexed.index.slot_of.contains_key(reference))
+            .collect();
+        missing.sort_unstable();
+        missing.dedup();
+        missing
+    }
+
     #[test]
     fn a_zero_piece_size_is_refused() {
         let error = group_count(10, 1, 0).unwrap_err();
         assert!(error.to_string().contains("piece size"));
+    }
+
+    #[test]
+    fn an_unclosed_comment_is_refused_by_name() {
+        let source = ifc("#1=IFCPROJECT('0project',$,'Tower',$,$,$,$,$,$);\n/* never closed");
+        let dir = tempfile::tempdir().unwrap();
+        let error = split_ifc(source.as_bytes(), dir.path(), 2).unwrap_err();
+        assert!(
+            error.to_string().contains("comment does not end"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn every_product_lands_in_one_piece_and_facilities_in_all() {
+        let source = ifc("\
+#1=IFCPROJECT('0project',$,'Road',$,$,$,$,$,$);
+#2=IFCSITE('0site',$,'Site',$,$,$,$,$,.ELEMENT.,$,$,$,$,$);
+#3=IFCROAD('0road',$,'Road',$,$,$,$,$,.ELEMENT.,.NOTDEFINED.);
+#5=IFCRELAGGREGATES('0agg1',$,$,$,#1,(#2));
+#6=IFCRELAGGREGATES('0agg2',$,$,$,#2,(#3));
+#10=IFCCARTESIANPOINT((0.,0.,0.));
+#11=IFCAXIS2PLACEMENT3D(#10,$,$);
+#12=IFCLOCALPLACEMENT($,#11);
+#30=IFCDUCTSEGMENT('0duct',$,'Duct',$,$,#12,$,$,.RIGIDSEGMENT.);
+#31=IFCDISTRIBUTIONPORT('0port',$,'Port',$,$,#12,$,.SOURCE.,.DUCT.,.SUPPLYAIR.);
+#32=IFCRELNESTS('0nest',$,$,$,#30,(#31));
+#33=IFCFURNITURE('0chair',$,'Chair',$,$,#12,$,$,$);
+#34=IFCELEMENTASSEMBLY('0truss',$,'Truss',$,$,#12,$,$,.FACTORY.,.TRUSS.);
+#35=IFCPLATE('0gusset',$,'Gusset',$,$,#12,$,$,$);
+#36=IFCMEMBER('0chord',$,'Chord',$,$,#12,$,$,$);
+#37=IFCRELAGGREGATES('0parts',$,$,$,#34,(#35,#36));
+#38=IFCREINFORCINGBAR('0bar',$,'Bar',$,$,#12,$,$,$,12.,$,$,$,$,$);
+#39=IFCPAVEMENT('0pavement',$,'Pavement',$,$,#12,$,$,$);
+#40=IFCCOURSE('0course',$,'Course',$,$,#12,$,$,$);
+#50=IFCRELCONTAINEDINSPATIALSTRUCTURE('0cont',$,$,$,(#30,#33,#34,#38,#39,#40),#3);
+");
+        let dir = tempfile::tempdir().unwrap();
+        let pieces = split_ifc(source.as_bytes(), dir.path(), 3).unwrap();
+        let files = texts(&pieces);
+        assert_eq!(files.len(), 3);
+        for product in [30, 31, 33, 34, 35, 36, 38, 39, 40] {
+            let holders = files.iter().filter(|file| defines(file, product)).count();
+            assert_eq!(holders, 1, "#{product} is in {holders} pieces");
+        }
+        let duct_file = files.iter().find(|file| defines(file, 30)).unwrap();
+        assert!(
+            defines(duct_file, 31) && defines(duct_file, 32),
+            "{duct_file}"
+        );
+        let truss_file = files.iter().find(|file| defines(file, 34)).unwrap();
+        assert!(
+            defines(truss_file, 35) && defines(truss_file, 36),
+            "{truss_file}"
+        );
+        for file in &files {
+            assert!(defines(file, 3), "{file}");
+            assert_eq!(unresolved_references(file), Vec::<u32>::new(), "{file}");
+        }
+    }
+
+    #[test]
+    fn single_references_stay_single_and_both_ends_share_the_piece() {
+        let source = ifc("\
+#1=IFCPROJECT('0project',$,'Tower',$,$,$,$,$,$);
+#2=IFCSITE('0site',$,'Plot',$,$,$,$,$,.ELEMENT.,$,$,$,$,$);
+#3=IFCBUILDING('0building',$,'Main',$,$,$,$,$,.ELEMENT.,$,$,$);
+#4=IFCBUILDINGSTOREY('0storey',$,'Level 1',$,$,$,$,$,.ELEMENT.,0.);
+#5=IFCRELAGGREGATES('0rel1',$,$,$,#1,(#2));
+#6=IFCRELAGGREGATES('0rel2',$,$,$,#2,(#3));
+#7=IFCRELAGGREGATES('0rel3',$,$,$,#3,(#4));
+#30=IFCWALL('0wallA',$,'Wall A',$,$,$,$,$,.SOLIDWALL.);
+#31=IFCWALL('0wallB',$,'Wall B',$,$,$,$,$,.SOLIDWALL.);
+#60=IFCSPACE('0space',$,'Room',$,$,$,$,$,.ELEMENT.,.INTERNAL.,$);
+#50=IFCRELCONTAINEDINSPATIALSTRUCTURE('0cont',$,$,$,(#30,#31,#60),#4);
+#70=IFCRELSPACEBOUNDARY('0bound1',$,$,$,#60,#30,$,.PHYSICAL.,.INTERNAL.);
+#71=IFCRELSPACEBOUNDARY('0bound2',$,$,$,#60,#31,$,.PHYSICAL.,.INTERNAL.);
+");
+        let dir = tempfile::tempdir().unwrap();
+        let pieces = split_ifc(source.as_bytes(), dir.path(), 2).unwrap();
+        let files = texts(&pieces);
+        assert_eq!(files.len(), 2);
+        for file in &files {
+            assert!(!file.contains("(#60)"), "{file}");
+            assert_eq!(unresolved_references(file), Vec::<u32>::new(), "{file}");
+        }
+        let joined = files.concat();
+        let bounds_with_both_ends: Vec<&str> = joined
+            .lines()
+            .filter(|line| line.starts_with("#70=") || line.starts_with("#71="))
+            .collect();
+        assert_eq!(bounds_with_both_ends.len(), 1, "{joined}");
+        let space_file = files.iter().find(|file| defines(file, 60)).unwrap();
+        let wall_beside_the_space = if defines(space_file, 30) { 70 } else { 71 };
+        assert!(defines(space_file, wall_beside_the_space), "{space_file}");
     }
 
     #[test]

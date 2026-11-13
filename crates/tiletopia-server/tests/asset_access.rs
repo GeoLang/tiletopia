@@ -367,6 +367,36 @@ async fn tile_routes_answer_with_no_header() {
     }
 }
 
+#[tokio::test]
+async fn child_tilesets_of_a_split_model_answer_with_no_header() {
+    let state = test_state().await;
+    let (tiled, _) = seed_asset(&state, Some(OWNER), AssetType::Model).await;
+    let asset_dir = state.data_dir.join(tiled.to_string());
+    let children = [
+        "ifc-pieces/0/tileset.json",
+        "ifc-pieces/0/tiles/037.glb",
+        "ifc-pieces/1/mesh-batches/0/tileset.json",
+        "ifc-pieces/1/mesh-batches/0/tiles/0.glb",
+        "mesh-batches/2/tiles/01.glb",
+    ];
+    for child in children {
+        write_file(asset_dir.join(child), child.as_bytes());
+    }
+
+    for child in children {
+        let answer = get(&state, &format!("/api/v1/assets/{tiled}/{child}"), None).await;
+        assert_eq!(answer.status, StatusCode::OK, "{child}");
+        assert_eq!(answer.bytes, child.as_bytes(), "{child}");
+    }
+    let escape = get(
+        &state,
+        &format!("/api/v1/assets/{tiled}/ifc-pieces/..%2F..%2Fsecret"),
+        None,
+    )
+    .await;
+    assert_eq!(escape.status, StatusCode::BAD_REQUEST);
+}
+
 fn bundle_names(answer: &Answer) -> Vec<String> {
     assert_eq!(
         answer.status,
