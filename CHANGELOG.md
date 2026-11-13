@@ -134,6 +134,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 2026-11-12: `PUT /v1/assets/{id}/elements/{elementId}/properties` writes one existing property or quantity value into the IFC and the element store. An editor or admin who may modify the asset can change any property on it. A viewer cannot. Derived values and values defined on the element's type are refused. Geometry is unchanged and the asset is not re-tiled.
+- 2026-11-12: an IFC whose geometry read would pass the 1 GiB task is split
+  into smaller IFC files before it is meshed. Coupled elements stay together
+  and each file is tiled on its own. A model that fits one read still uses one
+  tileset. One element that does not fit the mesh budget on its own still fails.
+- 2026-11-12: an IFC whose meshes do not fit in the job budget is meshed in
+  batches and written as a parent tileset of child 3D Tiles. A model that
+  fits still uses one tileset from the existing tiler. One element that does
+  not fit the budget on its own still fails.
 - 2026-11-12: `GET /v1/assets/{id}/dxf?axis=&position=` writes each closed ring of
   that section as an `LWPOLYLINE` in the plane, XY for z, YZ for x and ZX for
   y. `cutHeight` still writes `3DFACE` and answers 400 together with `axis` or

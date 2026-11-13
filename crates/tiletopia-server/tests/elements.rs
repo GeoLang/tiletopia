@@ -9,7 +9,7 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 use tiletopia_core::mesh_tiler::MeshData;
 use tiletopia_ingest::ifc_elements::ModelOrigin;
-use tiletopia_server::db::{JobRecord, JobStatus};
+use tiletopia_server::db::{JobRecord, JobStatus, ModelPlacement};
 use tiletopia_server::element_store::{build_store_and_label_meshes, finish_build, store_path};
 use tiletopia_server::{AppState, Asset, AssetStatus, AssetType, router};
 use tower::ServiceExt;
@@ -1303,4 +1303,249 @@ async fn a_rebuild_replaces_the_store_and_a_failed_tiling_keeps_nothing() {
     );
     let after = owner_get(&state, &format!("/v1/assets/{ion_id}/elements")).await;
     assert_eq!(after["total"], before["total"]);
+}
+
+async fn ifc_with_store(state: &Arc<AppState>) -> (Uuid, i64, std::path::PathBuf) {
+    let (id, ion_id) = create_asset(state, Some(OWNER)).await;
+    let asset_dir = state.data_dir.join(id.to_string());
+    build_store(asset_dir.clone(), SMALL_BUILDING_IFC, vec![wall_mesh()]).await;
+    std::fs::create_dir_all(asset_dir.join("input")).unwrap();
+    let ifc_path = asset_dir.join("input/small.ifc");
+    std::fs::write(&ifc_path, SMALL_BUILDING_IFC).unwrap();
+    state
+        .db
+        .create_job(&JobRecord {
+            id: Uuid::new_v4(),
+            asset_id: id,
+            status: JobStatus::Done,
+            progress: 1.0,
+            input_path: "input/small.ifc".to_string(),
+            output_format: "3dtiles".to_string(),
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            error: None,
+            points_processed: 0,
+            tiles_written: 0,
+            placement: ModelPlacement::default(),
+            mesh_compression: Default::default(),
+            texture_compression: Default::default(),
+            photogrammetry_preset: Default::default(),
+        })
+        .await
+        .unwrap();
+    (id, ion_id, ifc_path)
+}
+
+async fn put_property(
+    state: &Arc<AppState>,
+    ion_id: i64,
+    element_id: &str,
+    key: &str,
+    value: Value,
+    subject: &str,
+    role: &str,
+) -> (StatusCode, Vec<u8>) {
+    let response = router(Arc::clone(state))
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/v1/assets/{ion_id}/elements/{}/properties",
+                    encoded(element_id)
+                ))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", token(subject, role)))
+                .body(Body::from(
+                    json!({ "key": key, "value": value }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, bytes)
+}
+
+fn json_body(bytes: &[u8]) -> Value {
+    serde_json::from_slice(bytes).unwrap_or(Value::Null)
+}
+
+#[tokio::test]
+async fn an_editor_writes_a_property_into_the_ifc_and_the_store() {
+    let state = test_state().await;
+    let (_id, ion_id, ifc_path) = ifc_with_store(&state).await;
+    let original = std::fs::read(&ifc_path).unwrap();
+
+    let (status, bytes) = put_property(
+        &state,
+        ion_id,
+        OUTER_WALL,
+        "Pset_WallCommon.FireRating",
+        json!(1),
+        OWNER,
+        "editor",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", json_body(&bytes));
+    assert_eq!(json_body(&bytes)["code"], "KIND_MISMATCH");
+    assert_eq!(std::fs::read(&ifc_path).unwrap(), original);
+
+    let (status, bytes) = put_property(
+        &state,
+        ion_id,
+        DOOR,
+        "Pset_DoorCommon.FireRating",
+        json!("EI90"),
+        OWNER,
+        "editor",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", json_body(&bytes));
+    assert_eq!(json_body(&bytes)["code"], "DEFINED_ON_TYPE");
+    assert!(
+        json_body(&bytes)["message"]
+            .as_str()
+            .unwrap()
+            .contains("defined on the element's type"),
+        "{}",
+        json_body(&bytes)
+    );
+    assert_eq!(std::fs::read(&ifc_path).unwrap(), original);
+
+    let (status, bytes) = put_property(
+        &state,
+        ion_id,
+        OUTER_WALL,
+        "Element.Tag",
+        json!("other"),
+        OWNER,
+        "editor",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", json_body(&bytes));
+    assert_eq!(json_body(&bytes)["code"], "DERIVED_PROPERTY");
+    assert_eq!(std::fs::read(&ifc_path).unwrap(), original);
+
+    let (status, bytes) = put_property(
+        &state,
+        ion_id,
+        OUTER_WALL,
+        "Pset_WallCommon.FireRating",
+        json!("REI90"),
+        OWNER,
+        "viewer",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(bytes.is_empty(), "{bytes:?}");
+    assert_eq!(std::fs::read(&ifc_path).unwrap(), original);
+
+    let (status, bytes) = put_property(
+        &state,
+        ion_id,
+        OUTER_WALL,
+        "Pset_WallCommon.FireRating",
+        json!("REI90"),
+        "someone-else",
+        "editor",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{}", json_body(&bytes));
+    assert_eq!(json_body(&bytes)["code"], "ResourceNotFound");
+    assert_eq!(std::fs::read(&ifc_path).unwrap(), original);
+
+    let (status, bytes) = put_property(
+        &state,
+        ion_id,
+        OUTER_WALL,
+        "missing",
+        json!("x"),
+        OWNER,
+        "editor",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{}", json_body(&bytes));
+    assert_eq!(json_body(&bytes)["code"], "PROPERTY_NOT_FOUND");
+
+    let (status, bytes) = put_property(
+        &state,
+        ion_id,
+        OUTER_WALL,
+        "Qto_WallBaseQuantities.Length",
+        json!(4100.0),
+        OWNER,
+        "editor",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", json_body(&bytes));
+    assert_eq!(
+        json_body(&bytes),
+        json!({ "displayValue": "4100 mm", "value": 4100.0, "units": "mm" })
+    );
+
+    let (status, bytes) = put_property(
+        &state,
+        ion_id,
+        OUTER_WALL,
+        "Pset_WallCommon.FireRating",
+        json!("REI90"),
+        OWNER,
+        "editor",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", json_body(&bytes));
+    assert_eq!(
+        json_body(&bytes),
+        json!({ "displayValue": "REI90", "value": "REI90", "units": null })
+    );
+
+    let ifc = String::from_utf8(std::fs::read(&ifc_path).unwrap()).unwrap();
+    assert_eq!(ifc.matches("IFCLABEL('REI90')").count(), 1);
+    assert!(!ifc.contains("IFCLABEL('REI60')"));
+    assert!(ifc.contains("IFCLABEL('EI30')"));
+    assert_eq!(ifc.matches("IFCPROPERTYSET(").count(), 2);
+    assert!(ifc.contains("4100."));
+    assert!(ifc.contains("2500."));
+    assert!(!ifc.contains("4000."));
+
+    let wall = owner_get(
+        &state,
+        &format!("/v1/assets/{ion_id}/elements/{}", encoded(OUTER_WALL)),
+    )
+    .await;
+    assert_eq!(
+        wall["properties"]["Pset_WallCommon.FireRating"]["value"],
+        "REI90"
+    );
+    assert_eq!(
+        wall["properties"]["Qto_WallBaseQuantities.Length"]["value"],
+        4100.0
+    );
+    let inner = owner_get(
+        &state,
+        &format!("/v1/assets/{ion_id}/elements/{}", encoded(INNER_WALL)),
+    )
+    .await;
+    assert_eq!(
+        inner["properties"]["Qto_WallBaseQuantities.Length"]["value"],
+        2500.0
+    );
+
+    let found = owner_get(
+        &state,
+        &format!("/v1/assets/{ion_id}/elements/search?search=REI90"),
+    )
+    .await;
+    assert_eq!(filtered_ids(&found), vec![OUTER_WALL.to_string()]);
+    let stale = owner_get(
+        &state,
+        &format!("/v1/assets/{ion_id}/elements/search?search=REI60"),
+    )
+    .await;
+    assert_eq!(stale["total"], 0);
 }

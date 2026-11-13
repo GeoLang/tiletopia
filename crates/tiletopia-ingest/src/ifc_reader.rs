@@ -23,7 +23,6 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tiletopia_core::bounding_volume::Aabb;
 use tiletopia_core::crs::{Coord3D, CrsDef, Route, Transformer};
 use tiletopia_core::spatial::{enu_to_ecef_matrix, geodetic_to_ecef};
@@ -77,6 +76,32 @@ pub fn read(path: &Path, max_bytes_held: u64) -> Result<Vec<MeshData>, IngestErr
         tracing::warn!("{}: {summary}", path.display());
     }
     Ok(elements.meshes)
+}
+
+/// One handed-off group of meshes from [`for_each_mesh_batch`].
+pub struct IfcMeshBatch {
+    pub meshes: Vec<MeshData>,
+    /// True only when `meshes` is the whole model and no earlier batch was handed off.
+    pub completes_the_model: bool,
+}
+
+/// What [`for_each_mesh_batch`] keeps after the meshes have been handed off.
+pub struct IfcMeshRead {
+    pub dropped: DroppedElements,
+    pub scan: IfcScan,
+}
+
+/// Mesh the IFC without retaining every mesh when they do not fit in `max_bytes_held`.
+///
+/// When the model fits, the callback runs once and [`IfcMeshBatch::completes_the_model`]
+/// is true. Otherwise each call receives one batch that fits, and that flag is false.
+/// One element's own meshes still have to fit, and the error is the byte limit.
+pub fn for_each_mesh_batch(
+    source: &[u8],
+    max_bytes_held: u64,
+    on_batch: impl FnMut(&IfcScan, IfcMeshBatch) -> Result<(), IngestError>,
+) -> Result<IfcMeshRead, IngestError> {
+    stream_ifc_meshes(source, max_bytes_held, true, on_batch)
 }
 
 // UTM's central scale of 0.9996 is below this, and it moves a vertex 40 cm per km
@@ -439,6 +464,30 @@ fn mesh_geometry(
 }
 
 pub fn read_elements(source: &[u8], max_bytes_held: u64) -> Result<IfcElements, IngestError> {
+    let mut meshes = Vec::new();
+    let read = stream_ifc_meshes(source, max_bytes_held, false, |_scan, batch| {
+        meshes = batch.meshes;
+        Ok(())
+    })?;
+    Ok(IfcElements {
+        meshes,
+        dropped: read.dropped,
+        scan: read.scan,
+    })
+}
+
+fn mesh_byte_limit(bytes_held: u64, express_id: u32, max_bytes_held: u64) -> IngestError {
+    IngestError::ParseError(format!(
+        "the IFC's meshes hold {bytes_held} bytes after #{express_id}, past the {max_bytes_held} byte limit"
+    ))
+}
+
+fn stream_ifc_meshes(
+    source: &[u8],
+    max_bytes_held: u64,
+    hand_off_full_batches: bool,
+    mut on_batch: impl FnMut(&IfcScan, IfcMeshBatch) -> Result<(), IngestError>,
+) -> Result<IfcMeshRead, IngestError> {
     let scanned = scan_ifc(source);
     let index = Arc::clone(&scanned.scan.index);
     let mut decoder = EntityDecoder::with_arc_index(source, Arc::clone(&index)).with_strict_reals();
@@ -474,10 +523,12 @@ pub fn read_elements(source: &[u8], max_bytes_held: u64) -> Result<IfcElements, 
 
     let dedup = GeometryRouter::new_dedup_cache();
     let mapped = GeometryRouter::new_mapped_item_cache();
-    let bytes_so_far = AtomicU64::new(0);
     let jobs = scanned.geometry_jobs;
-    let mesh_on_pool = || {
-        jobs.par_iter()
+    let scan = scanned.scan;
+    let element_material_colors = &styles.element_material_colors;
+    let mesh_chunk = |chunk: &[GeometryJob]| -> Vec<MeshOutcome> {
+        chunk
+            .par_iter()
             .map_init(
                 || {
                     let mut worker_decoder =
@@ -489,13 +540,6 @@ pub fn read_elements(source: &[u8], max_bytes_held: u64) -> Result<IfcElements, 
                     (worker_decoder, worker_router)
                 },
                 |(worker_decoder, worker_router), job| {
-                    if bytes_so_far.load(Ordering::Relaxed) > max_bytes_held {
-                        return MeshOutcome {
-                            id: job.id,
-                            meshes: Vec::new(),
-                            dropped: None,
-                        };
-                    }
                     let outcome = mesh_geometry(
                         worker_decoder,
                         worker_router,
@@ -503,10 +547,8 @@ pub fn read_elements(source: &[u8], max_bytes_held: u64) -> Result<IfcElements, 
                         &void_index,
                         &geometry_colors,
                         &material_styles,
-                        &styles.element_material_colors,
+                        element_material_colors,
                     );
-                    let mesh_bytes: u64 = outcome.meshes.iter().map(bytes_held_by_mesh).sum();
-                    bytes_so_far.fetch_add(mesh_bytes, Ordering::Relaxed);
                     if worker_decoder.cache_size() > WORKER_DECODED_ENTITIES {
                         // EntityDecoder's cache includes every decoded entity
                         worker_decoder.clear_entity_cache();
@@ -516,53 +558,114 @@ pub fn read_elements(source: &[u8], max_bytes_held: u64) -> Result<IfcElements, 
             )
             .collect::<Vec<_>>()
     };
-    let outcomes = if rayon::current_thread_index().is_some() {
-        mesh_on_pool()
-    } else {
-        // process_element recurses on rayon's default 2 MiB worker stack
-        ifc_lite_processing::run_on_geometry_pool(mesh_on_pool).map_err(|error| {
-            IngestError::ParseError(format!("could not start the geometry threads: {error}"))
-        })?
-    };
 
-    let mut meshes = Vec::new();
-    let mut bytes_held = 0u64;
+    let parallelism = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    let mut jobs_per_chunk = 1usize;
+    let mut largest_element_bytes = 1u64;
+    let mut cursor = 0usize;
+    let mut accumulator = Vec::new();
+    let mut accumulator_bytes = 0u64;
+    let mut handed_off = false;
     let mut dropped = DroppedElements::default();
-    for outcome in outcomes {
-        if let Some(reason) = outcome.dropped {
-            dropped.record(reason);
-        }
-        for mesh in outcome.meshes {
-            bytes_held = bytes_held.saturating_add(bytes_held_by_mesh(&mesh));
-            if bytes_held > max_bytes_held {
-                return Err(IngestError::ParseError(format!(
-                    "the IFC's meshes hold {bytes_held} bytes after #{}, \
-                     past the {max_bytes_held} byte limit",
-                    outcome.id
-                )));
+    let mut mesh_count = 0usize;
+    let mut vertex_count = 0usize;
+
+    while cursor < jobs.len() {
+        let end = (cursor + jobs_per_chunk).min(jobs.len());
+        let chunk = &jobs[cursor..end];
+        let outcomes = if rayon::current_thread_index().is_some() {
+            mesh_chunk(chunk)
+        } else {
+            // process_element recurses on rayon's default 2 MiB worker stack
+            ifc_lite_processing::run_on_geometry_pool(|| mesh_chunk(chunk)).map_err(|error| {
+                IngestError::ParseError(format!("could not start the geometry threads: {error}"))
+            })?
+        };
+        cursor = end;
+
+        for mut outcome in outcomes {
+            if let Some(reason) = outcome.dropped.take() {
+                dropped.record(reason);
             }
-            meshes.push(mesh);
+            if let Some(axis_factors) = axis_factors {
+                for mesh in &mut outcome.meshes {
+                    resize_mesh(mesh, axis_factors);
+                }
+            }
+            let element_bytes = outcome
+                .meshes
+                .iter()
+                .map(bytes_held_by_mesh)
+                .fold(0u64, u64::saturating_add);
+            largest_element_bytes = largest_element_bytes.max(element_bytes.max(1));
+
+            if hand_off_full_batches {
+                let mut element_running = 0u64;
+                for mesh in &outcome.meshes {
+                    element_running = element_running.saturating_add(bytes_held_by_mesh(mesh));
+                    if element_running > max_bytes_held {
+                        return Err(mesh_byte_limit(element_running, outcome.id, max_bytes_held));
+                    }
+                }
+                if accumulator_bytes.saturating_add(element_bytes) > max_bytes_held
+                    && !accumulator.is_empty()
+                {
+                    on_batch(
+                        &scan,
+                        IfcMeshBatch {
+                            meshes: std::mem::take(&mut accumulator),
+                            completes_the_model: false,
+                        },
+                    )?;
+                    accumulator_bytes = 0;
+                    handed_off = true;
+                }
+                mesh_count += outcome.meshes.len();
+                vertex_count += outcome
+                    .meshes
+                    .iter()
+                    .map(|mesh| mesh.positions.len())
+                    .sum::<usize>();
+                accumulator_bytes = accumulator_bytes.saturating_add(element_bytes);
+                accumulator.extend(outcome.meshes);
+                continue;
+            }
+
+            for mesh in outcome.meshes {
+                let next = accumulator_bytes.saturating_add(bytes_held_by_mesh(&mesh));
+                if next > max_bytes_held {
+                    return Err(mesh_byte_limit(next, outcome.id, max_bytes_held));
+                }
+                mesh_count += 1;
+                vertex_count += mesh.positions.len();
+                accumulator_bytes = next;
+                accumulator.push(mesh);
+            }
         }
+
+        let room = max_bytes_held.saturating_sub(accumulator_bytes).max(1);
+        let fit = (room / largest_element_bytes).clamp(1, parallelism as u64) as usize;
+        jobs_per_chunk = jobs_per_chunk.saturating_mul(2).min(fit).max(1);
     }
 
-    if let Some(axis_factors) = axis_factors {
-        for mesh in &mut meshes {
-            resize_mesh(mesh, axis_factors);
-        }
+    if !handed_off || !accumulator.is_empty() {
+        on_batch(
+            &scan,
+            IfcMeshBatch {
+                meshes: accumulator,
+                completes_the_model: !handed_off,
+            },
+        )?;
     }
 
     tracing::info!(
-        "Read {} IFC meshes ({} total vertices), {} elements lost geometry",
-        meshes.len(),
-        meshes.iter().map(|m| m.positions.len()).sum::<usize>(),
+        "Read {mesh_count} IFC meshes ({vertex_count} total vertices), {} elements lost geometry",
         dropped.count,
     );
 
-    Ok(IfcElements {
-        meshes,
-        dropped,
-        scan: scanned.scan,
-    })
+    Ok(IfcMeshRead { dropped, scan })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

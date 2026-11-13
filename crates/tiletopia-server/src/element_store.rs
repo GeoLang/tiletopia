@@ -418,6 +418,84 @@ pub fn build_store_and_label_meshes(
     Ok(meshes)
 }
 
+pub struct ElementStoreBuilder {
+    writer: StoreWriter,
+    seen: HashSet<u32>,
+    warnings: ExtractionWarnings,
+    requested_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl ElementStoreBuilder {
+    pub fn begin(asset_dir: &Path) -> Result<Self, String> {
+        std::fs::create_dir_all(asset_dir)
+            .map_err(|error| format!("could not create {}: {error}", asset_dir.display()))?;
+        let building = asset_dir.join(BUILDING_FILE_NAME);
+        remove_file_if_present(&building)?;
+        let writer = tokio::runtime::Handle::current()
+            .block_on(StoreWriter::create(&building, HashMap::new()))
+            .map_err(write_failure)?;
+        Ok(Self {
+            writer,
+            seen: HashSet::new(),
+            warnings: ExtractionWarnings::new(),
+            requested_at: chrono::Utc::now(),
+        })
+    }
+
+    pub fn note_mesh_hashes(&mut self, hashes: HashMap<String, String>) {
+        self.writer.mesh_hashes.extend(hashes);
+    }
+
+    pub fn ingest(
+        &mut self,
+        source: &[u8],
+        locations: &HashMap<String, ElementLocation>,
+        origin: ModelOrigin,
+        east_north_up_placement: Option<&MapConversionPlacement>,
+        scan: &IfcScan,
+    ) -> Result<HashMap<String, (String, Option<String>)>, String> {
+        let runtime = tokio::runtime::Handle::current();
+        let mut labels = HashMap::new();
+        let mut on_element = |element: ExtractedElement| {
+            if !self.seen.insert(element.express_id) {
+                return Ok(());
+            }
+            if locations.contains_key(&element.global_id) {
+                labels.insert(
+                    element.global_id.clone(),
+                    (element.class.clone(), element.storey.clone()),
+                );
+            }
+            self.writer.push(element);
+            if !self.writer.is_full() {
+                return Ok(());
+            }
+            runtime
+                .block_on(self.writer.flush())
+                .map_err(|error| IngestError::ElementRefused(write_failure(error)))
+        };
+        let piece_warnings = extract_elements_from_scan(
+            source,
+            scan,
+            locations,
+            origin,
+            east_north_up_placement,
+            &mut on_element,
+        )
+        .map_err(|error| format!("element extraction failed: {error}"))?;
+        for (name, count) in piece_warnings {
+            *self.warnings.entry(name).or_insert(0) += count;
+        }
+        Ok(labels)
+    }
+
+    pub fn finish(self) -> Result<(), String> {
+        tokio::runtime::Handle::current()
+            .block_on(self.writer.finish(&self.warnings, self.requested_at))
+            .map_err(write_failure)
+    }
+}
+
 pub fn finish_build(asset_dir: &Path, tiling_succeeded: bool) -> Result<(), String> {
     let building = asset_dir.join(BUILDING_FILE_NAME);
     if !tiling_succeeded {
@@ -697,6 +775,165 @@ fn scalar_json(
         (None, None, Some(boolean)) => serde_json::Value::Bool(boolean),
         (None, None, None) => serde_json::Value::Null,
     }
+}
+
+pub struct EditableProperty {
+    pub element_row: i64,
+    pub express_id: i64,
+    pub units: Option<String>,
+    pub text: Option<String>,
+    pub number: Option<f64>,
+    pub boolean: Option<bool>,
+}
+
+pub enum LoadedProperty {
+    NoElement,
+    NoProperty,
+    Found(EditableProperty),
+}
+
+pub enum PropertyStoreError {
+    Database(sqlx::Error),
+    Io(std::io::Error),
+    Missing,
+}
+
+pub async fn load_property(
+    connection: &mut SqliteConnection,
+    global_id: &str,
+    key: &str,
+) -> Result<LoadedProperty, sqlx::Error> {
+    let Some(element) =
+        sqlx::query("SELECT element_row, express_id FROM elements WHERE global_id = ? LIMIT 1")
+            .bind(global_id)
+            .fetch_optional(&mut *connection)
+            .await?
+    else {
+        return Ok(LoadedProperty::NoElement);
+    };
+    let element_row: i64 = element.try_get("element_row")?;
+    let express_id: i64 = element.try_get("express_id")?;
+    let Some(property) = sqlx::query(
+        "SELECT value_text, value_number, value_boolean, units FROM properties \
+         WHERE element_row = ? AND key = ? LIMIT 1",
+    )
+    .bind(element_row)
+    .bind(key)
+    .fetch_optional(&mut *connection)
+    .await?
+    else {
+        return Ok(LoadedProperty::NoProperty);
+    };
+    Ok(LoadedProperty::Found(EditableProperty {
+        element_row,
+        express_id,
+        units: property.try_get("units")?,
+        text: property.try_get("value_text")?,
+        number: property.try_get("value_number")?,
+        boolean: property.try_get("value_boolean")?,
+    }))
+}
+
+pub async fn store_edited_property(
+    asset_dir: &Path,
+    element_row: i64,
+    key: &str,
+    text: Option<String>,
+    number: Option<f64>,
+    boolean: Option<bool>,
+) -> Result<ElementPropertyView, PropertyStoreError> {
+    let source = store_path(asset_dir);
+    let editing = asset_dir.join("elements.sqlite.editing");
+    tokio::fs::copy(&source, &editing)
+        .await
+        .map_err(PropertyStoreError::Io)?;
+    let stored = update_edited_copy(&editing, element_row, key, text, number, boolean).await;
+    if stored.is_err() {
+        let _ = tokio::fs::remove_file(&editing).await;
+        return stored;
+    }
+    if let Err(error) = tokio::fs::rename(&editing, &source).await {
+        let _ = tokio::fs::remove_file(&editing).await;
+        return Err(PropertyStoreError::Io(error));
+    }
+    stored
+}
+
+async fn update_edited_copy(
+    path: &Path,
+    element_row: i64,
+    key: &str,
+    text: Option<String>,
+    number: Option<f64>,
+    boolean: Option<bool>,
+) -> Result<ElementPropertyView, PropertyStoreError> {
+    let mut connection = SqliteConnectOptions::new()
+        .filename(path)
+        .journal_mode(SqliteJournalMode::Off)
+        .synchronous(SqliteSynchronous::Off)
+        .connect()
+        .await
+        .map_err(PropertyStoreError::Database)?;
+    let listed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM element_search WHERE rowid = ?")
+        .bind(element_row)
+        .fetch_one(&mut connection)
+        .await
+        .map_err(PropertyStoreError::Database)?;
+    if listed == 0 {
+        return Err(PropertyStoreError::Missing);
+    }
+    let updated = sqlx::query(
+        "UPDATE properties SET value_text = ?, value_number = ?, value_boolean = ? \
+         WHERE element_row = ? AND key = ?",
+    )
+    .bind(text)
+    .bind(number)
+    .bind(boolean)
+    .bind(element_row)
+    .bind(key)
+    .execute(&mut connection)
+    .await
+    .map_err(PropertyStoreError::Database)?;
+    if updated.rows_affected() == 0 {
+        return Err(PropertyStoreError::Missing);
+    }
+    let rows = sqlx::query(
+        "SELECT value_text, value_number FROM properties WHERE element_row = ? ORDER BY rowid",
+    )
+    .bind(element_row)
+    .fetch_all(&mut connection)
+    .await
+    .map_err(PropertyStoreError::Database)?;
+    let mut indexed = Vec::new();
+    for row in &rows {
+        let text: Option<String> = row
+            .try_get("value_text")
+            .map_err(PropertyStoreError::Database)?;
+        let number: Option<f64> = row
+            .try_get("value_number")
+            .map_err(PropertyStoreError::Database)?;
+        if let Some(text) = text {
+            indexed.push(with_word_parts(&text));
+        } else if let Some(number) = number {
+            indexed.push(number.to_string());
+        }
+    }
+    sqlx::query("UPDATE element_search SET property_values = ? WHERE rowid = ?")
+        .bind(indexed.join(" "))
+        .bind(element_row)
+        .execute(&mut connection)
+        .await
+        .map_err(PropertyStoreError::Database)?;
+    let property = sqlx::query(
+        "SELECT value_text, value_number, value_boolean, units FROM properties \
+         WHERE element_row = ? AND key = ?",
+    )
+    .bind(element_row)
+    .bind(key)
+    .fetch_one(&mut connection)
+    .await
+    .map_err(PropertyStoreError::Database)?;
+    property_view(&property).map_err(PropertyStoreError::Database)
 }
 
 pub async fn get_element(

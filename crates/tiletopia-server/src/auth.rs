@@ -876,6 +876,7 @@ mod tests {
             "/v1/assets/42/elements/aggregate",
             "/v1/assets/42/elements/properties",
             "/v1/assets/42/elements/property-index",
+            "/v1/assets/42/elements/2O2Fr$t4X7Zf8NOew3FLOH/properties",
             "/v1/assets/42/tree/children",
             "/v1/assets/42/tree/children/",
             "/v1/assets/42/tree/parents",

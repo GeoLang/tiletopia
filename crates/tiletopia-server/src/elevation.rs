@@ -25,7 +25,7 @@ use tiletopia_terrain::global_dem::DemTile;
 pub const METERS_PER_DEG_LAT: f64 = 111_320.0;
 
 // infrastructure sizes the tiletopia task at 1024 MiB
-const TASK_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
+pub(crate) const TASK_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
 const CONCURRENT_BUILDS: usize = 2;
 // the job worker tiles one job at a time beside two builds, each budgeted a third of the task
 pub(crate) const BUILD_BUDGET_BYTES: u64 = TASK_MEMORY_BYTES / 3;

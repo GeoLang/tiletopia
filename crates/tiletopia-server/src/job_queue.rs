@@ -1,6 +1,9 @@
 //! Async job queue for tiling operations.
 
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
+use sqlx::{ConnectOptions, Connection};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -10,7 +13,7 @@ use uuid::Uuid;
 use crate::AssetType;
 use crate::db::{Database, JobRecord, JobStatus, ModelPlacement};
 use crate::element_store;
-use crate::elevation::{DemStore, JOB_BUDGET_BYTES};
+use crate::elevation::{DemStore, JOB_BUDGET_BYTES, TASK_MEMORY_BYTES};
 use crate::ion_upload::remove_dir_if_present;
 use crate::photogrammetry::{
     self, DELETED_ASSET_ERROR, NODE_ODM_URL_ENV, NodeOdm, PhotogrammetryPreset,
@@ -18,7 +21,7 @@ use crate::photogrammetry::{
 use crate::terrain_bundle;
 use crate::webhooks::{WebhookEvent, WebhookQueue};
 use tiletopia_core::glb_writer::MeshCompression;
-use tiletopia_core::mesh_tiler::TextureCompression;
+use tiletopia_core::mesh_tiler::{MeshBatchTiles, MeshData as TiledMesh, TextureCompression};
 use tiletopia_ingest::ifc_reader::{MapConversionPlacement, SitePlacement};
 use tiletopia_store::TileStore;
 
@@ -36,6 +39,12 @@ const NO_SPLAT_PLACEMENT_ERROR: &str = "the splat tiler has no coordinates for t
      upload it with longitude and latitude";
 
 const INTERRUPTED_JOB_ERROR: &str = "the server restarted during this job, tile the asset again";
+
+// build_store_and_label_meshes leaves this file until finish_build publishes it
+const ELEMENT_STORE_BUILDING_FILE: &str = "elements.sqlite.building";
+
+// element_store rounds mesh coordinates to millimetres before hashing
+const MESH_HASH_UNITS_PER_METRE: f64 = 1000.0;
 
 #[derive(Debug, Clone)]
 struct TiledAsset {
@@ -734,6 +743,10 @@ pub(crate) fn move_into_tileset_frame(
     Ok(Some(map_conversion))
 }
 
+// A geometry read peaks near ten times the IFC size.
+const IFC_GEOMETRY_PEAK_PER_SOURCE_BYTE: u64 = 10;
+const MAX_IFC_PIECE_BYTES: u64 = 32 * 1024 * 1024;
+
 /// Tile a mesh with this repository's own readers and mesh tiler. The source
 /// coordinates are metres, placed by longitude and latitude alone.
 fn tile_native(
@@ -743,24 +756,35 @@ fn tile_native(
     source_is_z_up: bool,
 ) -> Result<TiledAsset, String> {
     let input_path = Path::new(&job.input_path);
-    let ifc_source = if extension == "ifc" {
+    if extension == "ifc" {
         let source = tiletopia_ingest::ifc_reader::mapped_ifc(input_path)
             .map_err(|e| format!("could not read {}: {e}", input_path.display()))?;
-        Some(source)
-    } else {
-        None
-    };
-    let mut origin = mesh_origin(ifc_source.as_deref(), &job.placement)?;
+        let source_len = u64::try_from(source.len()).unwrap_or(u64::MAX);
+        let groups = tiletopia_ingest::ifc_split::group_count(
+            source_len,
+            TASK_MEMORY_BYTES / IFC_GEOMETRY_PEAK_PER_SOURCE_BYTE,
+            MAX_IFC_PIECE_BYTES,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(group_count) = groups {
+            let split_dir = std::env::temp_dir().join(format!("tiletopia-ifc-split-{}", job.id));
+            std::fs::create_dir_all(&split_dir)
+                .map_err(|error| format!("could not create {}: {error}", split_dir.display()))?;
+            let tiled = (|| {
+                let pieces =
+                    tiletopia_ingest::ifc_split::split_ifc(&source, &split_dir, group_count)
+                        .map_err(|error| error.to_string())?;
+                drop(source);
+                tile_split_pieces(job, asset_dir, &pieces, source_is_z_up)
+            })();
+            let _ = std::fs::remove_dir_all(&split_dir);
+            return tiled;
+        }
+        return tile_ifc(job, asset_dir, &source, source_is_z_up);
+    }
 
-    let mut dropped_elements = None;
-    let mut ifc_scan = None;
-    let mut read = if let Some(source) = &ifc_source {
-        let elements = tiletopia_ingest::ifc_reader::read_elements(source, JOB_BUDGET_BYTES)
-            .map_err(|e| e.to_string())?;
-        dropped_elements = elements.dropped.summary();
-        ifc_scan = Some(elements.scan);
-        elements.meshes
-    } else if extension == "dxf" {
+    let mut origin = mesh_origin(None, &job.placement)?;
+    let mut read = if extension == "dxf" {
         let upload_unit = job
             .placement
             .units
@@ -774,15 +798,9 @@ fn tile_native(
         tiletopia_ingest::read_mesh(input_path, JOB_BUDGET_BYTES).map_err(|e| e.to_string())?
     };
     if read.is_empty() {
-        return Err(match dropped_elements {
-            Some(dropped_elements) => {
-                format!("the {extension} holds no geometry: {dropped_elements}")
-            }
-            None => format!("the {extension} holds no geometry"),
-        });
+        return Err(format!("the {extension} holds no geometry"));
     }
-    let east_north_up_placement =
-        move_into_tileset_frame(&job.placement, ifc_source.as_deref(), &mut read)?;
+    let east_north_up_placement = move_into_tileset_frame(&job.placement, None, &mut read)?;
     if let Some(placement) = &east_north_up_placement {
         origin = SitePlacement {
             x_axis_from_east_radians: 0.0,
@@ -790,28 +808,451 @@ fn tile_native(
         };
     }
 
-    let meshes: Vec<tiletopia_core::mesh_tiler::MeshData> =
-        read.into_iter().map(Into::into).collect();
-    let meshes = match &ifc_source {
-        Some(source) => element_store::build_store_and_label_meshes(
+    let meshes: Vec<TiledMesh> = read.into_iter().map(Into::into).collect();
+    let config = mesh_tiling_config(job, &origin, source_is_z_up, extension);
+    let stats = tiletopia_core::mesh_tiler::tile_meshes(&meshes, asset_dir, &config)
+        .map_err(|e| e.to_string())?;
+    Ok(TiledAsset {
+        tiles_written: stats.tile_count as u64,
+        dropped_elements: None,
+    })
+}
+
+fn tile_ifc(
+    job: &JobRecord,
+    asset_dir: &Path,
+    source: &[u8],
+    source_is_z_up: bool,
+) -> Result<TiledAsset, String> {
+    let mut origin = mesh_origin(Some(source), &job.placement)?;
+    let upload_places_the_model =
+        job.placement.longitude.is_some() && job.placement.latitude.is_some();
+    let mut complete_meshes = None;
+    let mut labels = None;
+    let mut bounds = HashMap::new();
+    let mut digests = HashMap::new();
+    let mut batch_tiles = None;
+    let mut map_conversion = None;
+    let mut saw_mesh = false;
+
+    let read = tiletopia_ingest::ifc_reader::for_each_mesh_batch(
+        source,
+        JOB_BUDGET_BYTES,
+        |scan, batch| {
+            if batch.completes_the_model {
+                complete_meshes = Some(batch.meshes);
+                return Ok(());
+            }
+            if batch.meshes.is_empty() {
+                return Ok(());
+            }
+            saw_mesh = true;
+            if batch_tiles.is_none() {
+                if !upload_places_the_model {
+                    map_conversion =
+                        tiletopia_ingest::ifc_reader::map_conversion_placement(source)?;
+                }
+                if let Some(placement) = &map_conversion {
+                    origin = SitePlacement {
+                        x_axis_from_east_radians: 0.0,
+                        ..placement.origin
+                    };
+                }
+                batch_tiles = Some(MeshBatchTiles::new(
+                    asset_dir,
+                    mesh_tiling_config(job, &origin, source_is_z_up, "ifc"),
+                ));
+            }
+            if labels.is_none() {
+                labels = Some(element_labels(source, scan, model_origin(&origin))?);
+            }
+            let mut meshes = place_ifc_batch(map_conversion.as_ref(), batch.meshes)?;
+            remember_meshes(&meshes, &mut bounds, &mut digests)
+                .map_err(tiletopia_ingest::IngestError::ParseError)?;
+            if let Some(labels) = &labels {
+                label_meshes(&mut meshes, labels, &bounds);
+            }
+            batch_tiles
+                .as_mut()
+                .expect("the batch tileset is opened with the first batch")
+                .write_batch(&meshes)
+                .map_err(|error| tiletopia_ingest::IngestError::ParseError(error.to_string()))?;
+            drop(meshes);
+            Ok(())
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    if let Some(mut meshes) = complete_meshes {
+        if meshes.is_empty() {
+            return Err(no_geometry("ifc", read.dropped.summary()));
+        }
+        let east_north_up_placement =
+            move_into_tileset_frame(&job.placement, Some(source), &mut meshes)?;
+        if let Some(placement) = &east_north_up_placement {
+            origin = SitePlacement {
+                x_axis_from_east_radians: 0.0,
+                ..placement.origin
+            };
+        }
+        let meshes: Vec<TiledMesh> = meshes.into_iter().map(Into::into).collect();
+        let meshes = element_store::build_store_and_label_meshes(
             source,
             asset_dir,
-            tiletopia_ingest::ifc_elements::ModelOrigin {
-                longitude: origin.longitude,
-                latitude: origin.latitude,
-                height: origin.elevation,
-                x_axis_from_east_radians: origin.x_axis_from_east_radians,
-            },
+            model_origin(&origin),
             east_north_up_placement.as_ref(),
             meshes,
-            ifc_scan.as_ref(),
-        )?,
-        None => meshes,
-    };
+            Some(&read.scan),
+        )?;
+        let config = mesh_tiling_config(job, &origin, source_is_z_up, "ifc");
+        let stats = tiletopia_core::mesh_tiler::tile_meshes(&meshes, asset_dir, &config)
+            .map_err(|error| error.to_string())?;
+        return Ok(TiledAsset {
+            tiles_written: stats.tile_count as u64,
+            dropped_elements: read.dropped.summary(),
+        });
+    }
+    if !saw_mesh {
+        return Err(no_geometry("ifc", read.dropped.summary()));
+    }
+    let stats = batch_tiles
+        .expect("a batch was written")
+        .finish()
+        .map_err(|error| error.to_string())?;
+    let location_meshes = meshes_for_element_locations(bounds);
+    let _labeled = element_store::build_store_and_label_meshes(
+        source,
+        asset_dir,
+        model_origin(&origin),
+        map_conversion.as_ref(),
+        location_meshes,
+        Some(&read.scan),
+    )?;
+    write_mesh_hashes(asset_dir, &finish_mesh_hashes(digests))?;
+    Ok(TiledAsset {
+        tiles_written: stats.tile_count as u64,
+        dropped_elements: read.dropped.summary(),
+    })
+}
 
+struct PieceTiles {
+    wrote_tileset: bool,
+    dropped: Option<String>,
+}
+
+fn tile_split_pieces(
+    job: &JobRecord,
+    asset_dir: &Path,
+    pieces: &[tiletopia_ingest::ifc_split::IfcPiece],
+    source_is_z_up: bool,
+) -> Result<TiledAsset, String> {
+    if pieces.is_empty() {
+        return Err(no_geometry("ifc", None));
+    }
+    let first = tiletopia_ingest::ifc_reader::mapped_ifc(&pieces[0].path)
+        .map_err(|error| format!("could not read {}: {error}", pieces[0].path.display()))?;
+    let mut origin = mesh_origin(Some(&first), &job.placement)?;
+    let upload_places_the_model =
+        job.placement.longitude.is_some() && job.placement.latitude.is_some();
+    let map_conversion = if upload_places_the_model {
+        None
+    } else {
+        tiletopia_ingest::ifc_reader::map_conversion_placement(&first)
+            .map_err(|error| error.to_string())?
+    };
+    if let Some(placement) = &map_conversion {
+        origin = SitePlacement {
+            x_axis_from_east_radians: 0.0,
+            ..placement.origin
+        };
+    }
+    drop(first);
+
+    let parent_config = mesh_tiling_config(job, &origin, source_is_z_up, "ifc");
+    let mut child_config = parent_config.clone();
+    child_config.root_transform = None;
+    let mut parent = MeshBatchTiles::new(asset_dir, parent_config);
+    let store = Mutex::new(element_store::ElementStoreBuilder::begin(asset_dir)?);
+    let already_tiled = Mutex::new(HashSet::new());
+    let runtime = tokio::runtime::Handle::current();
+    let wave_size = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    let mut outcomes = Vec::with_capacity(pieces.len());
+    for wave in pieces.chunks(wave_size) {
+        let wave_index = outcomes.len();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = wave
+                .iter()
+                .enumerate()
+                .map(|(offset, piece)| {
+                    let index = wave_index + offset;
+                    let runtime = &runtime;
+                    let origin = &origin;
+                    let map_conversion = map_conversion.as_ref();
+                    let child_config = &child_config;
+                    let already_tiled = &already_tiled;
+                    let store = &store;
+                    scope.spawn(move || {
+                        let _entered = runtime.enter();
+                        let source = tiletopia_ingest::ifc_reader::mapped_ifc(&piece.path)
+                            .map_err(|error| {
+                                format!("could not read {}: {error}", piece.path.display())
+                            })?;
+                        let piece_dir = asset_dir.join("ifc-pieces").join(index.to_string());
+                        let outcome = tile_one_piece(
+                            &source,
+                            &piece_dir,
+                            origin,
+                            map_conversion,
+                            child_config,
+                            already_tiled,
+                            store,
+                        );
+                        drop(source);
+                        let _ = std::fs::remove_file(&piece.path);
+                        outcome.map(|tiles| (index, tiles))
+                    })
+                })
+                .collect();
+            for handle in handles {
+                outcomes.push(
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err("an IFC piece panicked".to_string())),
+                );
+            }
+        });
+    }
+    let mut dropped = Vec::new();
+    let mut saw_tiles = false;
+    for outcome in outcomes {
+        let (index, tiles) = outcome?;
+        if let Some(summary) = tiles.dropped {
+            dropped.push(summary);
+        }
+        if tiles.wrote_tileset {
+            saw_tiles = true;
+            let piece_dir = asset_dir.join("ifc-pieces").join(index.to_string());
+            parent
+                .adopt_tileset(
+                    &piece_dir.join("tileset.json"),
+                    format!("ifc-pieces/{index}/tileset.json"),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    if !saw_tiles {
+        return Err(no_geometry("ifc", join_dropped(&dropped)));
+    }
+    store
+        .into_inner()
+        .map_err(|_| "the element store was poisoned".to_string())?
+        .finish()?;
+    let stats = parent.finish().map_err(|error| error.to_string())?;
+    Ok(TiledAsset {
+        tiles_written: stats.tile_count as u64,
+        dropped_elements: join_dropped(&dropped),
+    })
+}
+
+fn tile_one_piece(
+    source: &[u8],
+    piece_dir: &Path,
+    origin: &SitePlacement,
+    map_conversion: Option<&MapConversionPlacement>,
+    child_config: &tiletopia_core::mesh_tiler::MeshTilingConfig,
+    already_tiled: &Mutex<HashSet<String>>,
+    store: &Mutex<element_store::ElementStoreBuilder>,
+) -> Result<PieceTiles, String> {
+    let mut complete_meshes = None;
+    let mut labels = None;
+    let mut bounds = HashMap::new();
+    let mut digests = HashMap::new();
+    let mut batch_tiles = None;
+    let mut saw_mesh = false;
+    let read = tiletopia_ingest::ifc_reader::for_each_mesh_batch(
+        source,
+        JOB_BUDGET_BYTES,
+        |scan, batch| {
+            if batch.completes_the_model {
+                complete_meshes = Some(batch.meshes);
+                return Ok(());
+            }
+            if batch.meshes.is_empty() {
+                return Ok(());
+            }
+            if labels.is_none() {
+                labels = Some(element_labels(source, scan, model_origin(origin))?);
+            }
+            let mut tiled = already_tiled.lock().map_err(|_| {
+                tiletopia_ingest::IngestError::ParseError(
+                    "the tiled-element set was poisoned".to_string(),
+                )
+            })?;
+            let mut meshes = without_tiled(place_ifc_batch(map_conversion, batch.meshes)?, &tiled);
+            if meshes.is_empty() {
+                return Ok(());
+            }
+            saw_mesh = true;
+            mark_tiled(&meshes, &mut tiled);
+            drop(tiled);
+            if batch_tiles.is_none() {
+                batch_tiles = Some(MeshBatchTiles::new(piece_dir, child_config.clone()));
+            }
+            remember_meshes(&meshes, &mut bounds, &mut digests)
+                .map_err(tiletopia_ingest::IngestError::ParseError)?;
+            if let Some(labels) = &labels {
+                label_meshes(&mut meshes, labels, &bounds);
+            }
+            batch_tiles
+                .as_mut()
+                .expect("the piece tileset opens with the first mesh")
+                .write_batch(&meshes)
+                .map_err(|error| tiletopia_ingest::IngestError::ParseError(error.to_string()))?;
+            Ok(())
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    if let Some(meshes) = complete_meshes {
+        let mut tiled = already_tiled
+            .lock()
+            .map_err(|_| "the tiled-element set was poisoned".to_string())?;
+        let meshes = without_tiled(
+            place_ifc_batch(map_conversion, meshes).map_err(|error| error.to_string())?,
+            &tiled,
+        );
+        mark_tiled(&meshes, &mut tiled);
+        drop(tiled);
+        let mut piece_bounds = HashMap::new();
+        let mut piece_digests = HashMap::new();
+        remember_meshes(&meshes, &mut piece_bounds, &mut piece_digests)?;
+        let locations = locations_of(&meshes, origin);
+        let mesh_labels = {
+            let mut store = store
+                .lock()
+                .map_err(|_| "the element store was poisoned".to_string())?;
+            store.note_mesh_hashes(finish_mesh_hashes(piece_digests));
+            store.ingest(
+                source,
+                &locations,
+                model_origin(origin),
+                map_conversion,
+                &read.scan,
+            )?
+        };
+        if meshes.is_empty() {
+            return Ok(PieceTiles {
+                wrote_tileset: false,
+                dropped: read.dropped.summary(),
+            });
+        }
+        let mut meshes = meshes;
+        label_meshes(&mut meshes, &mesh_labels, &piece_bounds);
+        tiletopia_core::mesh_tiler::tile_meshes(&meshes, piece_dir, child_config)
+            .map_err(|error| error.to_string())?;
+        return Ok(PieceTiles {
+            wrote_tileset: true,
+            dropped: read.dropped.summary(),
+        });
+    }
+
+    let locations = locations_of(&meshes_for_element_locations(bounds), origin);
+    {
+        let mut store = store
+            .lock()
+            .map_err(|_| "the element store was poisoned".to_string())?;
+        store.note_mesh_hashes(finish_mesh_hashes(digests));
+        store.ingest(
+            source,
+            &locations,
+            model_origin(origin),
+            map_conversion,
+            &read.scan,
+        )?;
+    };
+    if !saw_mesh {
+        return Ok(PieceTiles {
+            wrote_tileset: false,
+            dropped: read.dropped.summary(),
+        });
+    }
+    batch_tiles
+        .expect("a piece batch was written")
+        .finish()
+        .map_err(|error| error.to_string())?;
+    Ok(PieceTiles {
+        wrote_tileset: true,
+        dropped: read.dropped.summary(),
+    })
+}
+
+fn join_dropped(dropped: &[String]) -> Option<String> {
+    if dropped.is_empty() {
+        None
+    } else {
+        Some(dropped.join(" "))
+    }
+}
+
+fn locations_of(
+    meshes: &[TiledMesh],
+    origin: &SitePlacement,
+) -> HashMap<String, tiletopia_ingest::ifc_elements::ElementLocation> {
+    tiletopia_ingest::ifc_elements::element_locations(
+        meshes
+            .iter()
+            .filter_map(|mesh| Some((mesh.asset_id.as_deref()?, mesh.positions.as_slice()))),
+        model_origin(origin),
+    )
+}
+
+fn without_tiled(meshes: Vec<TiledMesh>, already_tiled: &HashSet<String>) -> Vec<TiledMesh> {
+    meshes
+        .into_iter()
+        .filter(|mesh| match mesh.asset_id.as_deref() {
+            Some(id) => !already_tiled.contains(id),
+            None => true,
+        })
+        .collect()
+}
+
+fn mark_tiled(meshes: &[TiledMesh], already_tiled: &mut HashSet<String>) {
+    for mesh in meshes {
+        if let Some(id) = &mesh.asset_id {
+            already_tiled.insert(id.clone());
+        }
+    }
+}
+
+fn no_geometry(extension: &str, dropped_elements: Option<String>) -> String {
+    match dropped_elements {
+        Some(dropped_elements) => {
+            format!("the {extension} holds no geometry: {dropped_elements}")
+        }
+        None => format!("the {extension} holds no geometry"),
+    }
+}
+
+fn model_origin(origin: &SitePlacement) -> tiletopia_ingest::ifc_elements::ModelOrigin {
+    tiletopia_ingest::ifc_elements::ModelOrigin {
+        longitude: origin.longitude,
+        latitude: origin.latitude,
+        height: origin.elevation,
+        x_axis_from_east_radians: origin.x_axis_from_east_radians,
+    }
+}
+
+fn mesh_tiling_config(
+    job: &JobRecord,
+    origin: &SitePlacement,
+    source_is_z_up: bool,
+    extension: &str,
+) -> tiletopia_core::mesh_tiler::MeshTilingConfig {
     // the tileset's frame is the ENU one the root transform names, so a z-up
     // source rotates the written glTF only
-    let config = tiletopia_core::mesh_tiler::MeshTilingConfig {
+    tiletopia_core::mesh_tiler::MeshTilingConfig {
         root_transform: Some(with_x_axis_from_east(
             tiletopia_core::spatial::enu_to_ecef_matrix(
                 origin.latitude.to_radians(),
@@ -825,13 +1266,173 @@ fn tile_native(
         texture_compression: job.texture_compression,
         cad_edges: extension == "ifc",
         ..Default::default()
-    };
-    let stats = tiletopia_core::mesh_tiler::tile_meshes(&meshes, asset_dir, &config)
-        .map_err(|e| e.to_string())?;
-    Ok(TiledAsset {
-        tiles_written: stats.tile_count as u64,
-        dropped_elements,
-    })
+    }
+}
+
+fn place_ifc_batch(
+    map_conversion: Option<&MapConversionPlacement>,
+    mut meshes: Vec<tiletopia_ingest::MeshData>,
+) -> Result<Vec<TiledMesh>, tiletopia_ingest::IngestError> {
+    if let Some(placement) = map_conversion {
+        placement.place_in_east_north_up(&mut meshes)?;
+    }
+    Ok(meshes.into_iter().map(Into::into).collect())
+}
+
+fn element_labels(
+    source: &[u8],
+    scan: &tiletopia_ingest::ifc_elements::IfcScan,
+    origin: tiletopia_ingest::ifc_elements::ModelOrigin,
+) -> Result<HashMap<String, (String, Option<String>)>, tiletopia_ingest::IngestError> {
+    let locations = HashMap::<String, tiletopia_ingest::ifc_elements::ElementLocation>::new();
+    let mut labels = HashMap::new();
+    tiletopia_ingest::ifc_elements::extract_elements_from_scan(
+        source,
+        scan,
+        &locations,
+        origin,
+        None,
+        |element| {
+            labels.insert(element.global_id, (element.class, element.storey));
+            Ok(())
+        },
+    )?;
+    Ok(labels)
+}
+
+struct ElementBounds {
+    minimum: [f64; 3],
+    maximum: [f64; 3],
+}
+
+fn remember_meshes(
+    meshes: &[TiledMesh],
+    bounds: &mut HashMap<String, ElementBounds>,
+    digests: &mut HashMap<String, Vec<Vec<u8>>>,
+) -> Result<(), String> {
+    for mesh in meshes {
+        let Some(element_id) = mesh.asset_id.as_deref() else {
+            continue;
+        };
+        let mut finite = None;
+        for position in &mesh.positions {
+            if !position.iter().all(|coordinate| coordinate.is_finite()) {
+                continue;
+            }
+            let (minimum, maximum) = finite.get_or_insert((*position, *position));
+            for axis in 0..3 {
+                minimum[axis] = minimum[axis].min(position[axis]);
+                maximum[axis] = maximum[axis].max(position[axis]);
+            }
+        }
+        if let Some((minimum, maximum)) = finite {
+            let entry = bounds
+                .entry(element_id.to_string())
+                .or_insert(ElementBounds { minimum, maximum });
+            for axis in 0..3 {
+                entry.minimum[axis] = entry.minimum[axis].min(minimum[axis]);
+                entry.maximum[axis] = entry.maximum[axis].max(maximum[axis]);
+            }
+        }
+        let mut digest = Sha256::new();
+        for index in &mesh.indices {
+            let Some(position) = mesh.positions.get(*index as usize) else {
+                return Err(format!(
+                    "element {element_id} indexes a vertex it does not have"
+                ));
+            };
+            for coordinate in position {
+                let rounded = (coordinate * MESH_HASH_UNITS_PER_METRE).round() as i64;
+                digest.update(rounded.to_le_bytes());
+            }
+        }
+        digests
+            .entry(element_id.to_string())
+            .or_default()
+            .push(digest.finalize().to_vec());
+    }
+    Ok(())
+}
+
+fn label_meshes(
+    meshes: &mut [TiledMesh],
+    labels: &HashMap<String, (String, Option<String>)>,
+    bounds: &HashMap<String, ElementBounds>,
+) {
+    for mesh in meshes {
+        let Some(element_id) = mesh.asset_id.as_deref() else {
+            continue;
+        };
+        if !bounds.contains_key(element_id) {
+            continue;
+        }
+        let Some((class, storey)) = labels.get(element_id) else {
+            continue;
+        };
+        mesh.class = Some(class.clone());
+        mesh.storey = storey.clone();
+    }
+}
+
+fn finish_mesh_hashes(digests: HashMap<String, Vec<Vec<u8>>>) -> HashMap<String, String> {
+    digests
+        .into_iter()
+        .map(|(element_id, mut element_digests)| {
+            element_digests.sort_unstable();
+            let mut combined = Sha256::new();
+            for digest in &element_digests {
+                combined.update(digest);
+            }
+            (element_id, crate::users::to_hex(&combined.finalize()))
+        })
+        .collect()
+}
+
+fn meshes_for_element_locations(bounds: HashMap<String, ElementBounds>) -> Vec<TiledMesh> {
+    bounds
+        .into_iter()
+        .map(|(asset_id, bounds)| TiledMesh {
+            positions: vec![bounds.minimum, bounds.maximum],
+            normals: Vec::new(),
+            texcoords: Vec::new(),
+            indices: Vec::new(),
+            name: String::new(),
+            asset_id: Some(asset_id),
+            class: None,
+            storey: None,
+            base_color_factor: None,
+            texture: None,
+            element_color: None,
+        })
+        .collect()
+}
+
+fn write_mesh_hashes(asset_dir: &Path, hashes: &HashMap<String, String>) -> Result<(), String> {
+    if hashes.is_empty() {
+        return Ok(());
+    }
+    let path = asset_dir.join(ELEMENT_STORE_BUILDING_FILE);
+    let runtime = tokio::runtime::Handle::current();
+    runtime
+        .block_on(async {
+            let mut connection = SqliteConnectOptions::new()
+                .filename(&path)
+                .journal_mode(SqliteJournalMode::Off)
+                .synchronous(SqliteSynchronous::Off)
+                .connect()
+                .await?;
+            sqlx::query("BEGIN").execute(&mut connection).await?;
+            for (global_id, hash) in hashes {
+                sqlx::query("UPDATE elements SET mesh_hash = ?1 WHERE global_id = ?2")
+                    .bind(hash)
+                    .bind(global_id)
+                    .execute(&mut connection)
+                    .await?;
+            }
+            sqlx::query("COMMIT").execute(&mut connection).await?;
+            connection.close().await
+        })
+        .map_err(|error| format!("the element store could not be written: {error}"))
 }
 
 fn with_x_axis_from_east(east_north_up: [f64; 16], x_axis_from_east_radians: f64) -> [f64; 16] {

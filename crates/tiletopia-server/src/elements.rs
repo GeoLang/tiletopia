@@ -2,8 +2,9 @@ use axum::{
     Router,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware,
     response::{IntoResponse, Json, Response},
-    routing::get,
+    routing::{get, put},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -11,14 +12,20 @@ use sqlx::SqliteConnection;
 use std::sync::Arc;
 use tokio::sync::{Semaphore, SemaphorePermit};
 
+use crate::dxf_export::mesh_source;
 use crate::element_query::{parse_aggregation_keys, parse_filter, parse_group_by, parse_search};
 use crate::element_store::{
-    self, MAX_GROUPS, MAX_TREE_CHILDREN, aggregate_elements, aggregate_groups,
-    count_element_groups, get_element, list_elements, list_property_names, open_store,
-    property_index_status, search_elements, tree_children, tree_path,
+    self, EditableProperty, ElementPropertyView, LoadedProperty, MAX_GROUPS, MAX_TREE_CHILDREN,
+    PropertyStoreError, aggregate_elements, aggregate_groups, count_element_groups, get_element,
+    list_elements, list_property_names, load_property, open_store, property_index_status,
+    search_elements, store_edited_property, tree_children, tree_path,
 };
 use crate::ion_compat::{IonError, resolve_asset};
-use crate::{AppState, Asset, auth, may_view_asset, users};
+use crate::{AppState, Asset, AssetStatus, auth, may_modify_asset, may_view_asset, users};
+use std::path::PathBuf;
+use tiletopia_ingest::ifc_property_write::{
+    MAX_TEXT_BYTES, PropertyLiteral, PropertyWriteError, rewrite_property,
+};
 
 const ROOT_NODE_KEY: &str = "root";
 const DEFAULT_TOP: i64 = 100;
@@ -40,6 +47,10 @@ pub fn element_routes() -> Router<Arc<AppState>> {
             get(property_index),
         )
         .route("/v1/assets/{id}/elements/{element_id}", get(get_one))
+        .route(
+            "/v1/assets/{id}/elements/{element_id}/properties",
+            put(update_property).layer(middleware::from_fn(users::require_editor)),
+        )
         .route("/v1/assets/{id}/tree/children", get(children))
         .route("/v1/assets/{id}/tree/parents", get(parents))
 }
@@ -159,21 +170,23 @@ pub(crate) async fn open_readable_store(
     let connection = open_store(&asset_dir)
         .await
         .map_err(store_error)?
-        .ok_or_else(|| {
-            element_error(
-                StatusCode::NOT_FOUND,
-                "ASSET_HAS_NO_ELEMENT_STORE",
-                format!(
-                    "asset {id} has no element store: only an IFC model gets one, when its tiling job finishes, and its status is {:?}",
-                    asset.status
-                ),
-            )
-        })?;
+        .ok_or_else(|| no_element_store(id, &asset.status))?;
     Ok(ReadableStore {
         connection,
         ion_id,
         slot,
     })
+}
+
+fn no_element_store(id: &str, status: &AssetStatus) -> IonError {
+    element_error(
+        StatusCode::NOT_FOUND,
+        "ASSET_HAS_NO_ELEMENT_STORE",
+        format!(
+            "asset {id} has no element store: only an IFC model gets one, when its tiling job finishes, and its status is {:?}",
+            status
+        ),
+    )
 }
 
 pub(crate) fn bounded_integer(
@@ -489,6 +502,280 @@ async fn parents(
         Ok::<_, IonError>(Json(json!({ "path": path })))
     })
     .await
+}
+
+#[derive(Debug, Deserialize)]
+struct PropertyUpdate {
+    key: String,
+    value: serde_json::Value,
+}
+
+async fn update_property(
+    State(state): State<Arc<AppState>>,
+    Path((id, element_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(update): Json<PropertyUpdate>,
+) -> Result<Json<ElementPropertyView>, IonError> {
+    if update.key.is_empty() {
+        return Err(invalid_parameter("key is empty"));
+    }
+    if update.value.is_null() {
+        return Err(invalid_parameter("a property value cannot be null"));
+    }
+    let (asset, _) = permitted_asset(&state, &headers, &id, may_modify_asset).await?;
+    let slot = OPEN_STORE_SLOTS
+        .acquire()
+        .await
+        .map_err(|error| internal_error("element store slot failed", error))?;
+    let asset_dir = state.data_dir.join(asset.id.to_string());
+    let mut connection = open_store(&asset_dir)
+        .await
+        .map_err(store_error)?
+        .ok_or_else(|| no_element_store(&id, &asset.status))?;
+    let loaded = load_property(&mut connection, &element_id, &update.key)
+        .await
+        .map_err(store_error)?;
+    drop(connection);
+    drop(slot);
+
+    let found = match loaded {
+        LoadedProperty::NoElement => {
+            return Err(element_error(
+                StatusCode::NOT_FOUND,
+                "ELEMENT_NOT_FOUND",
+                format!("asset {id} has no element {element_id}"),
+            ));
+        }
+        LoadedProperty::NoProperty => {
+            return Err(element_error(
+                StatusCode::NOT_FOUND,
+                "PROPERTY_NOT_FOUND",
+                format!(
+                    "asset {id} has no property {} on element {element_id}",
+                    update.key
+                ),
+            ));
+        }
+        LoadedProperty::Found(found) => found,
+    };
+    let literal = stored_literal(&found, &update.key, &update.value)?;
+    let express_id = u32::try_from(found.express_id).map_err(|_| ifc_element_gone(&element_id))?;
+    let source = mesh_source(&state, &asset, &id).await?;
+    if source.extension != "ifc" {
+        return Err(element_error(
+            StatusCode::CONFLICT,
+            "SOURCE_IS_NOT_IFC",
+            format!(
+                "asset {id}'s source is a .{}, which has no IFC properties to change",
+                source.extension
+            ),
+        ));
+    }
+
+    let path = PathBuf::from(source.job.input_path);
+    let key = update.key.clone();
+    let rewritten =
+        tokio::task::spawn_blocking(move || rewrite_on_disk(path, express_id, key, literal))
+            .await
+            .map_err(|error| server_failure("the property could not be written", error))?;
+    let (path, previous) = match rewritten {
+        Ok(written) => written,
+        Err(WriteFailure::Io(error)) => {
+            return Err(server_failure("the property could not be written", error));
+        }
+        Err(WriteFailure::Refused(error)) => {
+            return Err(refused_property(&update.key, &element_id, error));
+        }
+    };
+
+    let (text, number, boolean) = columns_for(&update.value);
+    match store_edited_property(
+        &asset_dir,
+        found.element_row,
+        &update.key,
+        text,
+        number,
+        boolean,
+    )
+    .await
+    {
+        Ok(view) => Ok(Json(view)),
+        Err(error) => {
+            let restored = tokio::task::spawn_blocking(move || restore_ifc(&path, &previous)).await;
+            if let Err(error) = restored.unwrap_or_else(|error| Err(std::io::Error::other(error))) {
+                tracing::error!(
+                    "the IFC could not be restored after the element store refused the edit: {error}"
+                );
+            }
+            Err(stored_property_failure(
+                &id,
+                &element_id,
+                &update.key,
+                error,
+            ))
+        }
+    }
+}
+
+fn stored_literal(
+    property: &EditableProperty,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<PropertyLiteral, IonError> {
+    match (&property.text, property.number, property.boolean, value) {
+        (Some(_), _, _, serde_json::Value::String(text)) => {
+            if text.len() > MAX_TEXT_BYTES {
+                return Err(invalid_parameter(format!(
+                    "a property value is at most {MAX_TEXT_BYTES} bytes"
+                )));
+            }
+            if text.chars().any(char::is_control) {
+                return Err(invalid_parameter("the value contains a control character"));
+            }
+            Ok(PropertyLiteral::Text(text.clone()))
+        }
+        (None, Some(_), _, serde_json::Value::Number(number)) => {
+            let number = number
+                .as_f64()
+                .filter(|number| number.is_finite())
+                .ok_or_else(|| invalid_parameter("a property value must be a finite number"))?;
+            Ok(PropertyLiteral::Number(number))
+        }
+        (None, None, Some(_), serde_json::Value::Bool(boolean)) => {
+            Ok(PropertyLiteral::Boolean(*boolean))
+        }
+        _ => Err(element_error(
+            StatusCode::BAD_REQUEST,
+            "KIND_MISMATCH",
+            format!("property {key} keeps the kind stored in the IFC"),
+        )),
+    }
+}
+
+fn columns_for(value: &serde_json::Value) -> (Option<String>, Option<f64>, Option<bool>) {
+    match value {
+        serde_json::Value::String(text) => (Some(text.clone()), None, None),
+        serde_json::Value::Number(number) => (None, number.as_f64(), None),
+        serde_json::Value::Bool(boolean) => (None, None, Some(*boolean)),
+        _ => (None, None, None),
+    }
+}
+
+enum WriteFailure {
+    Io(std::io::Error),
+    Refused(PropertyWriteError),
+}
+
+fn rewrite_on_disk(
+    path: PathBuf,
+    express_id: u32,
+    key: String,
+    value: PropertyLiteral,
+) -> Result<(PathBuf, Vec<u8>), WriteFailure> {
+    let previous = std::fs::read(&path).map_err(WriteFailure::Io)?;
+    let rewritten =
+        rewrite_property(&previous, express_id, &key, &value).map_err(WriteFailure::Refused)?;
+    let writing = writing_path(&path).map_err(WriteFailure::Io)?;
+    std::fs::write(&writing, &rewritten).map_err(WriteFailure::Io)?;
+    if let Err(error) = std::fs::rename(&writing, &path) {
+        let _ = std::fs::remove_file(&writing);
+        return Err(WriteFailure::Io(error));
+    }
+    Ok((path, previous))
+}
+
+fn restore_ifc(path: &std::path::Path, previous: &[u8]) -> std::io::Result<()> {
+    let writing = writing_path(path)?;
+    std::fs::write(&writing, previous)?;
+    if let Err(error) = std::fs::rename(&writing, path) {
+        let _ = std::fs::remove_file(&writing);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn writing_path(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the IFC path has no file name",
+            )
+        })?;
+    Ok(path.with_file_name(format!(".{file_name}.writing")))
+}
+
+fn ifc_element_gone(element_id: &str) -> IonError {
+    element_error(
+        StatusCode::CONFLICT,
+        "IFC_ELEMENT_GONE",
+        format!("the IFC no longer contains element {element_id}"),
+    )
+}
+
+fn refused_property(key: &str, element_id: &str, error: PropertyWriteError) -> IonError {
+    match error {
+        PropertyWriteError::MissingElement => ifc_element_gone(element_id),
+        PropertyWriteError::MissingProperty => element_error(
+            StatusCode::BAD_REQUEST,
+            "DERIVED_PROPERTY",
+            format!("property {key} is derived from the model and has no IFC property to change"),
+        ),
+        PropertyWriteError::DefinedOnType => element_error(
+            StatusCode::BAD_REQUEST,
+            "DEFINED_ON_TYPE",
+            format!("property {key} is defined on the element's type"),
+        ),
+        PropertyWriteError::NotASingleValue => element_error(
+            StatusCode::BAD_REQUEST,
+            "NOT_A_SINGLE_VALUE",
+            format!("property {key} is not a single value or a quantity"),
+        ),
+        PropertyWriteError::KindMismatch => element_error(
+            StatusCode::BAD_REQUEST,
+            "KIND_MISMATCH",
+            format!("property {key} keeps the kind stored in the IFC"),
+        ),
+        PropertyWriteError::IntegerValue => element_error(
+            StatusCode::BAD_REQUEST,
+            "INTEGER_VALUE",
+            format!("property {key} holds an integer"),
+        ),
+        PropertyWriteError::ControlCharacter => {
+            invalid_parameter("the value contains a control character")
+        }
+        PropertyWriteError::EmptyNominal => element_error(
+            StatusCode::BAD_REQUEST,
+            "EMPTY_NOMINAL",
+            format!("property {key} has no nominal value in the IFC"),
+        ),
+        PropertyWriteError::TextTooLong => invalid_parameter(format!(
+            "a property value is at most {MAX_TEXT_BYTES} bytes"
+        )),
+    }
+}
+
+fn stored_property_failure(
+    id: &str,
+    element_id: &str,
+    key: &str,
+    error: PropertyStoreError,
+) -> IonError {
+    match error {
+        PropertyStoreError::Missing => element_error(
+            StatusCode::NOT_FOUND,
+            "PROPERTY_NOT_FOUND",
+            format!("asset {id} has no property {key} on element {element_id}"),
+        ),
+        PropertyStoreError::Database(error) => {
+            server_failure("the element store could not be updated", error)
+        }
+        PropertyStoreError::Io(error) => {
+            server_failure("the element store could not be updated", error)
+        }
+    }
 }
 
 #[cfg(test)]
