@@ -99,7 +99,7 @@ hmac = "0.12"
 sha2 = "0.10"
 
 # Password hashing (argon2id), matching collecta
-argon2 = { version = "0.5", features = ["std"] }
+argon2 = { version = "0.6", features = ["std"] }
 
 # Cron parsing (scheduler)
 cron = "0.15"
