@@ -54,6 +54,7 @@ las = { workspace = true, features = ["laz"] }
 # photo set uploads are deflated zips
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 kamadak-exif = "0.6"
+tempfile = "3"
 wasmtime = { workspace = true, optional = true }
 martin-core = { workspace = true, optional = true }
 martin-tile-utils = { workspace = true, optional = true }
@@ -77,7 +78,6 @@ terrano-core = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.29"
 futures = { workspace = true }
-tempfile = "3"
 flate2 = "1"
 brotli = "8"
 ktx2 = { workspace = true }

@@ -13,6 +13,7 @@ use axum::{
 use futures::future::BoxFuture;
 use geoplumb::caps::{
     Caps, CapsPattern, CapsSet, Constraint, Crs, Dtype, RasterPattern, ResRange, SetField,
+    ValueKind,
 };
 use geoplumb::chunk::{Chunk, RasterChunk};
 use geoplumb::element::{Source, Transform};
@@ -1664,6 +1665,7 @@ impl Source for ImageryCogSource {
             crs: SetField::one(self.crs),
             resolution: ResRange::at_least(self.resolution),
             chunk_px: SetField::Any,
+            value_kind: SetField::one(ValueKind::Continuous),
         })))
     }
 
@@ -1986,7 +1988,8 @@ async fn render_tile_png(layer: &ImageryLayer, tile: XyzTile) -> geoplumb::Resul
             },
         )
         .await?;
-    let chunk = resample_to_grid(pulled.raster()?, &tile_bbox, TILE_PX, TILE_PX);
+    let value_kind = layer.engine.caps(layer.node).raster().value_kind;
+    let chunk = resample_to_grid(pulled.raster()?, &tile_bbox, TILE_PX, TILE_PX, value_kind);
     Ok(paint_tile(&chunk, &layer.manifest))
 }
 

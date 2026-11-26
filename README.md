@@ -109,7 +109,7 @@ The tiles land at `/api/v1/assets/{id}/tileset.json`. The model is placed by the
 - `POST /api/v1/analysis/viewshed` casts rays from an observer and returns the visible cells
 - `POST /api/v1/analysis/flood` returns the cells under a water level as GeoJSON, with their count and area
 - `POST /api/v1/analysis/solar` renders daily irradiance for a date over a bbox
-- `GET /api/v1/analysis/export/{op}?bbox=west,south,east,north&resolution=<m/px>` runs one analysis op over a bbox and returns a web mercator COG, capped at 4096x4096 pixels. It needs a token, unlike the tile route
+- `GET /api/v1/analysis/export/{op}?bbox=west,south,east,north&resolution=<m/px>` runs one analysis op over a bbox and returns a web mercator COG. The COG is written through geoplumb one 512 px tile at a time into a temp file under the data directory, with overviews pulled from the engine at coarser resolutions. The grid, padded to whole 512 px tiles, is capped at 16384x16384 pixels. It needs a token, unlike the tile route
 
 Storage is the local filesystem.
 

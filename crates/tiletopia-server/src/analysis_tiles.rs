@@ -23,20 +23,22 @@
 //! rather than inventing vegetation.
 //!
 //! `GET /api/v1/analysis/export/{op}?bbox=west,south,east,north&resolution=<m/px>`
-//! pulls the same engines once over a whole bbox and answers a deflate web
-//! mercator COG. Unlike the tile route it is auth-gated: one request can cost
-//! millions of pixels, so it is not part of the anonymous read surface.
+//! writes the same engines over a bbox as a deflate web mercator COG through
+//! `geoplumb::export::write_cog`, one 512 px tile at a time. Unlike the tile
+//! route it is auth-gated: one request can cost millions of pixels, so it is
+//! not part of the anonymous read surface.
 //!
 //! Known limit: an engine reads the source as it stood when the engine was
 //! built, on the first request for that op. A DEM loaded afterwards is not
 //! picked up until the server restarts.
 
-use std::io::Cursor;
+use std::io::Seek;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use axum::{
     Router,
+    body::Body,
     extract::{Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
@@ -44,20 +46,21 @@ use axum::{
 };
 use futures::future::BoxFuture;
 use geoplumb::caps::{
-    CapsPattern, CapsSet, Constraint, Crs, Dtype, RasterPattern, ResRange, SetField,
+    CapsPattern, CapsSet, Constraint, Crs, Dtype, RasterPattern, ResRange, SetField, ValueKind,
 };
 use geoplumb::chunk::{Chunk, RasterChunk};
 use geoplumb::element::{Source, Transform};
 use geoplumb::elements::{BandMath, Composite, Hillshade, Reproject, Slope, StacSearch, StacSrc};
-use geoplumb::resample::resample_to_grid;
+use geoplumb::export::{COG_TILE_PX, ExportGrid, write_cog};
 use geoplumb::tile::{XyzTile, render_tile};
-use geoplumb::window::{Bbox, GridSpec, WindowReq};
+use geoplumb::window::{GridSpec, WindowReq};
 use geoplumb::{Engine, Graph, NodeId};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use terrano_core::{BandedRaster, CogParams, Raster, write_cog_bands};
-use tokio::sync::{Semaphore, SemaphorePermit};
+use terrano_core::{BandedRaster, Raster};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
+use tokio_util::io::ReaderStream;
 
 use crate::AppState;
 use crate::analysis;
@@ -311,7 +314,7 @@ fn parse_bbox(raw: &str, label: &str) -> Result<[f64; 4], String> {
 pub struct AnalysisEngines {
     built: Mutex<Vec<(EngineKey, Arc<Engine>, NodeId)>>,
     source: SourceConfig,
-    render_slots: Semaphore,
+    render_slots: Arc<Semaphore>,
     render_wait: Duration,
 }
 
@@ -333,7 +336,7 @@ impl AnalysisEngines {
         AnalysisEngines {
             built: Mutex::new(Vec::new()),
             source: source_from_env().unwrap_or_else(SourceConfig::Misconfigured),
-            render_slots: Semaphore::new(slots),
+            render_slots: Arc::new(Semaphore::new(slots)),
             render_wait: wait,
         }
     }
@@ -341,11 +344,14 @@ impl AnalysisEngines {
     /// A render slot, waiting up to the horizon for one to free, `None` when it
     /// does not. The permit is held for the pull, so the slot count is the
     /// number of tiles being computed at once.
-    pub(crate) async fn render_slot(&self) -> Option<SemaphorePermit<'_>> {
-        timeout(self.render_wait, self.render_slots.acquire())
-            .await
-            .ok()?
-            .ok()
+    pub(crate) async fn render_slot(&self) -> Option<OwnedSemaphorePermit> {
+        timeout(
+            self.render_wait,
+            Arc::clone(&self.render_slots).acquire_owned(),
+        )
+        .await
+        .ok()?
+        .ok()
     }
 
     /// A poisoned map is still a usable cache: the entries are `Arc`s a panicked
@@ -499,9 +505,8 @@ pub(crate) const MERCATOR_MAX_LAT: f64 = 85.05112878;
 
 pub(crate) const WEB_MERCATOR_EXTENT: f64 = 20037508.342789244;
 
-/// Pixels one export may cover. 4096 squared f64 pixels is 128 MiB per band in
-/// flight, roughly what one authenticated request may pin.
-const EXPORT_MAX_PIXELS: f64 = 4096.0 * 4096.0;
+// 16384 squared f64 pixels is 2 GiB a band before deflate, and classic tiff offsets stop at 4 GiB
+const EXPORT_MAX_PIXELS: f64 = 16384.0 * 16384.0;
 
 pub(crate) fn mercator_x(lon: f64) -> f64 {
     lon / 180.0 * WEB_MERCATOR_EXTENT
@@ -509,28 +514,6 @@ pub(crate) fn mercator_x(lon: f64) -> f64 {
 
 pub(crate) fn mercator_y(lat: f64) -> f64 {
     lat.to_radians().tan().asinh() / std::f64::consts::PI * WEB_MERCATOR_EXTENT
-}
-
-/// The export raster's mercator frame: anchored on the bbox's north-west
-/// corner, extent rounded up to whole pixels, so the snap can only grow the
-/// window east and south rather than shave the requested edges.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ExportGrid {
-    west: f64,
-    north: f64,
-    cols: usize,
-    rows: usize,
-}
-
-impl ExportGrid {
-    fn bbox(&self, resolution: f64) -> Bbox {
-        Bbox::new(
-            self.west,
-            self.north - self.rows as f64 * resolution,
-            self.west + self.cols as f64 * resolution,
-            self.north,
-        )
-    }
 }
 
 fn export_grid(bbox: [f64; 4], resolution: f64) -> Result<ExportGrid, String> {
@@ -548,27 +531,23 @@ fn export_grid(bbox: [f64; 4], resolution: f64) -> Result<ExportGrid, String> {
     let (west, north) = (mercator_x(west), mercator_y(north));
     let cols = ((mercator_x(east) - west) / resolution).ceil().max(1.0);
     let rows = ((north - mercator_y(south)) / resolution).ceil().max(1.0);
+    let tile = COG_TILE_PX as f64;
     // compared as floats so an absurd resolution fails here instead of
     // overflowing the casts below
-    if cols * rows > EXPORT_MAX_PIXELS {
+    let padded = (cols / tile).ceil() * tile * (rows / tile).ceil() * tile;
+    if !padded.is_finite() || padded > EXPORT_MAX_PIXELS {
         return Err(format!(
-            "{cols} x {rows} pixels at {resolution} m/px is past the {} pixel export cap, coarsen the resolution or shrink the bbox",
+            "{cols} x {rows} pixels at {resolution} m/px, padded to whole {COG_TILE_PX} px tiles, is past the {} pixel export cap, coarsen the resolution or shrink the bbox",
             EXPORT_MAX_PIXELS as u64
         ));
     }
     Ok(ExportGrid {
-        west,
-        north,
+        origin_x: west,
+        origin_y: north,
+        pixel_size: resolution,
         cols: cols as usize,
         rows: rows as usize,
     })
-}
-
-/// Overviews down to roughly one 512 px tile, capped where deeper levels stop
-/// buying a viewer anything.
-pub(crate) fn overview_levels(cols: usize, rows: usize) -> u32 {
-    let max_side = cols.max(rows) as f64;
-    (max_side / 512.0).log2().ceil().clamp(0.0, 5.0) as u32
 }
 
 #[derive(Deserialize)]
@@ -603,7 +582,7 @@ async fn analysis_export(
     let grid = export_grid(bbox, params.resolution).map_err(bad_request)?;
 
     // the same slot the tile route takes: an export is one render, just bigger
-    let Some(_slot) = state.analysis_engines.render_slot().await else {
+    let Some(slot) = state.analysis_engines.render_slot().await else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "1")],
@@ -620,55 +599,24 @@ async fn analysis_export(
             tracing::warn!("analysis export engine build failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         })?;
-    let bbox_m = grid.bbox(params.resolution);
-    let pulled = engine
-        .pull(
-            node,
-            WindowReq {
-                bbox: bbox_m,
-                resolution: params.resolution,
-                // the DEM sources carry no time dimension, so every pull reads the same ground
-                time: None,
-            },
-        )
-        .await
-        .map_err(|e| {
-            tracing::warn!("analysis export pull failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        })?;
-
-    // resampling onto the exact grid and deflating the tiles are cpu work,
-    // off the async worker like the engine build
-    let resolution = params.resolution;
-    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        let exact = resample_to_grid(
-            pulled.raster().map_err(|e| e.to_string())?,
-            &bbox_m,
-            grid.cols,
-            grid.rows,
-        );
-        let cog = CogParams {
-            tile_width: 512,
-            tile_height: 512,
-            overview_levels: overview_levels(grid.cols, grid.rows),
-            epsg: 3857,
-            origin_x: grid.west,
-            origin_y: grid.north,
-            pixel_width: resolution,
-            pixel_height: resolution,
-            deflate: true,
-            // the bands as the engine pulled them, holes left as NaN
-            format: terrano_core::SampleFormat::F64,
-            nodata: None,
-        };
-        let mut out = Cursor::new(Vec::new());
-        write_cog_bands(&exact.bands, &cog, &mut out).map_err(|e| e.to_string())?;
-        Ok(out.into_inner())
+    let file = tempfile::tempfile_in(&state.data_dir).map_err(|e| {
+        tracing::warn!("analysis export has no temp file: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    })?;
+    // tokio keeps running a spawned task after its caller disconnects
+    let mut file = tokio::spawn(async move {
+        let _slot = slot;
+        // the DEM sources carry no time dimension
+        write_cog(engine, node, grid, None, file).await
     })
     .await
-    .expect("export encode task panicked")
+    .expect("analysis export task panicked")
     .map_err(|e| {
-        tracing::warn!("analysis export encode failed: {e}");
+        tracing::warn!("analysis export failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    })?;
+    file.rewind().map_err(|e| {
+        tracing::warn!("analysis export file did not rewind: {e}");
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
     })?;
 
@@ -680,7 +628,7 @@ async fn analysis_export(
                 format!("attachment; filename=\"{}.tif\"", op.name()),
             ),
         ],
-        bytes,
+        Body::from_stream(ReaderStream::new(tokio::fs::File::from_std(file))),
     )
         .into_response())
 }
@@ -812,6 +760,7 @@ impl Source for DemSource {
             crs: SetField::one(Crs::WGS84),
             resolution: ResRange::at_least(self.base_resolution),
             chunk_px: SetField::Any,
+            value_kind: SetField::one(ValueKind::Continuous),
         })))
     }
 
@@ -1121,13 +1070,14 @@ mod tests {
     #[test]
     fn export_grid_snaps_outward_anchored_north_west() {
         let grid = export_grid([7.0, 45.0, 7.02, 45.01], 200.0).unwrap();
-        assert_eq!(grid.west, mercator_x(7.0));
-        assert_eq!(grid.north, mercator_y(45.01));
+        assert_eq!(grid.origin_x, mercator_x(7.0));
+        assert_eq!(grid.origin_y, mercator_y(45.01));
+        assert_eq!(grid.pixel_size, 200.0);
         assert_eq!((grid.cols, grid.rows), (12, 8));
-        let bbox = grid.bbox(200.0);
+        let bbox = grid.bbox();
         // the snap grows the window east and south, never past the anchor
-        assert_eq!(bbox.min_x, grid.west);
-        assert_eq!(bbox.max_y, grid.north);
+        assert_eq!(bbox.min_x, grid.origin_x);
+        assert_eq!(bbox.max_y, grid.origin_y);
         assert!(bbox.max_x >= mercator_x(7.02));
         assert!(bbox.min_y <= mercator_y(45.0));
         assert!(bbox.max_x - mercator_x(7.02) < 200.0);
@@ -1139,10 +1089,10 @@ mod tests {
         // a bbox reaching the pole clamps to the mercator edge instead of
         // projecting to infinity
         let grid = export_grid([0.0, 84.0, 1.0, 90.0], 1000.0).unwrap();
-        assert!(grid.north.is_finite());
+        assert!(grid.origin_y.is_finite());
         // the clamp latitude is rounded a hair north of the exact edge, so
         // the projected value may overshoot the extent by well under a meter
-        assert!(grid.north <= WEB_MERCATOR_EXTENT + 1e-2);
+        assert!(grid.origin_y <= WEB_MERCATOR_EXTENT + 1e-2);
         // entirely past the edge there is nothing left to render
         let err = export_grid([0.0, 86.0, 1.0, 90.0], 1000.0).unwrap_err();
         assert!(err.contains("covers no ground"), "{err}");
@@ -1155,6 +1105,9 @@ mod tests {
         // an absurd resolution fails the cap instead of overflowing the dims
         let err = export_grid([7.0, 45.0, 8.0, 46.0], 1e-300).unwrap_err();
         assert!(err.contains("export cap"), "{err}");
+        // a degree square at 20 m/px is 5566 x 7942 pixels, inside the cap
+        let grid = export_grid([7.0, 45.0, 8.0, 46.0], 20.0).unwrap();
+        assert_eq!((grid.cols, grid.rows), (5566, 7942));
     }
 
     #[test]
@@ -1163,15 +1116,6 @@ mod tests {
             let err = export_grid([7.0, 45.0, 8.0, 46.0], bad).unwrap_err();
             assert!(err.contains("resolution"), "{bad}: {err}");
         }
-    }
-
-    #[test]
-    fn overview_levels_step_down_to_one_tile() {
-        assert_eq!(overview_levels(1, 1), 0);
-        assert_eq!(overview_levels(512, 512), 0);
-        assert_eq!(overview_levels(513, 100), 1);
-        assert_eq!(overview_levels(4096, 4096), 3);
-        assert_eq!(overview_levels(usize::MAX, 1), 5);
     }
 
     #[tokio::test]

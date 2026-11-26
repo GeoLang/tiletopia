@@ -380,12 +380,9 @@ fn default_interval(dem: &Raster) -> f64 {
     ((mx - mn) / 10.0).max(1.0)
 }
 
-/// terrano contour vertices are world meters with origin bottom-left
-/// (x = col*cell east, y = (height-1-row)*cell north). Map back to lon/lat.
 fn contours_geojson(dem: &Raster, bbox: [f64; 4], interval: f64) -> Value {
     let lines = contours(dem, interval, 0.0);
     let [w, s, e, n] = bbox;
-    let cell = dem.cell_size;
     let wf = (dem.width() - 1).max(1) as f64;
     let hf = (dem.height() - 1).max(1) as f64;
     let features: Vec<Value> = lines
@@ -395,10 +392,10 @@ fn contours_geojson(dem: &Raster, bbox: [f64; 4], interval: f64) -> Value {
             let coords: Vec<[f64; 2]> = l
                 .vertices
                 .iter()
-                .map(|&(x, y)| {
-                    let lon = w + (x / cell) / wf * (e - w);
-                    let lat = s + (y / cell) / hf * (n - s);
-                    [lon, lat]
+                .map(|vertex| {
+                    // terrano's cell position is (column, row) counted from the first sample
+                    let (col, row) = vertex.cell_position();
+                    [w + col / wf * (e - w), n - row / hf * (n - s)]
                 })
                 .collect();
             json!({
@@ -722,6 +719,41 @@ mod tests {
                 && (first[1].as_f64().unwrap() - last[1].as_f64().unwrap()).abs() < 1e-9
         });
         assert!(closed, "expected at least one closed contour loop");
+    }
+
+    fn positions_at_15_m(dem: &Raster) -> Vec<[f64; 2]> {
+        let fc = contours_geojson(dem, [7.0, 43.0, 8.0, 44.0], 15.0);
+        fc["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["properties"]["level"].as_f64() == Some(15.0))
+            .flat_map(|f| f["geometry"]["coordinates"].as_array().unwrap().clone())
+            .map(|c| [c[0].as_f64().unwrap(), c[1].as_f64().unwrap()])
+            .collect()
+    }
+
+    #[test]
+    fn contour_vertices_land_between_the_samples_they_cross() {
+        // 15 m crosses halfway between the 10 m and 20 m columns, 1.5 of 4 cells east of the west edge
+        let rising_east: Vec<f64> = (0..25).map(|i| (i % 5) as f64 * 10.0).collect();
+        let positions =
+            positions_at_15_m(&Raster::from_vec(5, 5, rising_east, 10.0, NODATA).unwrap());
+        assert!(!positions.is_empty());
+        assert!(
+            positions.iter().all(|[lon, _]| *lon == 7.375),
+            "{positions:?}"
+        );
+
+        // row 0 is the north edge, so ground rising southward crosses 15 m 1.5 cells south of it
+        let rising_south: Vec<f64> = (0..25).map(|i| (i / 5) as f64 * 10.0).collect();
+        let positions =
+            positions_at_15_m(&Raster::from_vec(5, 5, rising_south, 10.0, NODATA).unwrap());
+        assert!(!positions.is_empty());
+        assert!(
+            positions.iter().all(|[_, lat]| *lat == 43.625),
+            "{positions:?}"
+        );
     }
 
     /// A wall down the middle column, seen from the west edge.

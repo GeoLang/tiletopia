@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 2026-11-26: `GET /api/v1/analysis/export/{op}` writes its COG through `geoplumb::export::write_cog`, one 512 px tile at a time into a temp file under the data directory, instead of pulling the whole bbox into memory. Overviews are pulled from the engine at coarser resolutions instead of averaged from the base level. The cap is 16384x16384 pixels padded to whole 512 px tiles, up from 4096x4096. A dropped request keeps its render slot until the file is written. The request, the grid and the response are unchanged.
+- 2026-11-26: `POST /api/v1/analysis/terrain` places contour vertices with terrano's `cell_position()`, after terrano moved contour vertices to a cell plus a fraction. Levels count from zero in whole intervals and saddles pair the way `gdal_contour` pairs them.
+- 2026-11-26: geoplumb, terrano-core and topoi-core locked to the current master. Imagery tiles and the analysis DEM source declare continuous values for geoplumb's new categorical resampling, so their output is unchanged. topoi overlays now run on an i64 grid and return OGC-valid rings, so `union`, `intersection`, `difference` and multi-part `buffer` output can differ in the low digits, and a ring that touched itself at a point comes back as separate rings.
+- 2026-11-26: removed `tiletopia_terrain::contours`, which had no callers.
 - 2026-11-13: an edit or property write that waits while a re-tile starts answers 409 `ASSET_NOT_READY` and writes nothing, instead of changing the IFC under the tiling job.
 - 2026-11-13: moving or turning an element whose `IfcLocalPlacement` another product also uses gives the element its own copy, and its openings, fillings and parts move with it. Other products on that placement stay where they are.
 - 2026-11-13: dropped the unused `axum-extra`, core's `memmap2` and store's `tiletopia-core` dependencies.

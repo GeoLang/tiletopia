@@ -1170,7 +1170,7 @@ mod tests {
     /// The export of the same terrain the tile tests render, verified by
     /// reading the bytes back as a COG: web mercator, whole-pixel dims
     /// anchored north-west, real values everywhere on the synthetic source.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn analysis_export_answers_a_web_mercator_cog() {
         let state = test_state().await;
         let resp = router(Arc::clone(&state))
@@ -1220,6 +1220,70 @@ mod tests {
                 (lo.min(*v), hi.max(*v))
             });
         assert!(max > min);
+    }
+
+    async fn export_bytes(state: &Arc<AppState>, uri: &str) -> Vec<u8> {
+        let (status, bytes) = get_tile_bytes(state, uri).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        bytes
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn analysis_export_tiles_agree_with_a_smaller_export() {
+        let state = test_state().await;
+        let whole_bytes = export_bytes(
+            &state,
+            "/api/v1/analysis/export/hillshade?bbox=7.2,43.3,7.8,43.7&resolution=100",
+        )
+        .await;
+        let corner_bytes = export_bytes(
+            &state,
+            "/api/v1/analysis/export/hillshade?bbox=7.2,43.5,7.5,43.7&resolution=100",
+        )
+        .await;
+        let whole = terrano_core::CogReader::open(&whole_bytes[..]).expect("valid cog");
+        let corner = terrano_core::CogReader::open(&corner_bytes[..]).expect("valid cog");
+
+        let levels: Vec<(usize, usize)> = whole
+            .levels()
+            .iter()
+            .map(|level| (level.width, level.height))
+            .collect();
+        assert_eq!(levels, vec![(668, 614), (334, 307)]);
+        let (cols, rows) = (corner.levels()[0].width, corner.levels()[0].height);
+        assert_eq!((cols, rows), (334, 308));
+
+        let whole_band = whole
+            .read_window_bands(0, 0, 0, cols, rows)
+            .expect("window");
+        let corner_band = corner
+            .read_window_bands(0, 0, 0, cols, rows)
+            .expect("window");
+        let (whole_values, corner_values) = (
+            whole_band.band(0).expect("one band").data(),
+            corner_band.band(0).expect("one band").data(),
+        );
+        assert!(whole_values.iter().all(|v| v.is_finite()));
+        for (index, (a, b)) in whole_values.iter().zip(corner_values).enumerate() {
+            assert!((a - b).abs() < 1e-6, "pixel {index}: {a} against {b}");
+        }
+
+        let overview = whole
+            .read_window_bands(1, 0, 0, 334, 307)
+            .expect("overview");
+        let overview = overview.band(0).expect("one band").data();
+        assert!(overview.iter().all(|v| v.is_finite()));
+        let (min, max) = overview
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(*v), hi.max(*v))
+            });
+        assert!(max > min, "the overview holds one flat value");
     }
 
     #[tokio::test]
