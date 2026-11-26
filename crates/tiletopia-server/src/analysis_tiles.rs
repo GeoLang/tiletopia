@@ -46,7 +46,8 @@ use axum::{
 };
 use futures::future::BoxFuture;
 use geoplumb::caps::{
-    CapsPattern, CapsSet, Constraint, Crs, Dtype, RasterPattern, ResRange, SetField, ValueKind,
+    BandKinds, CapsPattern, CapsSet, Constraint, Crs, Dtype, RasterPattern, ResRange, SetField,
+    ValueKind,
 };
 use geoplumb::chunk::{Chunk, RasterChunk};
 use geoplumb::element::{Source, Transform};
@@ -58,7 +59,7 @@ use geoplumb::{Engine, Graph, NodeId};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use terrano_core::{BandedRaster, Raster};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::time::timeout;
 use tokio_util::io::ReaderStream;
 
@@ -314,7 +315,7 @@ fn parse_bbox(raw: &str, label: &str) -> Result<[f64; 4], String> {
 pub struct AnalysisEngines {
     built: Mutex<Vec<(EngineKey, Arc<Engine>, NodeId)>>,
     source: SourceConfig,
-    render_slots: Arc<Semaphore>,
+    render_slots: Semaphore,
     render_wait: Duration,
 }
 
@@ -336,7 +337,7 @@ impl AnalysisEngines {
         AnalysisEngines {
             built: Mutex::new(Vec::new()),
             source: source_from_env().unwrap_or_else(SourceConfig::Misconfigured),
-            render_slots: Arc::new(Semaphore::new(slots)),
+            render_slots: Semaphore::new(slots),
             render_wait: wait,
         }
     }
@@ -344,14 +345,11 @@ impl AnalysisEngines {
     /// A render slot, waiting up to the horizon for one to free, `None` when it
     /// does not. The permit is held for the pull, so the slot count is the
     /// number of tiles being computed at once.
-    pub(crate) async fn render_slot(&self) -> Option<OwnedSemaphorePermit> {
-        timeout(
-            self.render_wait,
-            Arc::clone(&self.render_slots).acquire_owned(),
-        )
-        .await
-        .ok()?
-        .ok()
+    pub(crate) async fn render_slot(&self) -> Option<SemaphorePermit<'_>> {
+        timeout(self.render_wait, self.render_slots.acquire())
+            .await
+            .ok()?
+            .ok()
     }
 
     /// A poisoned map is still a usable cache: the entries are `Arc`s a panicked
@@ -582,7 +580,7 @@ async fn analysis_export(
     let grid = export_grid(bbox, params.resolution).map_err(bad_request)?;
 
     // the same slot the tile route takes: an export is one render, just bigger
-    let Some(slot) = state.analysis_engines.render_slot().await else {
+    let Some(_slot) = state.analysis_engines.render_slot().await else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "1")],
@@ -603,18 +601,14 @@ async fn analysis_export(
         tracing::warn!("analysis export has no temp file: {e}");
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
     })?;
-    // tokio keeps running a spawned task after its caller disconnects
-    let mut file = tokio::spawn(async move {
-        let _slot = slot;
-        // the DEM sources carry no time dimension
-        write_cog(engine, node, grid, None, file).await
-    })
-    .await
-    .expect("analysis export task panicked")
-    .map_err(|e| {
-        tracing::warn!("analysis export failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR.into_response()
-    })?;
+    // write_cog stops pulling tiles when a client disconnect drops this future
+    // DEM sources carry no time dimension
+    let mut file = write_cog(engine, node, grid, None, file)
+        .await
+        .map_err(|e| {
+            tracing::warn!("analysis export failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
     file.rewind().map_err(|e| {
         tracing::warn!("analysis export file did not rewind: {e}");
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -760,7 +754,7 @@ impl Source for DemSource {
             crs: SetField::one(Crs::WGS84),
             resolution: ResRange::at_least(self.base_resolution),
             chunk_px: SetField::Any,
-            value_kind: SetField::one(ValueKind::Continuous),
+            value_kinds: SetField::one(BandKinds::from(ValueKind::Continuous)),
         })))
     }
 

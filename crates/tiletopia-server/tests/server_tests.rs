@@ -987,6 +987,74 @@ mod tests {
         }
     }
 
+    // nine samples a degree put every sample of a nine cell request on a stored value
+    const BOWL_SIDE: usize = 9;
+
+    fn bowl_elevation(row: usize, col: usize) -> f32 {
+        let last = BOWL_SIDE - 1;
+        let middle = BOWL_SIDE / 2;
+        if (row, col) == (last, middle) {
+            return 50.0;
+        }
+        if row == 0 || col == 0 || row == last || col == last {
+            return 100.0;
+        }
+        let ring = row.abs_diff(middle).max(col.abs_diff(middle));
+        10.0 + 5.0 * ring as f32
+    }
+
+    #[tokio::test]
+    async fn analysis_flow_accumulation_crosses_a_filled_bowl_to_its_outlet() {
+        let state = test_state().await;
+        let mut staged = Vec::with_capacity(BOWL_SIDE * BOWL_SIDE * 4);
+        // staged dem tiles hold their rows south first
+        for row in (0..BOWL_SIDE).rev() {
+            for col in 0..BOWL_SIDE {
+                staged.extend_from_slice(&bowl_elevation(row, col).to_le_bytes());
+            }
+        }
+        std::fs::write(state.data_dir.join("dem/46_7.bin"), staged).unwrap();
+
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/analysis/terrain")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "op": "flow_accumulation",
+                            "bbox": [7.0, 46.0, 8.0, 47.0],
+                            "resolution": BOWL_SIDE,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let img = image::load_from_memory(&bytes)
+            .expect("valid png")
+            .to_rgba8();
+
+        let upstream_cells = (BOWL_SIDE * BOWL_SIDE - 1) as f64;
+        let expected = tiletopia_server::analysis::accumulation_color(upstream_cells);
+        assert_ne!(
+            expected,
+            tiletopia_server::analysis::accumulation_color(upstream_cells - 1.0),
+            "the ramp tells {upstream_cells} cells apart from one fewer"
+        );
+        let outlet = img.get_pixel(BOWL_SIDE as u32 / 2, BOWL_SIDE as u32 - 1).0;
+        assert_eq!(
+            outlet, expected,
+            "every other cell drains through the filled bowl to the outlet"
+        );
+    }
+
     #[tokio::test]
     async fn analysis_terrain_rejects_an_unknown_op() {
         let (status, _, bytes) = post_json(

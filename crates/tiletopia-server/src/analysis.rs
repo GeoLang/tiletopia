@@ -513,7 +513,7 @@ fn flow_direction_color(v: f64) -> [u8; 4] {
 
 /// Upstream cell count on a log ramp: a few hundred cells is already a channel,
 /// and a basin outlet is thousands.
-fn accumulation_color(v: f64) -> [u8; 4] {
+pub fn accumulation_color(v: f64) -> [u8; 4] {
     let decades = (v.max(0.0) + 1.0).log10() / ACCUMULATION_DECADES;
     let [r, g, b] = ramp(decades.clamp(0.0, 1.0));
     [r, g, b, 255]

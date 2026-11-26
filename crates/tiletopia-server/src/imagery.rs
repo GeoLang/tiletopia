@@ -12,8 +12,8 @@ use axum::{
 };
 use futures::future::BoxFuture;
 use geoplumb::caps::{
-    Caps, CapsPattern, CapsSet, Constraint, Crs, Dtype, RasterPattern, ResRange, SetField,
-    ValueKind,
+    BandKinds, Caps, CapsPattern, CapsSet, Constraint, Crs, Dtype, RasterPattern, ResRange,
+    SetField, ValueKind,
 };
 use geoplumb::chunk::{Chunk, RasterChunk};
 use geoplumb::element::{Source, Transform};
@@ -625,8 +625,8 @@ fn prepare_geotiff(
 
     if has_internal_mask(input_path)? {
         return Err(
-            "this TIFF has an internal transparency mask, which is applied only to a tiled, deflate \
-             or uncompressed COG with overviews: make it one with \
+            "this TIFF has an internal transparency mask, which is applied only to a tiled, deflate, \
+             lzw or uncompressed COG with overviews: make it one with \
              gdal_translate -of COG -co COMPRESS=DEFLATE, or make the mask an alpha band with \
              -b 1 -b 2 -b 3 -b mask -colorinterp red,green,blue,alpha"
                 .into(),
@@ -671,8 +671,8 @@ fn check_decoded_size(cols: usize, rows: usize, pixel_bytes: usize) -> Result<()
     if cols.max(rows) > MAX_SIDE || decoded_bytes > MAX_DECODED_BYTES {
         return Err(format!(
             "{cols} x {rows} pixels of {pixel_bytes} bytes is past the limit of {MAX_SIDE} pixels \
-             a side and {MAX_DECODED_BYTES} decoded bytes for a file that is not a tiled, deflate \
-             or uncompressed COG with overviews: convert it with \
+             a side and {MAX_DECODED_BYTES} decoded bytes for a file that is not a tiled, deflate, \
+             lzw or uncompressed COG with overviews: convert it with \
              gdal_translate -of COG -co COMPRESS=DEFLATE"
         ));
     }
@@ -1665,7 +1665,7 @@ impl Source for ImageryCogSource {
             crs: SetField::one(self.crs),
             resolution: ResRange::at_least(self.resolution),
             chunk_px: SetField::Any,
-            value_kind: SetField::one(ValueKind::Continuous),
+            value_kinds: SetField::one(BandKinds::from(ValueKind::Continuous)),
         })))
     }
 
@@ -1988,8 +1988,8 @@ async fn render_tile_png(layer: &ImageryLayer, tile: XyzTile) -> geoplumb::Resul
             },
         )
         .await?;
-    let value_kind = layer.engine.caps(layer.node).raster().value_kind;
-    let chunk = resample_to_grid(pulled.raster()?, &tile_bbox, TILE_PX, TILE_PX, value_kind);
+    let value_kinds = &layer.engine.caps(layer.node).raster().value_kinds;
+    let chunk = resample_to_grid(pulled.raster()?, &tile_bbox, TILE_PX, TILE_PX, value_kinds);
     Ok(paint_tile(&chunk, &layer.manifest))
 }
 
