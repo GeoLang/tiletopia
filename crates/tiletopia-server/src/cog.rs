@@ -449,6 +449,7 @@ mod tests {
             deflate: true,
             format: SampleFormat::F64,
             nodata: None,
+            palette: None,
         };
         let mut bytes = std::io::Cursor::new(Vec::new());
         write_cog(&raster, &params, &mut bytes).unwrap();

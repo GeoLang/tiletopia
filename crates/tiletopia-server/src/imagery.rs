@@ -12,8 +12,8 @@ use axum::{
 };
 use futures::future::BoxFuture;
 use geoplumb::caps::{
-    BandKinds, Caps, CapsPattern, CapsSet, Constraint, Crs, Dtype, RasterPattern, ResRange,
-    SetField, ValueKind,
+    BandDtypes, BandKinds, Caps, CapsPattern, CapsSet, Constraint, Crs, Dtype, RasterPattern,
+    ResRange, SetField, ValueKind,
 };
 use geoplumb::chunk::{Chunk, RasterChunk};
 use geoplumb::element::{Source, Transform};
@@ -21,11 +21,11 @@ use geoplumb::elements::Reproject;
 use geoplumb::resample::resample_to_grid;
 use geoplumb::tile::{TILE_PX, XyzTile};
 use geoplumb::window::{Bbox, GridSpec, WindowReq};
-use geoplumb::{Engine, Graph, NodeId};
+use geoplumb::{Engine, Graph, NodeId, RasterBands};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use terrano_core::{BandedRaster, CogParams, CogReader, Raster, SampleFormat, write_cog_tiles};
+use terrano_core::{CogParams, CogReader, Raster, SampleFormat, TypedBand, write_cog_tiles};
 use tiff::ColorType;
 use tiff::decoder::{ChunkType, Decoder, DecodingResult, Limits};
 use tiff::tags::Tag;
@@ -1273,6 +1273,7 @@ fn write_source_cog(
         deflate: true,
         nodata,
         format,
+        palette: None,
     };
     // terrano pads tiles past the image edge with nodata, or zero for integers and NaN for floats
     let padding_value = nodata.unwrap_or(if format.integer_range().is_some() {
@@ -1637,7 +1638,7 @@ fn read_cog_chunk(
         .map(|plane| Raster::from_vec(cols, rows, plane, req.resolution, f64::NAN))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(RasterChunk {
-        bands: BandedRaster::new(rasters)?,
+        bands: RasterBands::from_rasters(rasters)?,
         bbox: req.bbox,
         resolution: req.resolution,
         crs,
@@ -1660,7 +1661,7 @@ impl Source for ImageryCogSource {
 
     fn constraint(&self) -> Constraint {
         Constraint::Produces(CapsSet::one(CapsPattern::Raster(RasterPattern {
-            dtype: SetField::one(Dtype::F64),
+            dtypes: SetField::one(BandDtypes::from(Dtype::F64)),
             bands: SetField::one(self.bands),
             crs: SetField::one(self.crs),
             resolution: ResRange::at_least(self.resolution),
@@ -1802,6 +1803,7 @@ impl Transform for FootprintReproject {
             let first_col = ((inside.bbox.min_x - out.bbox.min_x) / res).round() as usize;
             let first_row = ((out.bbox.max_y - inside.bbox.max_y) / res).round() as usize;
             for (plane, band) in planes.iter_mut().zip(warped.bands.bands()) {
+                let band = band.to_raster();
                 let width = band.width();
                 for (row, values) in band.data().chunks_exact(width).enumerate() {
                     let start = (first_row + row) * cols + first_col;
@@ -1814,7 +1816,7 @@ impl Transform for FootprintReproject {
             .map(|plane| Raster::from_vec(cols, rows, plane, res, f64::NAN))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Chunk::Raster(RasterChunk {
-            bands: BandedRaster::new(rasters)?,
+            bands: RasterBands::from_rasters(rasters)?,
             bbox: out.bbox,
             resolution: res,
             crs: Crs::WEB_MERCATOR,
@@ -1933,15 +1935,17 @@ fn encode_png(image: &RgbaImage) -> Vec<u8> {
 
 fn paint_tile(chunk: &RasterChunk, manifest: &ImageryManifest) -> Option<Vec<u8>> {
     let bands = &manifest.bands;
-    let color: Vec<&[f64]> = bands
+    let color_rasters: Vec<_> = bands
         .color_bands
         .iter()
-        .map(|&band| chunk.bands.band(band).map(|raster| raster.data()))
+        .map(|&band| chunk.bands.band(band).map(TypedBand::to_raster))
         .collect::<Option<_>>()?;
-    let alpha = match bands.alpha_band {
-        Some(band) => Some(chunk.bands.band(band)?.data()),
+    let color: Vec<&[f64]> = color_rasters.iter().map(|raster| raster.data()).collect();
+    let alpha_raster = match bands.alpha_band {
+        Some(band) => Some(chunk.bands.band(band)?.to_raster()),
         None => None,
     };
+    let alpha = alpha_raster.as_deref().map(Raster::data);
     let channel = |value: f64| to_channel(value, manifest.value_low, manifest.value_high);
     let side = TILE_PX as u32;
     let mut image = RgbaImage::new(side, side);

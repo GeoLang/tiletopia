@@ -4,9 +4,9 @@ use tiletopia_ingest::MeshData;
 use tiletopia_ingest::crs_detect::{parse_epsg_code, reproject_to_ecef};
 
 const WGS84_GEODETIC_EPSG: u32 = 4326;
-const UTM_NORTH_EPSG_BASE: u32 = 32600;
-const UTM_SOUTH_EPSG_BASE: u32 = 32700;
-const UTM_ZONES: std::ops::RangeInclusive<u32> = 1..=60;
+pub(crate) const UTM_NORTH_EPSG_BASE: u32 = 32600;
+pub(crate) const UTM_SOUTH_EPSG_BASE: u32 = 32700;
+pub(crate) const UTM_ZONES: std::ops::RangeInclusive<u32> = 1..=60;
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct Georeference {

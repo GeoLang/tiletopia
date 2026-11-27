@@ -1,11 +1,3 @@
-//! Terrain-analysis endpoints backed by terrano-core over the server's DEM.
-//!
-//! Elevation comes from [`crate::elevation`]: a loaded grid, a tile staged
-//! under the data directory, then the SRTM cache. Cells no DEM covers are
-//! nodata, and a box no DEM covers at all is refused rather than answered with
-//! a blank raster. PNG rasters are returned as `image/png`; vector results as
-//! GeoJSON.
-
 use std::sync::Arc;
 
 use axum::{
@@ -15,16 +7,27 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+use geoplumb::chunk::Chunk;
+use geoplumb::element::Transform;
+use geoplumb::elements::{
+    Aspect, Contours, FlowAccumulation, FlowDirection, Hillshade, Reproject, Slope, StreamOrder,
+    Viewshed, Watershed,
+};
+use geoplumb::resample::resample_to_grid;
+use geoplumb::window::{Bbox, WindowReq};
+use geoplumb::{Crs, Engine, Graph, NodeId};
 use image::{Rgba, RgbaImage};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use terrano_core::{
-    Raster, VIEWSHED_VISIBLE, aspect, contours, fill_sinks, flow_accumulation, flow_direction,
-    hillshade, slope, viewshed, watershed,
-};
+use terrano_core::{Raster, VIEWSHED_VISIBLE, aspect, slope};
+use tiletopia_core::crs::{Coord3D, CrsDef, Route, Transformer};
+use topoi_core::LineString;
+use topoi_core::geojson::FeatureGeometry;
 
 use crate::AppState;
+use crate::analysis_tiles::{CHUNK_BUDGET_BYTES, open_dem};
 use crate::elevation::{ElevationField, ElevationGap, METERS_PER_DEG_LAT, on_the_globe};
+use crate::photogrammetry::placement::{UTM_NORTH_EPSG_BASE, UTM_SOUTH_EPSG_BASE, UTM_ZONES};
 use crate::terrain_api::Refusal;
 
 const NODATA: f64 = -9999.0;
@@ -42,6 +45,13 @@ const ACCUMULATION_DECADES: f64 = 4.0;
 /// Hue step between consecutive basin ids. The golden angle keeps neighbouring
 /// labels far apart on the wheel.
 const BASIN_HUE_STEP: f64 = 137.5;
+
+const UTM_ZONE_WIDTH_DEG: f64 = 6.0;
+
+// utm cells per output cell grow with 1 / cos(latitude) and pass 16 near 86 degrees
+const MAX_UTM_CELLS_PER_OUTPUT_CELL: f64 = 16.0;
+
+const STREAM_THRESHOLD_SHARE_OF_REGION: f64 = 0.01;
 
 /// A cell that drains nowhere: a pit, or flat ground.
 const UNDRAINED_GREY: [u8; 4] = [128, 128, 128, 255];
@@ -76,12 +86,11 @@ struct TerrainParams {
     azimuth: Option<f64>,
     altitude: Option<f64>,
     interval: Option<f64>,
+    threshold: Option<f64>,
 }
 
 #[derive(Deserialize)]
 struct TerrainReq {
-    /// slope | aspect | hillshade | contours | flow_direction |
-    /// flow_accumulation | watershed
     op: String,
     bbox: [f64; 4],
     resolution: Option<usize>,
@@ -98,11 +107,6 @@ struct SolarReq {
 
 // ── handlers ────────────────────────────────────────────────────────────────
 
-/// Line-of-sight visibility from the observer, as one square per visible cell.
-///
-/// terrano casts a ray to every cell inside the radius, so the result is the
-/// shape of what can be seen: a ridge's shadow is a hole in the polygon set,
-/// which a ring around the observer could not express.
 async fn viewshed_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ViewshedReq>,
@@ -118,14 +122,30 @@ async fn viewshed_handler(
     }
     let side = resolution(req.resolution, DEFAULT_RESOLUTION);
     let bbox = square_around(lon, lat, req.radius_m);
+    let (grid, (observer_x, observer_y)) = {
+        let utm = Utm::at_centre_of(bbox)?;
+        (utm.grid(bbox, side)?, utm.project(lon, lat)?)
+    };
+    let viewshed = Viewshed {
+        observer_x,
+        observer_y,
+        observer_height: req.height_m,
+        radius: req.radius_m,
+    };
+    let built = terrain_engine(&state, grid, move |graph, utm_dem| {
+        onto_lonlat(graph, utm_dem, Box::new(viewshed), bbox, side)
+    })
+    .await?;
+    covered_utm_dem(&built, &grid, bbox).await?;
+    let visible = pulled_onto_lonlat(&built, bbox, side).await?;
 
-    let field = state.elevation_sources().field(bbox).await?;
-    let dem = dem_over_bbox(&field, bbox, side, side)?;
-    let (row, col) = cell_at(bbox, side, side, lon, lat);
-    let visible = viewshed(&dem, row, col, req.height_m, req.radius_m);
-
-    let (polygons, cells) = cell_squares(&visible, bbox, |v| v == VIEWSHED_VISIBLE);
-    let (dx, dy) = cell_meters(bbox, side, side);
+    // cell_squares and cell_meters take the box through the outermost cell centres
+    let [west, south, east, north] = bbox;
+    let half_x = (east - west) / side as f64 / 2.0;
+    let half_y = (north - south) / side as f64 / 2.0;
+    let centres = [west + half_x, south + half_y, east - half_x, north - half_y];
+    let (polygons, cells) = cell_squares(&visible, centres, |v| v == VIEWSHED_VISIBLE);
+    let (dx, dy) = cell_meters(centres, side, side);
     let features: Vec<Value> = if polygons.is_empty() {
         Vec::new()
     } else {
@@ -171,48 +191,150 @@ async fn flood(
     Ok(Json(json!({ "type": "FeatureCollection", "features": features })).into_response())
 }
 
+struct RasterOp {
+    element: Box<dyn Transform>,
+    color: Box<dyn Fn(f64) -> [u8; 4] + Send>,
+}
+
+fn raster_op(op: &str, params: &TerrainParams, grid: &UtmGrid) -> Result<RasterOp, Refusal> {
+    let (crs, region) = (grid.crs, grid.envelope);
+    Ok(match op {
+        "slope" => RasterOp {
+            element: Box::new(Slope),
+            color: Box::new(slope_color),
+        },
+        "aspect" => RasterOp {
+            element: Box::new(Aspect),
+            color: Box::new(aspect_color),
+        },
+        "hillshade" => RasterOp {
+            element: Box::new(Hillshade::new(
+                params.azimuth.unwrap_or(315.0),
+                params.altitude.unwrap_or(45.0),
+            )),
+            color: Box::new(hillshade_color),
+        },
+        "flow_direction" => RasterOp {
+            element: Box::new(FlowDirection { crs, region }),
+            color: Box::new(flow_direction_color),
+        },
+        "flow_accumulation" => {
+            let cell_area_m2 = grid.cell_size_m * grid.cell_size_m;
+            RasterOp {
+                element: Box::new(FlowAccumulation { crs, region }),
+                color: Box::new(move |area_m2: f64| accumulation_color(area_m2 / cell_area_m2)),
+            }
+        }
+        "watershed" => RasterOp {
+            element: Box::new(Watershed { crs, region }),
+            color: Box::new(category_color),
+        },
+        "stream_order" => {
+            let threshold = match params.threshold {
+                None => region.width() * region.height() * STREAM_THRESHOLD_SHARE_OF_REGION,
+                Some(area_m2) if area_m2.is_finite() && area_m2 > 0.0 => area_m2,
+                Some(area_m2) => {
+                    return Err(bad_request(format!(
+                        "threshold must be a positive area in square metres, got {area_m2}"
+                    )));
+                }
+            };
+            RasterOp {
+                element: Box::new(StreamOrder {
+                    crs,
+                    region,
+                    threshold,
+                }),
+                color: Box::new(category_color),
+            }
+        }
+        other => {
+            return Err(bad_request(format!(
+                "unknown op {other:?}, expected slope, aspect, hillshade, contours, \
+                 flow_direction, flow_accumulation, watershed or stream_order"
+            )));
+        }
+    })
+}
+
 async fn terrain(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TerrainReq>,
 ) -> Result<Response, Refusal> {
     let bbox = checked_bbox(req.bbox)?;
     let side = resolution(req.resolution, DEFAULT_RESOLUTION);
-    let field = state.elevation_sources().field(bbox).await?;
-    let dem = dem_over_bbox(&field, bbox, side, side)?;
-
-    match req.op.as_str() {
-        "slope" => Ok(png_response(raster_png(&slope(&dem), slope_color))),
-        "aspect" => Ok(png_response(aspect_png(&dem))),
-        "hillshade" => {
-            let azimuth = req.params.azimuth.unwrap_or(315.0);
-            let altitude = req.params.altitude.unwrap_or(45.0);
-            let shaded = hillshade(&dem, azimuth, altitude);
-            Ok(png_response(raster_png(&shaded, hillshade_color)))
-        }
-        "contours" => {
-            let interval = req
-                .params
-                .interval
-                .unwrap_or_else(|| default_interval(&dem));
-            Ok(Json(contours_geojson(&dem, bbox, interval)).into_response())
-        }
-        "flow_direction" => Ok(png_response(raster_png(
-            &routed(&dem),
-            flow_direction_color,
-        ))),
-        "flow_accumulation" => Ok(png_response(raster_png(
-            &flow_accumulation(&routed(&dem)),
-            accumulation_color,
-        ))),
-        "watershed" => Ok(png_response(raster_png(
-            &watershed(&routed(&dem)),
-            basin_color,
-        ))),
-        other => Err(bad_request(format!(
-            "unknown op {other:?}, expected slope, aspect, hillshade, contours, \
-             flow_direction, flow_accumulation or watershed"
-        ))),
+    let grid = Utm::at_centre_of(bbox)?.grid(bbox, side)?;
+    if req.op == "contours" {
+        return contour_lines(&state, grid, bbox, side, req.params.interval).await;
     }
+    let RasterOp { element, color } = raster_op(&req.op, &req.params, &grid)?;
+    let built = terrain_engine(&state, grid, move |graph, utm_dem| {
+        onto_lonlat(graph, utm_dem, element, bbox, side)
+    })
+    .await?;
+    covered_utm_dem(&built, &grid, bbox).await?;
+    let band = pulled_onto_lonlat(&built, bbox, side).await?;
+    Ok(png_response(raster_png(&band, color)))
+}
+
+async fn contour_lines(
+    state: &AppState,
+    grid: UtmGrid,
+    bbox: [f64; 4],
+    side: usize,
+    interval: Option<f64>,
+) -> Result<Response, Refusal> {
+    if let Some(interval) = interval
+        && !(interval.is_finite() && interval > 0.0)
+    {
+        return Err(bad_request(format!(
+            "interval must be a positive number of metres, got {interval}"
+        )));
+    }
+    let dem_only = terrain_engine(state, grid, |_, utm_dem| utm_dem).await?;
+    let dem = covered_utm_dem(&dem_only, &grid, bbox).await?;
+    let interval = interval.unwrap_or_else(|| default_interval(&dem));
+    let built = terrain_engine(state, grid, move |graph, utm_dem| {
+        onto_lonlat(
+            graph,
+            utm_dem,
+            Box::new(Contours {
+                interval,
+                base: 0.0,
+            }),
+            bbox,
+            side,
+        )
+    })
+    .await?;
+    let window = lonlat_window(bbox, side);
+    let contours = built
+        .engine
+        .pull(built.output, window)
+        .await
+        .and_then(Chunk::into_vector)
+        .map_err(analysis_failure)?
+        .dissolve()
+        .crop_to(&window.bbox);
+
+    let mut features = Vec::new();
+    for contour in &contours.features {
+        let level = &contour.properties["elevation"];
+        let lines: &[LineString] = match &contour.geometry {
+            FeatureGeometry::LineString(line) => std::slice::from_ref(line),
+            FeatureGeometry::MultiLineString(lines) => lines.linestrings(),
+            other => unreachable!("contours are lines, got {other:?}"),
+        };
+        for line in lines.iter().filter(|line| line.coords().len() >= 2) {
+            let coordinates: Vec<[f64; 2]> = line.coords().iter().map(|c| [c.x, c.y]).collect();
+            features.push(json!({
+                "type": "Feature",
+                "geometry": { "type": "LineString", "coordinates": coordinates },
+                "properties": { "level": level }
+            }));
+        }
+    }
+    Ok(Json(json!({ "type": "FeatureCollection", "features": features })).into_response())
 }
 
 async fn solar(
@@ -253,6 +375,230 @@ fn resolution(requested: Option<usize>, default: usize) -> usize {
     requested.unwrap_or(default).clamp(min, max)
 }
 
+fn no_dem_over(bbox: [f64; 4]) -> ElevationGap {
+    let [west, south, east, north] = bbox;
+    ElevationGap::NoCoverage(format!(
+        "no elevation data staged for this area ({west}, {south}, {east}, {north})"
+    ))
+}
+
+fn analysis_failure(error: geoplumb::Error) -> Refusal {
+    match error {
+        too_large @ geoplumb::Error::RegionTooLarge { .. } => bad_request(too_large.to_string()),
+        geoplumb::Error::Source(detail) => {
+            tracing::warn!("analysis dem read failed: {detail}");
+            (StatusCode::SERVICE_UNAVAILABLE, detail)
+                .into_response()
+                .into()
+        }
+        other => {
+            tracing::warn!("analysis failed: {other}");
+            (StatusCode::INTERNAL_SERVER_ERROR, other.to_string())
+                .into_response()
+                .into()
+        }
+    }
+}
+
+// ── geoplumb graphs ─────────────────────────────────────────────────────────
+
+fn lonlat_window(bbox: [f64; 4], side: usize) -> WindowReq {
+    let [west, south, east, north] = bbox;
+    WindowReq {
+        bbox: Bbox::new(west, south, east, north),
+        // geoplumb pixels are square, so the shorter side keeps a pixel per output cell on both axes
+        resolution: (east - west).min(north - south) / side as f64,
+        time: None,
+    }
+}
+
+struct Utm {
+    crs: Crs,
+    projection: Route,
+}
+
+#[derive(Clone, Copy)]
+struct UtmGrid {
+    crs: Crs,
+    envelope: Bbox,
+    cell_size_m: f64,
+}
+
+impl Utm {
+    fn at_centre_of(bbox: [f64; 4]) -> Result<Utm, Refusal> {
+        let [west, south, east, north] = bbox;
+        let (lon, lat) = ((west + east) / 2.0, (south + north) / 2.0);
+        let zone = (((lon + 180.0) / UTM_ZONE_WIDTH_DEG).floor() as u32 + 1).min(*UTM_ZONES.end());
+        let base = if lat >= 0.0 {
+            UTM_NORTH_EPSG_BASE
+        } else {
+            UTM_SOUTH_EPSG_BASE
+        };
+        let crs = Crs(base + zone);
+        let projection = Transformer::new(CrsDef::Epsg(Crs::WGS84.0), CrsDef::Epsg(crs.0))
+            .route()
+            .map_err(|e| bad_request(format!("no projection from lon/lat into {crs}: {e}")))?;
+        Ok(Utm { crs, projection })
+    }
+
+    fn project(&self, lon: f64, lat: f64) -> Result<(f64, f64), Refusal> {
+        let projected = self
+            .projection
+            .apply(Coord3D {
+                x: lon,
+                y: lat,
+                z: 0.0,
+            })
+            .map_err(|e| {
+                bad_request(format!(
+                    "({lon}, {lat}) does not project into {}: {e}",
+                    self.crs
+                ))
+            })?;
+        Ok((projected.x, projected.y))
+    }
+
+    fn grid(&self, bbox: [f64; 4], side: usize) -> Result<UtmGrid, Refusal> {
+        let [west, south, east, north] = bbox;
+        let mut envelope = Bbox::new(
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for step in 0..=side {
+            let along = step as f64 / side as f64;
+            let lon = west + along * (east - west);
+            let lat = south + along * (north - south);
+            for (edge_lon, edge_lat) in [(lon, south), (lon, north), (west, lat), (east, lat)] {
+                let (x, y) = self.project(edge_lon, edge_lat)?;
+                envelope = Bbox::new(
+                    envelope.min_x.min(x),
+                    envelope.min_y.min(y),
+                    envelope.max_x.max(x),
+                    envelope.max_y.max(y),
+                );
+            }
+        }
+        let (lon, lat) = ((west + east) / 2.0, (south + north) / 2.0);
+        let (centre_x, centre_y) = self.project(lon, lat)?;
+        let longest_side_cell_degrees = (east - west).max(north - south) / side as f64;
+        let (step_x, step_y) = self.project(lon + longest_side_cell_degrees, lat)?;
+        let cell_size_m = (step_x - centre_x).hypot(step_y - centre_y);
+        let cells = (envelope.width() / cell_size_m) * (envelope.height() / cell_size_m);
+        let limit = MAX_UTM_CELLS_PER_OUTPUT_CELL * (side * side) as f64;
+        if !cells.is_finite() || cells > limit {
+            return Err(bad_request(format!(
+                "bbox {bbox:?} spans {cells:.0} cells of {} at resolution {side}, over the {limit:.0} cell limit, \
+                 shrink the box or move it away from the poles",
+                self.crs
+            )));
+        }
+        Ok(UtmGrid {
+            crs: self.crs,
+            envelope,
+            cell_size_m,
+        })
+    }
+}
+
+struct TerrainEngine {
+    engine: Engine,
+    utm_dem: NodeId,
+    output: NodeId,
+}
+
+async fn terrain_engine(
+    state: &AppState,
+    grid: UtmGrid,
+    add_output: impl FnOnce(&mut Graph, NodeId) -> NodeId + Send + 'static,
+) -> Result<TerrainEngine, Refusal> {
+    let source = state.analysis_engines.source.clone();
+    let elevation = state.elevation_sources();
+    tokio::task::spawn_blocking(move || -> geoplumb::Result<TerrainEngine> {
+        let mut graph = Graph::new();
+        let dem = graph.add_source(open_dem(&source, elevation)?);
+        let utm_dem = graph.add_transform(
+            dem,
+            Box::new(Reproject::onto_grid(
+                grid.crs,
+                grid.envelope.min_x,
+                grid.envelope.max_y,
+                grid.cell_size_m,
+            )),
+        );
+        let output = add_output(&mut graph, utm_dem);
+        Ok(TerrainEngine {
+            engine: Engine::new(graph, CHUNK_BUDGET_BYTES)?,
+            utm_dem,
+            output,
+        })
+    })
+    .await
+    .expect("terrain graph build task panicked")
+    .map_err(analysis_failure)
+}
+
+fn onto_lonlat(
+    graph: &mut Graph,
+    utm_dem: NodeId,
+    element: Box<dyn Transform>,
+    bbox: [f64; 4],
+    side: usize,
+) -> NodeId {
+    let window = lonlat_window(bbox, side);
+    let result = graph.add_transform(utm_dem, element);
+    graph.add_transform(
+        result,
+        Box::new(Reproject::onto_grid(
+            Crs::WGS84,
+            window.bbox.min_x,
+            window.bbox.max_y,
+            window.resolution,
+        )),
+    )
+}
+
+async fn covered_utm_dem(
+    built: &TerrainEngine,
+    grid: &UtmGrid,
+    bbox: [f64; 4],
+) -> Result<Raster, Refusal> {
+    let window = WindowReq {
+        bbox: grid.envelope,
+        resolution: grid.cell_size_m,
+        time: None,
+    };
+    let dem = built
+        .engine
+        .pull(built.utm_dem, window)
+        .await
+        .and_then(Chunk::into_raster)
+        .map_err(analysis_failure)?;
+    let band = dem.bands.into_rasters().swap_remove(0);
+    if band.data().iter().all(|v| band.is_nodata(*v)) {
+        return Err(no_dem_over(bbox).into());
+    }
+    Ok(band)
+}
+
+async fn pulled_onto_lonlat(
+    built: &TerrainEngine,
+    bbox: [f64; 4],
+    side: usize,
+) -> Result<Raster, Refusal> {
+    let window = lonlat_window(bbox, side);
+    let pulled = built
+        .engine
+        .pull(built.output, window)
+        .await
+        .and_then(Chunk::into_raster)
+        .map_err(analysis_failure)?;
+    let value_kinds = &built.engine.caps(built.output).raster().value_kinds;
+    let on_grid = resample_to_grid(&pulled, &window.bbox, side, side, value_kinds);
+    Ok(on_grid.bands.into_rasters().swap_remove(0))
+}
+
 // ── DEM sampling ────────────────────────────────────────────────────────────
 
 /// meters per cell in x (lon) and y (lat) for a bbox sampled on a width x height grid.
@@ -265,11 +611,6 @@ fn cell_meters(bbox: [f64; 4], width: usize, height: usize) -> (f64, f64) {
     (dx, dy)
 }
 
-/// Sample the server's elevation into a terrano raster. Row 0 is north, and a
-/// cell no DEM covers is nodata.
-///
-/// A box no DEM covers at all is a gap rather than a raster of holes: every op
-/// here would answer an empty image, which reads as flat ground.
 pub(crate) fn dem_over_bbox(
     field: &ElevationField,
     bbox: [f64; 4],
@@ -292,9 +633,7 @@ pub(crate) fn dem_over_bbox(
         }
     }
     if covered == 0 {
-        return Err(ElevationGap::NoCoverage(format!(
-            "no elevation data staged for this area ({west}, {south}, {east}, {north})"
-        )));
+        return Err(no_dem_over(bbox));
     }
     Ok(Raster::from_vec(width, height, data, (dx + dy) / 2.0, NODATA).expect("grid dims match"))
 }
@@ -304,21 +643,6 @@ fn cell_lonlat(bbox: [f64; 4], width: usize, height: usize, row: usize, col: usi
     let lon = w + (col as f64) * (e - w) / (width - 1).max(1) as f64;
     let lat = n - (row as f64) * (n - s) / (height - 1).max(1) as f64;
     (lon, lat)
-}
-
-/// The cell nearest a point on the grid a bbox is sampled onto, the inverse of
-/// [`cell_lonlat`].
-fn cell_at(bbox: [f64; 4], width: usize, height: usize, lon: f64, lat: f64) -> (usize, usize) {
-    let [w, s, e, n] = bbox;
-    let on_axis = |fraction: f64, cells: usize| {
-        (fraction * (cells - 1).max(1) as f64)
-            .round()
-            .clamp(0.0, (cells - 1) as f64) as usize
-    };
-    (
-        on_axis((n - lat) / (n - s), height),
-        on_axis((lon - w) / (e - w), width),
-    )
 }
 
 /// The box a radius reaches from a point. What it covers past the DEM is
@@ -363,49 +687,11 @@ fn cell_squares<F: Fn(f64) -> bool>(
     (polygons, count)
 }
 
-// ── hydrology ───────────────────────────────────────────────────────────────
-
-/// D8 flow directions over a depression-free copy of the DEM.
-///
-/// A raw DEM's pits swallow every path that reaches them, so accumulation
-/// stops short of the outlet and basins split along the pits.
-fn routed(dem: &Raster) -> Raster {
-    flow_direction(&fill_sinks(dem))
-}
-
 // ── contours ────────────────────────────────────────────────────────────────
 
 fn default_interval(dem: &Raster) -> f64 {
     let (mn, mx) = range(dem);
     ((mx - mn) / 10.0).max(1.0)
-}
-
-fn contours_geojson(dem: &Raster, bbox: [f64; 4], interval: f64) -> Value {
-    let lines = contours(dem, interval, 0.0);
-    let [w, s, e, n] = bbox;
-    let wf = (dem.width() - 1).max(1) as f64;
-    let hf = (dem.height() - 1).max(1) as f64;
-    let features: Vec<Value> = lines
-        .iter()
-        .filter(|l| l.vertices.len() >= 2)
-        .map(|l| {
-            let coords: Vec<[f64; 2]> = l
-                .vertices
-                .iter()
-                .map(|vertex| {
-                    // terrano's cell position is (column, row) counted from the first sample
-                    let (col, row) = vertex.cell_position();
-                    [w + col / wf * (e - w), n - row / hf * (n - s)]
-                })
-                .collect();
-            json!({
-                "type": "Feature",
-                "geometry": { "type": "LineString", "coordinates": coords },
-                "properties": { "level": l.level }
-            })
-        })
-        .collect();
-    json!({ "type": "FeatureCollection", "features": features })
 }
 
 // ── solar (clear-sky insolation model) ──────────────────────────────────────
@@ -511,25 +797,20 @@ fn flow_direction_color(v: f64) -> [u8; 4] {
     [r, g, b, 255]
 }
 
-/// Upstream cell count on a log ramp: a few hundred cells is already a channel,
-/// and a basin outlet is thousands.
-pub fn accumulation_color(v: f64) -> [u8; 4] {
-    let decades = (v.max(0.0) + 1.0).log10() / ACCUMULATION_DECADES;
+pub fn accumulation_color(cells: f64) -> [u8; 4] {
+    let decades = cells.max(1.0).log10() / ACCUMULATION_DECADES;
     let [r, g, b] = ramp(decades.clamp(0.0, 1.0));
     [r, g, b, 255]
 }
 
-/// Basin ids are labels, not magnitudes, so neighbouring ids get distant hues.
-fn basin_color(v: f64) -> [u8; 4] {
+pub fn category_color(v: f64) -> [u8; 4] {
     let [r, g, b] = hsv_to_rgb(v * BASIN_HUE_STEP, 0.75, 0.95);
     [r, g, b, 255]
 }
 
-fn aspect_png(dem: &Raster) -> Vec<u8> {
-    raster_png(&aspect(dem), |v| {
-        let [r, g, b] = hsv_to_rgb(v, 0.9, 1.0);
-        [r, g, b, 255]
-    })
+fn aspect_color(v: f64) -> [u8; 4] {
+    let [r, g, b] = hsv_to_rgb(v, 0.9, 1.0);
+    [r, g, b, 255]
 }
 
 fn solar_png(irr: &Raster) -> Vec<u8> {
@@ -679,138 +960,6 @@ mod tests {
     }
 
     #[test]
-    fn hillshade_png_decodes() {
-        let dem = ramp_dem();
-        let bytes = raster_png(&hillshade(&dem, 315.0, 45.0), hillshade_color);
-        let img = image::load_from_memory(&bytes).expect("valid png");
-        assert_eq!(img.width(), 5);
-        assert_eq!(img.height(), 5);
-    }
-
-    fn cone_dem() -> Raster {
-        // radial cone: peak at centre, so contours are closed loops.
-        let (w, h) = (21usize, 21usize);
-        let (cx, cy) = (10.0, 10.0);
-        let mut data = vec![0.0; w * h];
-        for row in 0..h {
-            for col in 0..w {
-                let d = ((col as f64 - cx).powi(2) + (row as f64 - cy).powi(2)).sqrt();
-                data[row * w + col] = (100.0 - d * 5.0).max(0.0);
-            }
-        }
-        Raster::from_vec(w, h, data, 10.0, NODATA).unwrap()
-    }
-
-    #[test]
-    fn contours_are_ordered_and_closed() {
-        let dem = cone_dem();
-        let fc = contours_geojson(&dem, [0.0, 0.0, 1.0, 1.0], 20.0);
-        let feats = fc["features"].as_array().unwrap();
-        assert!(!feats.is_empty(), "cone should yield contour lines");
-        // at least one contour of a cone is a closed loop (first vertex ~= last)
-        let closed = feats.iter().any(|f| {
-            let c = f["geometry"]["coordinates"].as_array().unwrap();
-            if c.len() < 4 {
-                return false;
-            }
-            let first = &c[0];
-            let last = &c[c.len() - 1];
-            (first[0].as_f64().unwrap() - last[0].as_f64().unwrap()).abs() < 1e-9
-                && (first[1].as_f64().unwrap() - last[1].as_f64().unwrap()).abs() < 1e-9
-        });
-        assert!(closed, "expected at least one closed contour loop");
-    }
-
-    fn positions_at_15_m(dem: &Raster) -> Vec<[f64; 2]> {
-        let fc = contours_geojson(dem, [7.0, 43.0, 8.0, 44.0], 15.0);
-        fc["features"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|f| f["properties"]["level"].as_f64() == Some(15.0))
-            .flat_map(|f| f["geometry"]["coordinates"].as_array().unwrap().clone())
-            .map(|c| [c[0].as_f64().unwrap(), c[1].as_f64().unwrap()])
-            .collect()
-    }
-
-    #[test]
-    fn contour_vertices_land_between_the_samples_they_cross() {
-        // 15 m crosses halfway between the 10 m and 20 m columns, 1.5 of 4 cells east of the west edge
-        let rising_east: Vec<f64> = (0..25).map(|i| (i % 5) as f64 * 10.0).collect();
-        let positions =
-            positions_at_15_m(&Raster::from_vec(5, 5, rising_east, 10.0, NODATA).unwrap());
-        assert!(!positions.is_empty());
-        assert!(
-            positions.iter().all(|[lon, _]| *lon == 7.375),
-            "{positions:?}"
-        );
-
-        // row 0 is the north edge, so ground rising southward crosses 15 m 1.5 cells south of it
-        let rising_south: Vec<f64> = (0..25).map(|i| (i / 5) as f64 * 10.0).collect();
-        let positions =
-            positions_at_15_m(&Raster::from_vec(5, 5, rising_south, 10.0, NODATA).unwrap());
-        assert!(!positions.is_empty());
-        assert!(
-            positions.iter().all(|[_, lat]| *lat == 43.625),
-            "{positions:?}"
-        );
-    }
-
-    /// A wall down the middle column, seen from the west edge.
-    fn walled_dem(side: usize) -> Raster {
-        let mut data = vec![0.0; side * side];
-        for row in 0..side {
-            data[row * side + side / 2] = 400.0;
-        }
-        Raster::from_vec(side, side, data, 100.0, NODATA).unwrap()
-    }
-
-    #[test]
-    fn the_viewshed_leaves_out_what_the_wall_hides() {
-        let side = 21usize;
-        let bbox = [7.0, 43.0, 7.2, 43.2];
-        let dem = walled_dem(side);
-        let observer = cell_lonlat(bbox, side, side, side / 2, 0);
-        let (row, col) = cell_at(bbox, side, side, observer.0, observer.1);
-        assert_eq!((row, col), (side / 2, 0), "the observer lands on its cell");
-
-        let visible = viewshed(&dem, row, col, 2.0, f64::INFINITY);
-        assert_eq!(
-            visible.get(row, 2).unwrap(),
-            VIEWSHED_VISIBLE,
-            "the ground in front of the wall"
-        );
-        assert_eq!(
-            visible.get(row, side - 1).unwrap(),
-            terrano_core::VIEWSHED_HIDDEN,
-            "the ground behind the wall"
-        );
-
-        let (polygons, cells) = cell_squares(&visible, bbox, |v| v == VIEWSHED_VISIBLE);
-        assert_eq!(polygons.len() as u64, cells);
-        // every column up to and including the wall, and nothing past it
-        assert_eq!(cells, ((side / 2 + 1) * side) as u64);
-
-        // flat ground the same size is seen whole
-        let flat = Raster::from_vec(side, side, vec![0.0; side * side], 100.0, NODATA).unwrap();
-        let (_, open) = cell_squares(&viewshed(&flat, row, col, 2.0, f64::INFINITY), bbox, |v| {
-            v == VIEWSHED_VISIBLE
-        });
-        assert_eq!(open, (side * side) as u64);
-    }
-
-    #[test]
-    fn a_cell_lookup_round_trips_through_its_coordinates() {
-        let bbox = [7.0, 43.0, 8.0, 44.5];
-        for (row, col) in [(0usize, 0usize), (5, 9), (15, 15)] {
-            let (lon, lat) = cell_lonlat(bbox, 16, 16, row, col);
-            assert_eq!(cell_at(bbox, 16, 16, lon, lat), (row, col));
-        }
-        // a point outside the box clamps onto the edge cell
-        assert_eq!(cell_at(bbox, 16, 16, 0.0, 0.0), (15, 0));
-    }
-
-    #[test]
     fn the_radius_sets_the_box_it_looks_over() {
         let [west, south, east, north] = square_around(7.0, 43.0, METERS_PER_DEG_LAT);
         assert!((north - 44.0).abs() < 1e-9);
@@ -818,73 +967,6 @@ mod tests {
         // a degree of longitude is shorter this far north, so the box is wider
         assert!(east - west > north - south);
         assert!((east - 7.0 - (7.0 - west)).abs() < 1e-9);
-    }
-
-    /// The valley DEM the hydrology ops are read over: a V draining south.
-    ///
-    /// The walls are steeper than the fall, so a cell on them drains diagonally
-    /// into the channel rather than straight down its own column, and the
-    /// channel gathers what the valley collects.
-    fn valley_dem() -> Raster {
-        let (width, height) = (9usize, 9usize);
-        let mut data = vec![0.0; width * height];
-        for row in 0..height {
-            for col in 0..width {
-                let from_channel = (col as f64 - 4.0).abs();
-                data[row * width + col] = (height - 1 - row) as f64 * 5.0 + from_channel * 20.0;
-            }
-        }
-        Raster::from_vec(width, height, data, 30.0, NODATA).unwrap()
-    }
-
-    #[test]
-    fn flow_accumulates_down_the_channel() {
-        let dem = valley_dem();
-        let accumulation = flow_accumulation(&routed(&dem));
-        let head = accumulation.get(1, 4).unwrap();
-        let mouth = accumulation.get(7, 4).unwrap();
-        assert!(
-            mouth > head,
-            "the channel gathers water downstream: {mouth} vs {head}"
-        );
-        // the channel carries more than the slope beside it
-        assert!(accumulation.get(7, 4).unwrap() > accumulation.get(7, 0).unwrap());
-    }
-
-    #[test]
-    fn flow_directions_point_downhill() {
-        let dem = valley_dem();
-        let directions = routed(&dem);
-        // south is D8 code 4, and row 0 is north
-        assert_eq!(directions.get(2, 4).unwrap(), 4.0);
-    }
-
-    #[test]
-    fn watershed_labels_the_basin() {
-        let dem = valley_dem();
-        let basins = watershed(&routed(&dem));
-        let labels: Vec<f64> = basins
-            .data()
-            .iter()
-            .copied()
-            .filter(|v| !basins.is_nodata(*v) && *v > 0.0)
-            .collect();
-        assert!(!labels.is_empty(), "a valley has at least one basin");
-        assert!(labels.iter().all(|v| *v >= 1.0), "ids start at 1");
-    }
-
-    #[test]
-    fn the_hydrology_ops_render() {
-        let dem = valley_dem();
-        let directions = routed(&dem);
-        for bytes in [
-            raster_png(&directions, flow_direction_color),
-            raster_png(&flow_accumulation(&directions), accumulation_color),
-            raster_png(&watershed(&directions), basin_color),
-        ] {
-            let img = image::load_from_memory(&bytes).expect("valid png");
-            assert_eq!((img.width(), img.height()), (9, 9));
-        }
     }
 
     #[test]
@@ -976,5 +1058,38 @@ mod tests {
         assert_eq!(resolution(None, DEFAULT_RESOLUTION), DEFAULT_RESOLUTION);
         assert_eq!(resolution(Some(0), DEFAULT_RESOLUTION), min);
         assert_eq!(resolution(Some(100_000), DEFAULT_RESOLUTION), max);
+    }
+
+    #[test]
+    fn the_utm_zone_is_the_one_under_the_box_centre() {
+        let zone_of = |bbox: [f64; 4]| {
+            Utm::at_centre_of(bbox)
+                .unwrap_or_else(|_| panic!("{bbox:?} has a utm zone"))
+                .crs
+        };
+        assert_eq!(zone_of([7.0, 46.0, 8.0, 47.0]), Crs(32632));
+        assert_eq!(zone_of([11.9, 46.0, 12.3, 47.0]), Crs(32633));
+        assert_eq!(zone_of([151.0, -34.0, 151.5, -33.5]), Crs(32756));
+        assert_eq!(zone_of([-180.0, 10.0, -179.5, 11.0]), Crs(32601));
+        // a viewshed square around an observer on the antimeridian centres on 180
+        assert_eq!(zone_of([179.5, 10.0, 180.5, 11.0]), Crs(32660));
+    }
+
+    #[tokio::test]
+    async fn a_region_over_the_cap_is_a_bad_request_naming_the_cap() {
+        let response = analysis_failure(geoplumb::Error::RegionTooLarge {
+            pixels: 4_000_000,
+            cap: 1_000_000,
+            resolution: 30.0,
+            finest_resolution: 60.0,
+        })
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let message = String::from_utf8_lossy(&body);
+        assert!(message.contains("1000000 pixel cap"), "{message}");
+        assert!(message.contains("60"), "{message}");
     }
 }

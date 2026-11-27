@@ -57,6 +57,7 @@ fn tiled_gray_tiff() -> Vec<u8> {
         deflate: true,
         nodata: None,
         format: SampleFormat::U8,
+        palette: None,
     };
     let mut file = Cursor::new(Vec::new());
     write_cog_tiles(

@@ -794,7 +794,15 @@ mod tests {
         uri: &str,
         body: serde_json::Value,
     ) -> (StatusCode, Option<String>, Vec<u8>) {
-        let app = router(test_state().await);
+        post_json_with(&test_state().await, uri, body).await
+    }
+
+    async fn post_json_with(
+        state: &Arc<AppState>,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, Option<String>, Vec<u8>) {
+        let app = router(Arc::clone(state));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -973,7 +981,12 @@ mod tests {
 
     #[tokio::test]
     async fn analysis_terrain_serves_the_hydrology_ops() {
-        for op in ["flow_direction", "flow_accumulation", "watershed"] {
+        for op in [
+            "flow_direction",
+            "flow_accumulation",
+            "watershed",
+            "stream_order",
+        ] {
             let (status, ct, bytes) = post_json(
                 "/api/v1/analysis/terrain",
                 serde_json::json!({ "op": op, "bbox": [7.40, 43.72, 7.45, 43.75], "resolution": 48 }),
@@ -983,11 +996,34 @@ mod tests {
             assert_eq!(ct.unwrap(), "image/png", "{op}");
             let img = image::load_from_memory(&bytes).expect("valid png");
             assert_eq!((img.width(), img.height()), (48, 48), "{op}");
-            assert!(distinct_pixels(&img) > 1, "{op} painted one flat colour");
+            if op == "watershed" {
+                assert!(
+                    img.to_rgba8().pixels().all(|p| p.0[3] == 255),
+                    "watershed left a cell of the fixture box, which drains through one south edge cell, without a basin"
+                );
+            } else {
+                assert!(distinct_pixels(&img) > 1, "{op} painted one flat colour");
+            }
         }
+
+        let state = test_state().await;
+        let ridge_lon = (PLANE_BBOX[0] + PLANE_BBOX[2]) / 2.0;
+        let ridge_to_valley_floor = (PLANE_BBOX[2] - PLANE_BBOX[0]) / 4.0;
+        stage_dem_tile(&state, PLANE_TILE, 121, |lat, lon| {
+            let from_valley_floor = ((lon - ridge_lon).abs() - ridge_to_valley_floor).abs();
+            (1000.0 * (lat - PLANE_TILE.0 as f64) + 2000.0 * from_valley_floor) as f32
+        });
+        let img = plane_png(&state, "watershed", serde_json::json!({})).await;
+        let mut basins: Vec<[u8; 4]> = img.pixels().map(|p| p.0).filter(|p| p[3] > 0).collect();
+        basins.sort_unstable();
+        basins.dedup();
+        assert!(
+            basins.len() >= 2,
+            "two valleys either side of a ridge to the south edge painted {} basin colours",
+            basins.len()
+        );
     }
 
-    // nine samples a degree put every sample of a nine cell request on a stored value
     const BOWL_SIDE: usize = 9;
 
     fn bowl_elevation(row: usize, col: usize) -> f32 {
@@ -1041,17 +1077,13 @@ mod tests {
             .expect("valid png")
             .to_rgba8();
 
-        let upstream_cells = (BOWL_SIDE * BOWL_SIDE - 1) as f64;
-        let expected = tiletopia_server::analysis::accumulation_color(upstream_cells);
-        assert_ne!(
-            expected,
-            tiletopia_server::analysis::accumulation_color(upstream_cells - 1.0),
-            "the ramp tells {upstream_cells} cells apart from one fewer"
-        );
-        let outlet = img.get_pixel(BOWL_SIDE as u32 / 2, BOWL_SIDE as u32 - 1).0;
-        assert_eq!(
-            outlet, expected,
-            "every other cell drains through the filled bowl to the outlet"
+        let red = |cells: f64| tiletopia_server::analysis::accumulation_color(cells)[0];
+        let (bbox_red, region_red) = (red(117.0), red(140.0));
+        let outlet_red = img.get_pixel(BOWL_SIDE as u32 / 2, BOWL_SIDE as u32 - 1).0[0];
+        assert!(
+            (bbox_red..=region_red).contains(&outlet_red),
+            "outlet red {outlet_red}, expected from {bbox_red} for the bbox's 117 utm cells \
+             to {region_red} for the region's 140, since the filled bowl drains through the outlet"
         );
     }
 
@@ -1065,6 +1097,194 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let message = String::from_utf8_lossy(&bytes);
         assert!(message.contains("flow_accumulation"), "{message}");
+    }
+
+    fn stage_dem_tile(
+        state: &AppState,
+        (lat, lon): (i32, i32),
+        samples: usize,
+        elevation: impl Fn(f64, f64) -> f32,
+    ) {
+        let last = (samples - 1) as f64;
+        let mut staged = Vec::with_capacity(samples * samples * 4);
+        // staged dem tiles hold their rows south first, with samples on both edges of the degree
+        for row in 0..samples {
+            for col in 0..samples {
+                let sample = elevation(
+                    lat as f64 + row as f64 / last,
+                    lon as f64 + col as f64 / last,
+                );
+                staged.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+        std::fs::write(state.data_dir.join(format!("dem/{lat}_{lon}.bin")), staged).unwrap();
+    }
+
+    // utm zone 32's central meridian is 9 degrees east, where its grid runs true north
+    const PLANE_TILE: (i32, i32) = (46, 9);
+    // 0.14 degrees of latitude is about 0.2 degrees of longitude on the ground at 46.5 degrees north
+    const PLANE_BBOX: [f64; 4] = [9.0, 46.43, 9.2, 46.57];
+    const PLANE_SIDE: u32 = 32;
+
+    async fn state_with_a_plane_falling_south() -> Arc<AppState> {
+        let state = test_state().await;
+        stage_dem_tile(&state, PLANE_TILE, 121, |lat, _| {
+            1000.0 * (lat - PLANE_TILE.0 as f64) as f32
+        });
+        state
+    }
+
+    async fn plane_png(
+        state: &Arc<AppState>,
+        op: &str,
+        params: serde_json::Value,
+    ) -> image::RgbaImage {
+        let (status, _, bytes) = post_json_with(
+            state,
+            "/api/v1/analysis/terrain",
+            serde_json::json!({
+                "op": op,
+                "bbox": PLANE_BBOX,
+                "resolution": PLANE_SIDE,
+                "params": params,
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let img = image::load_from_memory(&bytes)
+            .expect("valid png")
+            .to_rgba8();
+        assert_eq!(img.dimensions(), (PLANE_SIDE, PLANE_SIDE));
+        img
+    }
+
+    #[tokio::test]
+    async fn analysis_flow_accumulation_counts_the_cells_a_plane_drains() {
+        let state = state_with_a_plane_falling_south().await;
+        let img = plane_png(&state, "flow_accumulation", serde_json::json!({})).await;
+        let middle = PLANE_SIDE / 2;
+        // the ramp's green climbs from 1 to 100 cells
+        let green = |cells: f64| tiletopia_server::analysis::accumulation_color(cells)[1];
+        let top = img.get_pixel(middle, 0).0[1];
+        // terrano routes the south border row along the edge, as pysheds does
+        let above_the_border_row = img.get_pixel(middle, PLANE_SIDE - 2).0[1];
+        assert!(top < green(4.0), "top green {top}");
+        // the box is as tall on the ground as it is wide
+        assert!(
+            (green(24.0)..=green(44.0)).contains(&above_the_border_row),
+            "green above the border row {above_the_border_row}, expected {}..={}",
+            green(24.0),
+            green(44.0)
+        );
+        let column: Vec<u8> = (0..PLANE_SIDE)
+            .map(|row| img.get_pixel(middle, row).0[1])
+            .collect();
+        assert!(
+            column.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{column:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn analysis_stream_order_takes_its_threshold_as_an_area() {
+        let state = state_with_a_plane_falling_south().await;
+        let first_order = tiletopia_server::analysis::category_color(1.0);
+
+        let img = plane_png(&state, "stream_order", serde_json::json!({})).await;
+        let opaque: Vec<[u8; 4]> = img.pixels().map(|p| p.0).filter(|p| p[3] > 0).collect();
+        assert!(!opaque.is_empty(), "the default threshold leaves streams");
+        assert!(
+            opaque.len() < (PLANE_SIDE * PLANE_SIDE) as usize,
+            "and ground off them"
+        );
+        // parallel columns never merge, so every stream is first order
+        assert!(opaque.iter().all(|p| *p == first_order));
+
+        let img = plane_png(
+            &state,
+            "stream_order",
+            serde_json::json!({ "threshold": 1e12 }),
+        )
+        .await;
+        assert!(
+            img.pixels().all(|p| p.0[3] == 0),
+            "no cell drains a million square kilometres"
+        );
+
+        let (status, _, _) = post_json_with(
+            &state,
+            "/api/v1/analysis/terrain",
+            serde_json::json!({
+                "op": "stream_order",
+                "bbox": PLANE_BBOX,
+                "params": { "threshold": -1.0 },
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn analysis_viewshed_squares_sit_around_the_observer() {
+        let (observer, radius_m, side) = ([7.42_f64, 43.73], 1000.0, 64usize);
+        let (status, _, bytes) = post_json(
+            "/api/v1/analysis/viewshed",
+            serde_json::json!({ "observer": observer, "height_m": 2.0, "radius_m": radius_m, "resolution": side }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let feature = &v["features"][0];
+        let squares = feature["geometry"]["coordinates"].as_array().unwrap();
+        let metres_per_lon =
+            tiletopia_server::elevation::METERS_PER_DEG_LAT * observer[1].to_radians().cos();
+        let cell_m = 2.0 * radius_m / side as f64;
+        let mut holds_the_observer = false;
+        for square in squares {
+            let ring = square[0].as_array().unwrap();
+            let corner = |i: usize| [ring[i][0].as_f64().unwrap(), ring[i][1].as_f64().unwrap()];
+            let ([west, south], [east, north]) = (corner(0), corner(2));
+            let east_m = ((west + east) / 2.0 - observer[0]) * metres_per_lon;
+            let north_m = ((south + north) / 2.0 - observer[1])
+                * tiletopia_server::elevation::METERS_PER_DEG_LAT;
+            assert!(
+                east_m.hypot(north_m) <= radius_m + cell_m * std::f64::consts::SQRT_2,
+                "a visible cell {} m from the observer",
+                east_m.hypot(north_m)
+            );
+            holds_the_observer |=
+                (west..=east).contains(&observer[0]) && (south..=north).contains(&observer[1]);
+        }
+        assert!(
+            holds_the_observer,
+            "the observer sees the ground it stands on"
+        );
+        let cells = feature["properties"]["visible_cells"].as_f64().unwrap();
+        let area = feature["properties"]["visible_area_m2"].as_f64().unwrap();
+        assert!(
+            (area - cells * cell_m * cell_m).abs() < 1e-6 * area,
+            "{area} m2 over {cells} cells of {cell_m} m"
+        );
+    }
+
+    #[tokio::test]
+    async fn analysis_terrain_refuses_a_box_utm_cannot_hold() {
+        let (status, _, bytes) = post_json(
+            "/api/v1/analysis/terrain",
+            serde_json::json!({ "op": "slope", "bbox": [0.0, 89.0, 1.0, 89.99] }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
     }
 
     #[tokio::test]
@@ -1093,7 +1313,20 @@ mod tests {
         assert_eq!(v["type"], "FeatureCollection");
         let feats = v["features"].as_array().unwrap();
         assert!(!feats.is_empty());
-        assert_eq!(feats[0]["geometry"]["type"], "LineString");
+        for feature in feats {
+            assert_eq!(feature["geometry"]["type"], "LineString");
+            assert!(feature["properties"]["level"].is_number(), "{feature}");
+            for point in feature["geometry"]["coordinates"].as_array().unwrap() {
+                let (lon, lat) = (point[0].as_f64().unwrap(), point[1].as_f64().unwrap());
+                // clipped endpoints on the box edge are computed in floating point
+                let inside =
+                    |value: f64, low: f64, high: f64| (low - 1e-9..=high + 1e-9).contains(&value);
+                assert!(
+                    inside(lon, 7.40, 7.45) && inside(lat, 43.72, 43.75),
+                    "({lon}, {lat}) lies outside the box"
+                );
+            }
+        }
     }
 
     #[tokio::test]

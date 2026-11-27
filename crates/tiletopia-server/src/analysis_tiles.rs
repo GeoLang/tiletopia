@@ -46,19 +46,21 @@ use axum::{
 };
 use futures::future::BoxFuture;
 use geoplumb::caps::{
-    BandKinds, CapsPattern, CapsSet, Constraint, Crs, Dtype, RasterPattern, ResRange, SetField,
-    ValueKind,
+    BandDtypes, BandKinds, CapsPattern, CapsSet, Constraint, Crs, Dtype, RasterPattern, ResRange,
+    SetField, ValueKind,
 };
 use geoplumb::chunk::{Chunk, RasterChunk};
 use geoplumb::element::{Source, Transform};
-use geoplumb::elements::{BandMath, Composite, Hillshade, Reproject, Slope, StacSearch, StacSrc};
+use geoplumb::elements::{
+    BandMath, Composite, Hillshade, ItemMask, Reproject, Slope, StacSearch, StacSrc,
+};
 use geoplumb::export::{COG_TILE_PX, ExportGrid, write_cog};
 use geoplumb::tile::{XyzTile, render_tile};
 use geoplumb::window::{GridSpec, WindowReq};
-use geoplumb::{Engine, Graph, NodeId};
+use geoplumb::{Engine, Graph, NodeId, RasterBands};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use terrano_core::{BandedRaster, Raster};
+use terrano_core::Raster;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::time::timeout;
 use tokio_util::io::ReaderStream;
@@ -104,6 +106,9 @@ const STAC_ASSET: &str = "data";
 /// Sentinel-2 L2A surface reflectance, one COG per band.
 const S2_COLLECTION: &str = "sentinel-2-l2a";
 const S2_ASSETS: [&str; 2] = ["red", "nir"];
+const S2_SCENE_CLASSIFICATION_ASSET: &str = "scl";
+// sentinel-2 scene classification codes 4, 5 and 6 are vegetation, bare soil and water
+const S2_CLEAR_GROUND_CLASSES: [f64; 3] = [4.0, 5.0, 6.0];
 
 /// How far behind now the ndvi composite reaches. Sentinel-2 revisits every
 /// five days, so a month holds enough items for the median to shed clouds.
@@ -206,9 +211,8 @@ impl EngineKey {
     }
 }
 
-/// Where the analysis engines read elevation.
 #[derive(Debug, Clone, PartialEq)]
-enum SourceConfig {
+pub(crate) enum SourceConfig {
     /// The server's own DEM: loaded grids, the staged one-degree files, then
     /// the SRTM cache. Nodata where none of them covers the window.
     Staged,
@@ -221,7 +225,7 @@ enum SourceConfig {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct StacConfig {
+pub(crate) struct StacConfig {
     api: String,
     bbox: [f64; 4],
 }
@@ -235,16 +239,16 @@ impl StacConfig {
         StacSearch::new(&self.api, STAC_COLLECTION, STAC_ASSET, self.bbox)
     }
 
-    /// Sentinel-2 red and nir over the same anchor bbox, every item of the
-    /// last month reduced to a per-pixel median, so clouds and swath edges
-    /// fall out of the stack. The window anchors on `now` at engine build
-    /// and holds until the server restarts, like everything a source reads.
     fn ndvi_search(&self, now: chrono::DateTime<chrono::Utc>) -> StacSearch {
         let start = now - chrono::Duration::days(NDVI_WINDOW_DAYS);
         let mut search = StacSearch::new(&self.api, S2_COLLECTION, S2_ASSETS[0], self.bbox);
         search.assets = S2_ASSETS.iter().map(|a| a.to_string()).collect();
         search.datetime = Some(format!("{}/..", start.format("%Y-%m-%dT%H:%M:%SZ")));
         search.composite = Composite::Median;
+        search.item_mask = Some(ItemMask {
+            asset: S2_SCENE_CLASSIFICATION_ASSET.into(),
+            valid_values: S2_CLEAR_GROUND_CLASSES.to_vec(),
+        });
         search
     }
 }
@@ -314,7 +318,7 @@ fn parse_bbox(raw: &str, label: &str) -> Result<[f64; 4], String> {
 /// so engines are kept and shared rather than rebuilt per request.
 pub struct AnalysisEngines {
     built: Mutex<Vec<(EngineKey, Arc<Engine>, NodeId)>>,
-    source: SourceConfig,
+    pub(crate) source: SourceConfig,
     render_slots: Semaphore,
     render_wait: Duration,
 }
@@ -400,12 +404,18 @@ fn find(
         .map(|(_, engine, node)| (Arc::clone(engine), *node))
 }
 
-/// Terrain ops run source -> reprojection -> op: the kernels read their cell
-/// size off the raster they are handed, so they have to run on the metric grid
-/// rather than on degrees. A web mercator metre is stretched by 1/cos(latitude),
-/// so a slope tile reads shallower than the one-shot endpoint, which samples in
-/// ground metres. NDVI is per pixel and indifferent to the grid, so it computes
-/// before the reprojection, on one band instead of two.
+pub(crate) fn open_dem(
+    source: &SourceConfig,
+    elevation: ElevationSources,
+) -> geoplumb::Result<Box<dyn Source>> {
+    match source {
+        SourceConfig::Misconfigured(detail) => Err(geoplumb::Error::Source(detail.clone())),
+        // StacSrc::open blocks on a search of the stac api
+        SourceConfig::Stac(cfg) => Ok(Box::new(StacSrc::open(&cfg.dem_search())?)),
+        SourceConfig::Staged => Ok(Box::new(DemSource::new(elevation))),
+    }
+}
+
 fn build_engine(
     key: EngineKey,
     source: &SourceConfig,
@@ -430,11 +440,7 @@ fn build_engine(
             graph.add_transform(ndvi, Box::new(Reproject::new(Crs::WEB_MERCATOR)))
         }
         Op::Hillshade | Op::Slope => {
-            let terrain: Box<dyn Source> = match source {
-                SourceConfig::Stac(cfg) => Box::new(StacSrc::open(&cfg.dem_search())?),
-                _ => Box::new(DemSource::new(elevation)),
-            };
-            let dem = graph.add_source(terrain);
+            let dem = graph.add_source(open_dem(source, elevation)?);
             let merc = graph.add_transform(dem, Box::new(Reproject::new(Crs::WEB_MERCATOR)));
             let element: Box<dyn Transform> = match key.op {
                 Op::Hillshade => Box::new(Hillshade::new(
@@ -637,7 +643,7 @@ fn tile_png(chunk: &RasterChunk, op: Op) -> Option<Vec<u8>> {
         Op::Slope => analysis::slope_color,
         Op::Ndvi => ndvi_color,
     };
-    Some(analysis::raster_png(band, color))
+    Some(analysis::raster_png(&band.to_raster(), color))
 }
 
 /// NDVI over the usual diverging ramp: -1 reads as bare brown, zero as tan,
@@ -704,7 +710,7 @@ impl DemSource {
         }
         let band = Raster::from_vec(cols, rows, data, res, f64::NAN).expect("sample dims");
         RasterChunk {
-            bands: BandedRaster::new(vec![band]).expect("one band"),
+            bands: RasterBands::from_rasters(vec![band]).expect("one band"),
             bbox: req.bbox,
             resolution: res,
             crs: Crs::WGS84,
@@ -749,7 +755,7 @@ impl Source for DemSource {
 
     fn constraint(&self) -> Constraint {
         Constraint::Produces(CapsSet::one(CapsPattern::Raster(RasterPattern {
-            dtype: SetField::one(Dtype::F64),
+            dtypes: SetField::one(BandDtypes::from(Dtype::F64)),
             bands: SetField::one(1),
             crs: SetField::one(Crs::WGS84),
             resolution: ResRange::at_least(self.base_resolution),
@@ -851,7 +857,7 @@ mod tests {
         let chunk = src.read(&req).await.unwrap().into_raster().unwrap();
         assert_eq!(chunk.width(), 40);
         assert_eq!(chunk.height(), 20);
-        let band = chunk.bands.band(0).unwrap();
+        let band = chunk.bands.band(0).unwrap().to_raster();
         assert!(band.data().iter().all(|v| v.is_finite()));
     }
 
@@ -866,7 +872,7 @@ mod tests {
             time: None,
         };
         let chunk = src.read(&req).await.unwrap().into_raster().unwrap();
-        let band = chunk.bands.band(0).unwrap();
+        let band = chunk.bands.band(0).unwrap().to_raster();
         assert_eq!(band.data().len(), 800);
         assert!(band.data().iter().all(|v| v.is_nan()));
     }
@@ -947,10 +953,8 @@ mod tests {
         assert_eq!(search.bbox, [7.0, 46.3, 8.0, 46.9]);
     }
 
-    /// The ndvi graph reads red and nir cogs as one two-band raster reduced
-    /// to a trailing median, so the composite sheds clouds at the source.
     #[test]
-    fn the_ndvi_search_names_both_bands_and_a_trailing_median() {
+    fn the_ndvi_search_takes_a_trailing_median_of_clear_pixels() {
         let Ok(SourceConfig::Stac(cfg)) = source_config(Some("7,46,8,47"), None) else {
             panic!("expected a stac source");
         };
@@ -962,6 +966,13 @@ mod tests {
         assert_eq!(search.assets, vec!["red".to_string(), "nir".to_string()]);
         assert_eq!(search.datetime.as_deref(), Some("2026-07-05T12:30:00Z/.."));
         assert_eq!(search.composite, Composite::Median);
+        assert_eq!(
+            search.item_mask,
+            Some(ItemMask {
+                asset: "scl".into(),
+                valid_values: vec![4.0, 5.0, 6.0],
+            })
+        );
         assert_eq!(search.bbox, [7.0, 46.0, 8.0, 47.0]);
     }
 

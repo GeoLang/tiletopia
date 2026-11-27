@@ -2161,7 +2161,7 @@ checksum = "8dba84198cf199c11b83f1cb9243eaeb70dc50b719d2835ebf34bf2481bca010"
 [[package]]
 name = "geoplumb"
 version = "0.1.0"
-source = "git+https://github.com/GeoLang/geoplumb.git?branch=master#2621d07136f8d8116f61d7ab2e2375e7883124cd"
+source = "git+https://github.com/GeoLang/geoplumb.git?branch=master#b979630fae4dc9751489edd763e7f98ce2e76b31"
 dependencies = [
  "copc-core",
  "copc-reader",
@@ -6373,7 +6373,7 @@ dependencies = [
 [[package]]
 name = "terrano-core"
 version = "0.3.0"
-source = "git+https://github.com/GeoLang/terrano.git?branch=master#f21d72d8534b9e30c306f3b96a54e814950929fe"
+source = "git+https://github.com/GeoLang/terrano.git?branch=master#f791f7d17419dcb0c863726617bb8ab0f3aff39a"
 dependencies = [
  "flate2",
  "thiserror 2.0.20",

@@ -57,6 +57,7 @@ fn float_cog(
         deflate: true,
         nodata: None,
         format: SampleFormat::F32,
+        palette: None,
     };
     let mut bytes = Vec::new();
     write_cog(&raster, &params, &mut bytes).unwrap();

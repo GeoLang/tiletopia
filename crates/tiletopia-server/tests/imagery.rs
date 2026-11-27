@@ -909,6 +909,7 @@ async fn a_float_cog_with_nan_nodata_is_served_as_is() {
         deflate: true,
         nodata: Some(f64::NAN),
         format: SampleFormat::F32,
+        palette: None,
     };
     let mut file = Cursor::new(Vec::new());
     write_cog_bands(
