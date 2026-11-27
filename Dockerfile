@@ -61,7 +61,7 @@ RUN cmake -S /usr/src/grok -B /usr/src/grok/build \
 FROM rust:bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cmake g++ make libclang-dev pkg-config \
+    cmake g++ make libclang-dev nasm pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=grok /opt/grok /opt/grok

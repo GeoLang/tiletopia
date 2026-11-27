@@ -16,6 +16,8 @@ use tower::ServiceExt;
 
 const GDAL_COG: &[u8] = include_bytes!("fixtures/imagery_rgb_gdal_cog.tif");
 const GDAL_MASKED_COG: &[u8] = include_bytes!("fixtures/imagery_gray_mask_gdal_cog.tif");
+// gdal_translate -of COG -co COMPRESS=JPEG -co QUALITY=90 of imagery_rgb_gdal_cog.tif, stored as YCbCr
+const GDAL_JPEG_COG: &[u8] = include_bytes!("fixtures/imagery_rgb_gdal_jpeg_cog.tif");
 
 const RED: [u8; 3] = [200, 10, 10];
 const GREEN: [u8; 3] = [10, 200, 10];
@@ -242,6 +244,38 @@ async fn a_gdal_cog_upload_serves_correct_pixels_to_an_anonymous_client() {
     assert_eq!(pixel_at(&state, &id, 7.1, 46.9, 6).await, opaque(RED));
 
     assert!(!state.data_dir.join(&id).join("imagery/source.tif").exists());
+}
+
+#[tokio::test]
+async fn a_gdal_ycbcr_jpeg_cog_is_served_in_place_as_rgb() {
+    let state = test_state().await;
+    let asset = upload_created(
+        &state,
+        &[("file", Some("ortho.tif"), GDAL_JPEG_COG.to_vec())],
+    )
+    .await;
+    assert_eq!(asset["asset_type"], "imagery");
+    let id = asset_id(&asset);
+    assert!(!state.data_dir.join(&id).join("imagery/source.tif").exists());
+
+    // jpeg at quality 90 keeps flat quadrant centres within a few levels of their colour
+    let close = |got: [u8; 4], want: [u8; 3]| {
+        got[3] == 255 && got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 8)
+    };
+    for z in [9, 12] {
+        for (lon, lat, color) in [
+            (7.1, 46.9, RED),
+            (7.4, 46.9, GREEN),
+            (7.1, 46.6, BLUE),
+            (7.4, 46.6, WHITE),
+        ] {
+            let got = pixel_at(&state, &id, lon, lat, z).await;
+            assert!(
+                close(got, color),
+                "z{z} {lon},{lat}: {got:?} against {color:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -583,7 +617,7 @@ async fn a_utm_tiff_reprojects_onto_web_mercator() {
     assert_eq!(asset["asset_type"], "imagery");
     let id = asset_id(&asset);
 
-    assert!(state.data_dir.join(&id).join("imagery/source.tif").exists());
+    assert!(!state.data_dir.join(&id).join("imagery/source.tif").exists());
     for z in [8, 11] {
         assert_eq!(
             pixel_at(&state, &id, 8.9, 45.1, z).await,

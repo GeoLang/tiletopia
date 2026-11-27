@@ -67,6 +67,9 @@ const TIFF_JPEG_COMPRESSION: u16 = 7;
 // TIFF Photometric values terrano's samples mean as they stand: min-is-black and rgb
 const DIRECT_PHOTOMETRICS: [u16; 2] = [1, 2];
 
+// terrano's CogReader decodes YCbCr JPEG blocks to rgb, and leaves raw YCbCr samples as they are
+const TIFF_YCBCR_PHOTOMETRIC: u16 = 6;
+
 const MODEL_TRANSFORMATION_TAG: u16 = 34264;
 
 // the web mercator square's edge projects to 180.00000000000003 degrees
@@ -624,22 +627,23 @@ fn prepare_geotiff(
     }
 
     if has_internal_mask(input_path)? {
-        return Err(
-            "this TIFF has an internal transparency mask, which is applied only to a tiled, deflate, \
-             lzw or uncompressed COG with overviews: make it one with \
+        return Err(format!(
+            "this TIFF has an internal transparency mask, which is applied only to a file served \
+             as it is, one whose tiles or strips and some overview are at most \
+             {MAX_DIRECT_READ_SIDE} pixels a side: make it one with \
              gdal_translate -of COG -co COMPRESS=DEFLATE, or make the mask an alpha band with \
              -b 1 -b 2 -b 3 -b mask -colorinterp red,green,blue,alpha"
-                .into(),
-        );
+        ));
     }
     let decoded = decode_tiff(input_path, asset_dir, tags, format)?;
     write_source_cog(asset_dir, decoded, georeference, bands)
 }
 
 fn serves_as_is(input_path: &FilePath, tags: &TiffTags, georeference: &Georeference) -> bool {
-    if !DIRECT_PHOTOMETRICS.contains(&tags.photometric)
-        || !georeference.grid.has_square_pixels(tags.cols, tags.rows)
-    {
+    let decodes_to_rgb =
+        tags.photometric == TIFF_YCBCR_PHOTOMETRIC && tags.compression == TIFF_JPEG_COMPRESSION;
+    let samples_stand = DIRECT_PHOTOMETRICS.contains(&tags.photometric) || decodes_to_rgb;
+    if !samples_stand || !georeference.grid.has_square_pixels(tags.cols, tags.rows) {
         return false;
     }
     let Ok(file) = File::open(input_path) else {
@@ -671,8 +675,9 @@ fn check_decoded_size(cols: usize, rows: usize, pixel_bytes: usize) -> Result<()
     if cols.max(rows) > MAX_SIDE || decoded_bytes > MAX_DECODED_BYTES {
         return Err(format!(
             "{cols} x {rows} pixels of {pixel_bytes} bytes is past the limit of {MAX_SIDE} pixels \
-             a side and {MAX_DECODED_BYTES} decoded bytes for a file that is not a tiled, deflate, \
-             lzw or uncompressed COG with overviews: convert it with \
+             a side and {MAX_DECODED_BYTES} decoded bytes for a file not served as it is, one whose \
+             tiles or strips or every overview are past {MAX_DIRECT_READ_SIDE} pixels a side: \
+             convert it with \
              gdal_translate -of COG -co COMPRESS=DEFLATE"
         ));
     }
