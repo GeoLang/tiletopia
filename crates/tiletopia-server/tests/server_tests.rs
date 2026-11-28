@@ -1502,7 +1502,7 @@ mod tests {
             .to_vec();
 
         let reader = terrano_core::CogReader::open(&bytes[..]).expect("valid cog");
-        assert_eq!(reader.meta().epsg, 3857);
+        assert_eq!(reader.meta().geo_keys.epsg(), Some(3857));
         assert_eq!(reader.meta().pixel_width, 200.0);
         assert_eq!(reader.meta().pixel_height, 200.0);
         // 0.02 x 0.01 degrees at 43.5N is 2226 x 1535 mercator meters, so 200

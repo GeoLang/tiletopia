@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode, Uri, header};
 use common::decode_tile;
-use terrano_core::{CogParams, Raster, SampleFormat, write_cog};
+use terrano_core::{CogParams, GeoKeyDirectory, Raster, SampleFormat, write_cog};
 use tiletopia_core::spatial::geodetic_to_ecef;
 use tiletopia_server::global_terrain::{GlobalTerrain, GlobalTerrainSettings};
 use tiletopia_server::osm_buildings::{OsmBuildings, OsmBuildingsSettings};
@@ -49,7 +49,7 @@ fn float_cog(
         tile_width: 128,
         tile_height: 128,
         overview_levels,
-        epsg: 4326,
+        geo_keys: GeoKeyDirectory::geographic(4326),
         origin_x: origin.0,
         origin_y: origin.1,
         pixel_width: pixel,

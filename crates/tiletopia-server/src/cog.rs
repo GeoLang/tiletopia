@@ -284,6 +284,10 @@ fn open_source(id: &str, href: &str) -> Result<RegisteredCog, CogError> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .ok_or_else(|| open_failed("no Content-Range was seen".to_string()))?;
+    let epsg = meta
+        .geo_keys
+        .epsg()
+        .ok_or_else(|| open_failed("the GeoTIFF has no EPSG CRS geokey".to_string()))?;
 
     let full = &levels[0];
     let dataset = CogDataset {
@@ -293,7 +297,7 @@ fn open_source(id: &str, href: &str) -> Result<RegisteredCog, CogError> {
         width: full.width as u32,
         height: full.height as u32,
         band_count: full.samples,
-        crs: format!("EPSG:{}", meta.epsg),
+        crs: format!("EPSG:{epsg}"),
         bounds: [
             meta.origin_x,
             meta.origin_y - full.height as f64 * meta.pixel_height,
@@ -429,7 +433,7 @@ fn content_range_total(header: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use terrano_core::{CogParams, Raster, SampleFormat, write_cog};
+    use terrano_core::{CogParams, GeoKeyDirectory, Raster, SampleFormat, write_cog};
 
     /// A 96-square ramp written as a real deflate COG with 32-pixel internal
     /// tiles and two overviews, so a window read has tiles to pick between.
@@ -441,7 +445,7 @@ mod tests {
             tile_width: 32,
             tile_height: 32,
             overview_levels: 2,
-            epsg: 32610,
+            geo_keys: GeoKeyDirectory::projected(32610),
             origin_x: 500_000.0,
             origin_y: 4_180_000.0,
             pixel_width: 10.0,

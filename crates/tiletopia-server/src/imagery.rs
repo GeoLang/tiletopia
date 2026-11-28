@@ -1246,8 +1246,9 @@ fn write_source_cog(
     bands: BandLayout,
 ) -> Result<(), String> {
     let (decoded, grid) = onto_square_pixels(asset_dir, decoded, georeference.grid)?;
-    let epsg = u16::try_from(georeference.epsg)
-        .map_err(|_| format!("EPSG:{} does not fit a GeoTIFF key", georeference.epsg))?;
+    let geo_keys = Crs(georeference.epsg)
+        .geo_keys()
+        .map_err(|e| e.to_string())?;
     let DecodedRaster {
         scratch,
         samples,
@@ -1270,7 +1271,7 @@ fn write_source_cog(
         tile_width: COG_TILE_SIDE as u32,
         tile_height: COG_TILE_SIDE as u32,
         overview_levels,
-        epsg,
+        geo_keys,
         origin_x: grid.origin_x,
         origin_y: grid.origin_y,
         pixel_width: grid.pixel_width,

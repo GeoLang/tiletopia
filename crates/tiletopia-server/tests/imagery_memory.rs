@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{test_state, token};
-use terrano_core::{CogParams, CogReader, SampleFormat, write_cog_tiles};
+use terrano_core::{CogParams, CogReader, GeoKeyDirectory, SampleFormat, write_cog_tiles};
 use tiletopia_server::{AppState, router};
 use tower::ServiceExt;
 
@@ -49,7 +49,7 @@ fn tiled_gray_tiff() -> Vec<u8> {
         tile_width: TILE_SIDE as u32,
         tile_height: TILE_SIDE as u32,
         overview_levels: 0,
-        epsg: 4326,
+        geo_keys: GeoKeyDirectory::geographic(4326),
         origin_x: 7.0,
         origin_y: 47.0,
         pixel_width: 0.0001,

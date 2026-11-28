@@ -6,7 +6,9 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{test_state, token};
-use terrano_core::{BandedRaster, CogParams, Raster, SampleFormat, write_cog_bands};
+use terrano_core::{
+    BandedRaster, CogParams, GeoKeyDirectory, Raster, SampleFormat, write_cog_bands,
+};
 use tiff::encoder::colortype::{ColorType, Gray8, Gray16, RGB8, RGBA8};
 use tiff::encoder::compression::Lzw;
 use tiff::encoder::{TiffEncoder, TiffValue};
@@ -935,7 +937,7 @@ async fn a_float_cog_with_nan_nodata_is_served_as_is() {
         tile_width: 128,
         tile_height: 128,
         overview_levels: 2,
-        epsg: 4326,
+        geo_keys: GeoKeyDirectory::geographic(4326),
         origin_x: 7.0,
         origin_y: 47.0,
         pixel_width: 0.001,
